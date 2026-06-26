@@ -21,6 +21,9 @@ const horizon = new Horizon.Server('https://horizon-testnet.stellar.org');
 
 const merchant = Keypair.fromSecret(accounts.merchant.secret);
 const consumer = Keypair.fromSecret(accounts.consumer.secret);
+const creator = Keypair.fromSecret(accounts.creator.secret);
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function post(path: string, body: unknown): Promise<any> {
   const res = await fetch(`${API}${path}`, {
@@ -31,6 +34,24 @@ async function post(path: string, body: unknown): Promise<any> {
   const json = await res.json();
   if (!res.ok) throw new Error(`${path} -> ${res.status} ${JSON.stringify(json)}`);
   return json;
+}
+
+/**
+ * Build endpoints simulate against Soroban RPC, whose state can lag a just-
+ * settled tx (read-after-write). A freshly created listing/offer can momentarily
+ * read as NotFound (contract error #3); retry a few times before giving up.
+ */
+async function postWithRetry(path: string, body: unknown, tries = 6): Promise<any> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await post(path, body);
+    } catch (err) {
+      const msg = String(err);
+      const transient = msg.includes('Error(Contract, #3)') || msg.includes('NOT_CONFIRMED');
+      if (!transient || i === tries - 1) throw err;
+      await sleep(2000 * (i + 1));
+    }
+  }
 }
 
 async function get(path: string): Promise<any> {
@@ -51,10 +72,32 @@ async function action(
   signer: Keypair,
   submitAction: string,
 ): Promise<{ refId: string; hash: string }> {
-  const built = await post(buildPath, body);
-  const signed = sign(built.xdr, built.networkPassphrase, signer);
-  const submit = await post('/api/tx/submit', { signedXdr: signed, action: submitAction, refId: built.refId });
-  return { refId: built.refId, hash: submit.hash };
+  // Rebuild + resubmit on transient RPC lag (NotFound #3 / sequence / submit
+  // races) — testnet RPC state can trail a just-settled tx by a few seconds.
+  let lastErr: unknown;
+  for (let i = 0; i < 6; i++) {
+    try {
+      const built = await postWithRetry(buildPath, body);
+      const signed = sign(built.xdr, built.networkPassphrase, signer);
+      const submit = await post('/api/tx/submit', {
+        signedXdr: signed,
+        action: submitAction,
+        refId: built.refId,
+      });
+      return { refId: built.refId, hash: submit.hash };
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err);
+      const transient =
+        msg.includes('SUBMIT_FAILED') ||
+        msg.includes('TxBadSeq') ||
+        msg.includes('Error(Contract, #3)') ||
+        msg.includes('TX_FAILED');
+      if (!transient || i === 5) throw err;
+      await sleep(2000 * (i + 1));
+    }
+  }
+  throw lastErr;
 }
 
 async function trustline(cardId: string, signer: Keypair): Promise<void> {
@@ -90,10 +133,13 @@ async function cardByCode(code: string): Promise<string> {
 }
 
 async function main() {
-  console.log('=== A. offer -> accept (hero flow) ===');
+  const creatorPk = accounts.creator.publicKey as string;
+
+  console.log('=== A. offer -> accept (hero flow, 3-way split w/ 5% royalty) ===');
   {
     const cardId = await cardByCode('NOVA');
     const sellerUsdc0 = await usdcBalance(merchant.publicKey());
+    const creatorUsdc0 = await usdcBalance(creatorPk);
 
     const { refId: listingId } = await action(
       '/api/tx/list',
@@ -118,16 +164,21 @@ async function main() {
     console.log('  merchant accepted -> atomic settle');
 
     assert((await cardBalance(consumer.publicKey(), 'NOVA')) >= 1, 'consumer received NOVA');
-    const sellerUsdc1 = await usdcBalance(merchant.publicKey());
-    const received = sellerUsdc1 - sellerUsdc0;
-    assert(Math.abs(received - 39.2) < 0.001, `seller received 39.2 USDC (40 - 2% fee), got ${received}`);
+    // 40 USDC: 2% fee (0.8) + 5% royalty (2.0) -> seller nets 37.2, creator +2.0.
+    const received = (await usdcBalance(merchant.publicKey())) - sellerUsdc0;
+    assert(Math.abs(received - 37.2) < 0.001, `seller received 37.2 (40 - 2% fee - 5% royalty), got ${received}`);
+    const creatorGain = (await usdcBalance(creatorPk)) - creatorUsdc0;
+    assert(Math.abs(creatorGain - 2.0) < 0.001, `creator received 2.0 royalty, got ${creatorGain}`);
     const trades = await get('/api/trades');
     assert(trades.length >= 1, 'trade recorded with settlement hash');
+    assert(Math.abs(Number(trades[0].royaltyUsdc) - 2.0) < 0.001, 'trade row records the 2.0 royalty');
   }
 
-  console.log('=== B. buy-now ===');
+  console.log('=== B. buy-now (3-way split w/ 3% royalty) ===');
   {
     const cardId = await cardByCode('EMBER');
+    const sellerUsdc0 = await usdcBalance(merchant.publicKey());
+    const creatorUsdc0 = await usdcBalance(creatorPk);
     const { refId: listingId } = await action(
       '/api/tx/list',
       { cardId, seller: merchant.publicKey(), priceUsdc: '30' },
@@ -137,6 +188,11 @@ async function main() {
     await trustline(cardId, consumer);
     await action('/api/tx/buy-now', { listingId, buyer: consumer.publicKey() }, consumer, 'buy_now');
     assert((await cardBalance(consumer.publicKey(), 'EMBER')) >= 1, 'consumer bought EMBER via buy-now');
+    // 30 USDC: 2% fee (0.6) + 3% royalty (0.9) -> seller nets 28.5, creator +0.9.
+    const received = (await usdcBalance(merchant.publicKey())) - sellerUsdc0;
+    assert(Math.abs(received - 28.5) < 0.001, `seller received 28.5 (30 - 2% fee - 3% royalty), got ${received}`);
+    const creatorGain = (await usdcBalance(creatorPk)) - creatorUsdc0;
+    assert(Math.abs(creatorGain - 0.9) < 0.001, `creator received 0.9 royalty, got ${creatorGain}`);
   }
 
   console.log('=== C. make-offer -> withdraw (consumer protection) ===');
@@ -161,6 +217,27 @@ async function main() {
     await action('/api/tx/withdraw-offer', { offerId, buyer: consumer.publicKey() }, consumer, 'withdraw_offer');
     const after = await usdcBalance(consumer.publicKey());
     assert(Math.abs(after - before) < 0.001, 'USDC fully refunded on withdraw');
+  }
+
+  console.log('=== D. primary sale (seller == creator -> no royalty, 2-way split) ===');
+  {
+    const cardId = await cardByCode('VOID');
+    const creatorUsdc0 = await usdcBalance(creator.publicKey());
+    const { refId: listingId } = await action(
+      '/api/tx/list',
+      { cardId, seller: creator.publicKey(), priceUsdc: '50' },
+      creator,
+      'list',
+    );
+    await trustline(cardId, consumer);
+    await action('/api/tx/buy-now', { listingId, buyer: consumer.publicKey() }, consumer, 'buy_now');
+    assert((await cardBalance(consumer.publicKey(), 'VOID')) >= 1, 'consumer bought VOID via buy-now');
+    // VOID carries a 5% royalty, but the seller IS the creator -> only the 2%
+    // platform fee applies: seller nets 49.0, no separate royalty payout.
+    const received = (await usdcBalance(creator.publicKey())) - creatorUsdc0;
+    assert(Math.abs(received - 49.0) < 0.001, `creator-seller received 49.0 (50 - 2% fee, no royalty), got ${received}`);
+    const trades = await get('/api/trades');
+    assert(Number(trades[0].royaltyUsdc) === 0, 'primary sale records zero royalty');
   }
 
   console.log('\n✅ ALL E2E SCENARIOS PASSED');

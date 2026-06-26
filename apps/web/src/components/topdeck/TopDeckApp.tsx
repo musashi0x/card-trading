@@ -594,6 +594,57 @@ export class TopDeckApp extends Component<Props, State> {
   }
 
   // ===== DETAIL =====
+  /**
+   * The on-chain settlement breakdown for this listing: the sale price splits
+   * atomically into seller proceeds, a 2% platform fee, and — on resale of a
+   * card with a registered royalty — a creator royalty. Surfaced here in the
+   * payment flow since the auction skin has no separate trade-history table.
+   */
+  private renderSettlement(c: TopCard) {
+    const PLATFORM_BPS = 200; // 2%, matches the contract's fee
+    const royaltyBps = c.royaltyBps ?? 0;
+    const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+    const fee = (price * PLATFORM_BPS) / 10_000;
+    const royalty = (price * royaltyBps) / 10_000;
+    const sellerNet = price - fee - royalty;
+    const usd = (n: number) => '$' + n.toFixed(2);
+
+    const rows: Array<{ label: string; value: string; color?: string }> = [
+      { label: 'Seller receives', value: usd(sellerNet) },
+      { label: 'Platform fee · 2%', value: usd(fee) },
+    ];
+    if (royaltyBps > 0) {
+      rows.push({
+        label: `Creator royalty · ${(royaltyBps / 100).toFixed(royaltyBps % 100 === 0 ? 0 : 2)}%`,
+        value: usd(royalty),
+        color: '#7c3aed',
+      });
+    }
+
+    return (
+      <div style={{ marginTop: 18, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13, padding: '16px 18px' }}>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, marginBottom: 4 }}>
+          Atomic settlement
+        </div>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginBottom: 12 }}>
+          {royaltyBps > 0
+            ? 'One transaction splits the sale three ways — the creator is paid on every resale, enforced by the contract.'
+            : 'One transaction splits the sale between the seller and the platform fee.'}
+        </div>
+        {rows.map((r, i) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderTop: i === 0 ? 'none' : '1.5px solid rgba(26,19,5,.08)' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: r.color ?? INK }}>{r.label}</div>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, color: r.color ?? INK }}>{r.value}</div>
+          </div>
+        ))}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0 0', marginTop: 5, borderTop: `2px solid ${INK}` }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>Buyer pays</div>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{usd(price)}</div>
+        </div>
+      </div>
+    );
+  }
+
   private renderDetail(c: TopCard) {
     const st = this.state;
     const rm = rarityMeta(c.rarity);
@@ -667,6 +718,8 @@ export class TopDeckApp extends Component<Props, State> {
               </div>
               <div style={{ textAlign: 'center', fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>🛡 Buyer protection · authenticated by TopDeck Vault before shipping</div>
             </div>
+
+            {this.renderSettlement(c)}
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginTop: 18, padding: '14px 16px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13 }}>
               <div style={{ width: 42, height: 42, borderRadius: 10, background: c.sellerArt, border: `2.5px solid ${INK}` }} />
@@ -854,7 +907,7 @@ export class TopDeckApp extends Component<Props, State> {
     const step2Valid = startN > 0 && (!f.buyNowOn || buyN > startN) && (!f.graded || (f.grade || '').trim().length > 0);
     const previewArt = f.image ? `center/cover no-repeat url("${f.image}")` : rarityArt(f.rarity);
     const chip = (active: boolean, label: string, onClick: () => void) => (
-      <div onClick={onClick} style={{ fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...this.chipStyle(active) }}>{label}</div>
+      <div key={label} onClick={onClick} style={{ fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...this.chipStyle(active) }}>{label}</div>
     );
     const inputStyle: CSSProperties = { width: '100%', fontFamily: SANS, fontSize: 15, fontWeight: 600, padding: '13px 15px', border: `3px solid ${INK}`, borderRadius: 11, outline: 'none', background: '#fff', color: INK };
 

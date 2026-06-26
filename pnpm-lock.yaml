@@ -99,10 +99,20 @@ importers:
         version: 5.9.3
 
   packages/contracts:
+    dependencies:
+      '@cardmkt/shared':
+        specifier: workspace:*
+        version: link:../shared
     devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.20.0
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/db:
     dependencies:

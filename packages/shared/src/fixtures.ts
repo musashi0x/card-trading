@@ -12,6 +12,12 @@ export interface CardFixture {
   rarity: string;
   imageUrl: string;
   supply: number;
+  /**
+   * Creator royalty in basis points, paid on every resale. The creator payout
+   * account is created at setup time and registered via `set_royalty`; here we
+   * only fix the rate per card. 0 means no royalty.
+   */
+  royaltyBps: number;
 }
 
 export const CARD_FIXTURES: CardFixture[] = [
@@ -22,6 +28,7 @@ export const CARD_FIXTURES: CardFixture[] = [
     rarity: 'Legendary',
     imageUrl: 'https://images.unsplash.com/photo-1640955014216-75201056c829?w=600',
     supply: 5,
+    royaltyBps: 500, // 5%
   },
   {
     slug: 'EMBER',
@@ -30,6 +37,7 @@ export const CARD_FIXTURES: CardFixture[] = [
     rarity: 'Rare',
     imageUrl: 'https://images.unsplash.com/photo-1635805737707-575885ab0820?w=600',
     supply: 25,
+    royaltyBps: 300, // 3%
   },
   {
     slug: 'TIDE',
@@ -38,6 +46,7 @@ export const CARD_FIXTURES: CardFixture[] = [
     rarity: 'Rare',
     imageUrl: 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=600',
     supply: 25,
+    royaltyBps: 300, // 3%
   },
   {
     slug: 'GROVE',
@@ -46,6 +55,7 @@ export const CARD_FIXTURES: CardFixture[] = [
     rarity: 'Uncommon',
     imageUrl: 'https://images.unsplash.com/photo-1614851099175-e5b30eb6f696?w=600',
     supply: 100,
+    royaltyBps: 0, // no royalty
   },
   {
     slug: 'STORM',
@@ -54,6 +64,7 @@ export const CARD_FIXTURES: CardFixture[] = [
     rarity: 'Epic',
     imageUrl: 'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=600',
     supply: 10,
+    royaltyBps: 500, // 5%
   },
   {
     slug: 'VOID',
@@ -62,5 +73,6 @@ export const CARD_FIXTURES: CardFixture[] = [
     rarity: 'Legendary',
     imageUrl: 'https://images.unsplash.com/photo-1462331940025-496dfbfc7564?w=600',
     supply: 5,
+    royaltyBps: 500, // 5%
   },
 ];

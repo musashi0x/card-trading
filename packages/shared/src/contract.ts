@@ -27,9 +27,32 @@ export class MarketplaceContract {
     this.contract = new Contract(contractId);
   }
 
-  /** init(admin, platform, usdc_token, fee_bps) — one-time setup. */
-  init(admin: string, platform: string, usdcToken: string, feeBps: number): xdr.Operation {
-    return this.contract.call('init', addr(admin), addr(platform), addr(usdcToken), u32(feeBps));
+  /** init(admin, platform, usdc_token, fee_bps, max_royalty_bps) — one-time setup. */
+  init(
+    admin: string,
+    platform: string,
+    usdcToken: string,
+    feeBps: number,
+    maxRoyaltyBps: number,
+  ): xdr.Operation {
+    return this.contract.call(
+      'init',
+      addr(admin),
+      addr(platform),
+      addr(usdcToken),
+      u32(feeBps),
+      u32(maxRoyaltyBps),
+    );
+  }
+
+  /** set_royalty(card_token, creator, royalty_bps) — admin registers a card's creator royalty. */
+  setRoyalty(cardToken: string, creator: string, royaltyBps: number): xdr.Operation {
+    return this.contract.call('set_royalty', addr(cardToken), addr(creator), u32(royaltyBps));
+  }
+
+  /** get_royalty_view(card_token) -> RoyaltyConfig — read-only, for catalog/pre-flight. */
+  getRoyaltyView(cardToken: string): xdr.Operation {
+    return this.contract.call('get_royalty_view', addr(cardToken));
   }
 
   /** list(seller, card_token, price) -> listing_id. Locks the card. */

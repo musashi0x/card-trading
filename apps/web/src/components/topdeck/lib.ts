@@ -50,6 +50,8 @@ export interface TopCard {
   cardId?: string;
   /** True for the connected user's own listings (drives the Selling tab). */
   mine?: boolean;
+  /** Creator royalty in basis points, paid to the card's creator on resale. */
+  royaltyBps?: number;
 }
 
 const H = 3600000;
@@ -163,6 +165,7 @@ export function mapListing(l: Listing, base = Date.now()): TopCard {
     sellerSales: '0',
     setLine: (card.set || 'LISTING').toUpperCase(),
     bids: [],
+    royaltyBps: card.royaltyBps ?? 0,
   };
 }
 

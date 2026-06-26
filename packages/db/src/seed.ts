@@ -27,12 +27,16 @@ function readJson<T>(file: string): T | null {
 async function main() {
   const accounts = readJson<{
     cards: { slug: string; assetCode: string; issuer: string }[];
+    creator?: { publicKey: string };
   }>('stellar-accounts.json');
   const deploy = readJson<{ cardSacs: Record<string, string> }>('deploy.json');
   const fallbackIssuer = process.env.PLATFORM_ISSUER ?? 'UNSET';
 
   const issuerFor = (slug: string) =>
     accounts?.cards.find((c) => c.slug === slug)?.issuer ?? fallbackIssuer;
+
+  // A single demo creator account receives every card's royalty.
+  const creatorAccount = accounts?.creator?.publicKey ?? process.env.CREATOR_ACCOUNT ?? null;
 
   const rows = CARD_FIXTURES.map((f) => {
     const assetCode = assetCodeForSlug(f.slug);
@@ -45,6 +49,9 @@ async function main() {
       rarity: f.rarity,
       imageUrl: f.imageUrl,
       supply: f.supply,
+      // A royalty rate is only meaningful with a creator account to pay.
+      creatorAccount: f.royaltyBps > 0 ? creatorAccount : null,
+      royaltyBps: f.royaltyBps,
     };
   });
 

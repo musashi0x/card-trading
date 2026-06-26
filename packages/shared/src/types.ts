@@ -20,6 +20,10 @@ export interface Card {
   imageUrl: string;
   /** Total issued supply (copies in existence). */
   supply: number;
+  /** Stellar account that receives the creator royalty on resale (null = none). */
+  creatorAccount: string | null;
+  /** Creator royalty in basis points, applied on secondary sales (0 = none). */
+  royaltyBps: number;
 }
 
 export interface Listing {
@@ -60,6 +64,8 @@ export interface Trade {
   seller: string;
   priceUsdc: string;
   feeUsdc: string;
+  /** Creator royalty paid on this settlement (0 on a primary sale). */
+  royaltyUsdc: string;
   settleTxHash: string;
   settledAt: string;
 }

@@ -60,10 +60,13 @@ async function trustAndReceive(
 ): Promise<void> {
   // Holder establishes a trustline.
   await submit(holder, (b) => b.addOperation(Operation.changeTrust({ asset })));
-  // Issuer mints by paying the holder.
-  await submit(issuer, (b) =>
-    b.addOperation(Operation.payment({ destination: holder.publicKey(), asset, amount })),
-  );
+  // Issuer mints by paying the holder. Amount "0" means trustline-only (e.g. a
+  // royalty payee that just needs to be able to receive the asset).
+  if (Number(amount) > 0) {
+    await submit(issuer, (b) =>
+      b.addOperation(Operation.payment({ destination: holder.publicKey(), asset, amount })),
+    );
+  }
 }
 
 async function main() {
@@ -72,12 +75,16 @@ async function main() {
   const platform = Keypair.random();
   const merchant = Keypair.random();
   const consumer = Keypair.random();
+  // The creator receives royalties on resale; it must trust USDC so atomic
+  // settlement can deliver its cut.
+  const creator = Keypair.random();
 
   console.log('[setup] funding accounts via friendbot...');
   await Promise.all([
     friendbot(platform.publicKey()),
     friendbot(merchant.publicKey()),
     friendbot(consumer.publicKey()),
+    friendbot(creator.publicKey()),
   ]);
 
   const usdc = new Asset(USDC_CODE, platform.publicKey());
@@ -85,6 +92,8 @@ async function main() {
   console.log('[setup] distributing test USDC...');
   await trustAndReceive(consumer, platform, usdc, '10000');
   await trustAndReceive(merchant, platform, usdc, '1000');
+  // Creator only needs the trustline (0 balance) to be able to receive royalties.
+  await trustAndReceive(creator, platform, usdc, '0');
 
   console.log('[setup] issuing sample cards to the merchant...');
   const cards: { slug: string; assetCode: string; issuer: string }[] = [];
@@ -98,11 +107,18 @@ async function main() {
     console.log(`  • ${assetCode} (${fixture.name}) x${copies} -> merchant`);
   }
 
+  // Give the creator a couple of copies of a royalty-bearing card so the e2e can
+  // exercise a primary sale (seller == creator -> no royalty taken).
+  const primaryCard = new Asset(assetCodeForSlug('VOID'), platform.publicKey());
+  await trustAndReceive(creator, platform, primaryCard, '2');
+  console.log('  • VOID x2 -> creator (for primary-sale demo)');
+
   const out = {
     network: 'testnet',
     platform: { publicKey: platform.publicKey(), secret: platform.secret() },
     merchant: { publicKey: merchant.publicKey(), secret: merchant.secret() },
     consumer: { publicKey: consumer.publicKey(), secret: consumer.secret() },
+    creator: { publicKey: creator.publicKey(), secret: creator.secret() },
     usdc: { code: USDC_CODE, issuer: platform.publicKey() },
     cards,
   };
@@ -119,6 +135,7 @@ async function main() {
   console.log('\nDemo wallets (import secrets into Freighter):');
   console.log(`  merchant: ${merchant.publicKey()}`);
   console.log(`  consumer: ${consumer.publicKey()}`);
+  console.log(`  creator:  ${creator.publicKey()} (royalty payee)`);
 }
 
 main().catch((err) => {

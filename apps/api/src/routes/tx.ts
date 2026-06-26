@@ -62,6 +62,20 @@ async function getListingWithCard(listingId: string) {
   return row;
 }
 
+/**
+ * When a settlement will pay a creator royalty, ensure the creator can receive
+ * USDC — otherwise the atomic settlement would revert on-chain. No-op for cards
+ * without a royalty or for primary sales (seller is the creator).
+ */
+async function requireCreatorTrustline(
+  card: { royaltyBps: number; creatorAccount: string | null },
+  seller: string,
+): Promise<void> {
+  if (card.royaltyBps > 0 && card.creatorAccount && card.creatorAccount !== seller) {
+    await requireTrustline(card.creatorAccount, usdc);
+  }
+}
+
 // --- build: list ---
 txRouter.post('/list', async (req, res, next) => {
   try {
@@ -158,6 +172,9 @@ txRouter.post('/accept-offer', async (req, res, next) => {
     const [offer] = await db.select().from(offers).where(eq(offers.id, input.offerId));
     if (!offer) notFound('Offer');
     const oid = needContractId(offer.contractOfferId, 'Offer');
+    // If a royalty will be paid, the creator must be able to receive the USDC.
+    const { card } = await getListingWithCard(offer.listingId);
+    await requireCreatorTrustline(card, input.seller);
     const op = contract.acceptOffer(input.seller, oid);
     const xdr = await buildContractTx(input.seller, op);
     res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: offer.id });
@@ -174,6 +191,8 @@ txRouter.post('/buy-now', async (req, res, next) => {
     const cid = needContractId(listing.contractListingId, 'Listing');
     await requireBalance(input.buyer, usdc, listing.priceUsdc);
     await requireTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
+    // If a royalty will be paid, the creator must be able to receive the USDC.
+    await requireCreatorTrustline(card, listing.seller);
 
     const op = contract.buyNow(input.buyer, cid);
     const xdr = await buildContractTx(input.buyer, op);
@@ -213,6 +232,21 @@ function feeFor(amount: string): string {
   return ((Number(amount) * env.feeBps) / 10_000).toFixed(7);
 }
 
+/**
+ * Creator royalty for a settlement, mirroring the contract: none on a primary
+ * sale (seller is the creator) or for a card without a registered royalty.
+ */
+function royaltyFor(
+  amount: string,
+  card: { royaltyBps: number; creatorAccount: string | null },
+  seller: string,
+): string {
+  if (!card.royaltyBps || !card.creatorAccount || card.creatorAccount === seller) {
+    return '0.0000000';
+  }
+  return ((Number(amount) * card.royaltyBps) / 10_000).toFixed(7);
+}
+
 txRouter.post('/submit', async (req, res, next) => {
   try {
     const { signedXdr } = submitTxSchema.parse(req.body);
@@ -250,16 +284,21 @@ txRouter.post('/submit', async (req, res, next) => {
       case 'accept_offer': {
         const [offer] = await db.select().from(offers).where(eq(offers.id, refId));
         if (offer) {
-          const [listing] = await db.select().from(listings).where(eq(listings.id, offer.listingId));
+          const [row] = await db
+            .select({ listing: listings, card: cards })
+            .from(listings)
+            .innerJoin(cards, eq(listings.cardId, cards.id))
+            .where(eq(listings.id, offer.listingId));
           await db.update(offers).set({ status: 'settled' }).where(eq(offers.id, refId));
           await db.update(listings).set({ status: 'sold' }).where(eq(listings.id, offer.listingId));
-          if (listing) {
+          if (row) {
             await db.insert(trades).values({
-              listingId: listing.id,
+              listingId: row.listing.id,
               buyer: offer.buyer,
-              seller: listing.seller,
+              seller: row.listing.seller,
               priceUsdc: offer.amountUsdc,
               feeUsdc: feeFor(offer.amountUsdc),
+              royaltyUsdc: royaltyFor(offer.amountUsdc, row.card, row.listing.seller),
               settleTxHash: result.hash,
             });
           }
@@ -267,15 +306,20 @@ txRouter.post('/submit', async (req, res, next) => {
         break;
       }
       case 'buy_now': {
-        const [listing] = await db.select().from(listings).where(eq(listings.id, refId));
-        if (listing) {
+        const [row] = await db
+          .select({ listing: listings, card: cards })
+          .from(listings)
+          .innerJoin(cards, eq(listings.cardId, cards.id))
+          .where(eq(listings.id, refId));
+        if (row) {
           await db.update(listings).set({ status: 'sold' }).where(eq(listings.id, refId));
           await db.insert(trades).values({
-            listingId: listing.id,
+            listingId: row.listing.id,
             buyer: source, // the signer of a buy_now is the buyer
-            seller: listing.seller,
-            priceUsdc: listing.priceUsdc,
-            feeUsdc: feeFor(listing.priceUsdc),
+            seller: row.listing.seller,
+            priceUsdc: row.listing.priceUsdc,
+            feeUsdc: feeFor(row.listing.priceUsdc),
+            royaltyUsdc: royaltyFor(row.listing.priceUsdc, row.card, row.listing.seller),
             settleTxHash: result.hash,
           });
         }

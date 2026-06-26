@@ -17,6 +17,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { assetCodeForSlug, CARD_FIXTURES } from '@cardmkt/shared';
 
 const ROOT = resolve(process.cwd(), '../..');
 const WASM = resolve(
@@ -25,6 +26,7 @@ const WASM = resolve(
 );
 const NETWORK = 'testnet';
 const FEE_BPS = '200'; // 2%
+const MAX_ROYALTY_BPS = '1000'; // 10% ceiling; fee + royalty must stay < 100%
 
 function sh(args: string[]): string {
   return execFileSync('stellar', args, { encoding: 'utf8' }).trim();
@@ -32,6 +34,7 @@ function sh(args: string[]): string {
 
 interface Accounts {
   platform: { publicKey: string; secret: string };
+  creator?: { publicKey: string };
   usdc: { code: string; issuer: string };
   cards: { slug: string; assetCode: string; issuer: string }[];
 }
@@ -41,7 +44,9 @@ function deploySac(asset: string, source: string): string {
   try {
     return sh(['contract', 'asset', 'deploy', '--asset', asset, '--source-account', source, '--network', NETWORK]);
   } catch {
-    return sh(['contract', 'id', 'asset', '--asset', asset, '--source-account', source, '--network', NETWORK]);
+    // `contract id asset` derives the SAC address deterministically; CLI 27 takes
+    // only --asset (+ network), not --source-account.
+    return sh(['contract', 'id', 'asset', '--asset', asset, '--network', NETWORK]);
   }
 }
 
@@ -76,9 +81,39 @@ function main() {
     '--platform', accounts.platform.publicKey,
     '--usdc_token', usdcSac,
     '--fee_bps', FEE_BPS,
+    '--max_royalty_bps', MAX_ROYALTY_BPS,
   ]);
 
-  const out = { network: NETWORK, contractId, usdcSac, cardSacs, feeBps: Number(FEE_BPS) };
+  // Register creator royalties for sample cards (admin-only). Needs a creator
+  // account from setup; skipped (with a warning) if setup predates royalties.
+  const creator = accounts.creator?.publicKey;
+  const royaltyBySlug = new Map(CARD_FIXTURES.map((f) => [assetCodeForSlug(f.slug), f.royaltyBps]));
+  if (creator) {
+    console.log('[deploy] registering creator royalties...');
+    for (const [assetCode, sac] of Object.entries(cardSacs)) {
+      const bps = royaltyBySlug.get(assetCode) ?? 0;
+      if (bps <= 0) continue;
+      sh([
+        'contract', 'invoke', '--id', contractId, '--source-account', source, '--network', NETWORK,
+        '--', 'set_royalty',
+        '--card_token', sac,
+        '--creator', creator,
+        '--royalty_bps', String(bps),
+      ]);
+      console.log(`  ${assetCode}: ${bps} bps -> ${creator.slice(0, 6)}…`);
+    }
+  } else {
+    console.warn('[deploy] no creator account in stellar-accounts.json — re-run setup to enable royalties');
+  }
+
+  const out = {
+    network: NETWORK,
+    contractId,
+    usdcSac,
+    cardSacs,
+    feeBps: Number(FEE_BPS),
+    maxRoyaltyBps: Number(MAX_ROYALTY_BPS),
+  };
   writeFileSync(resolve(ROOT, 'deploy.json'), JSON.stringify(out, null, 2));
 
   console.log('\n[deploy] done. Wrote deploy.json');
