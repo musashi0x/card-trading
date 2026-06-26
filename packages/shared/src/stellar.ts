@@ -41,6 +41,24 @@ export function toStroops(amount: string): bigint {
   return BigInt(whole || '0') * 10n ** BigInt(STROOP_DECIMALS) + BigInt(paddedFraction || '0');
 }
 
+/**
+ * Format a numeric amount as a Stellar-safe decimal string: never scientific
+ * notation, at most STROOP_DECIMALS (7) fractional digits, trailing zeros
+ * trimmed. Matches what `toStroops` and the API's `decimalAmount` schema accept,
+ * so a raw UI value like `1e-9` or `5.123456789` (which `String(n)` would emit
+ * verbatim) can't slip through as a 400-triggering request body.
+ */
+export function formatAmount(value: number | string): string {
+  const n = typeof value === 'string' ? Number(value) : value;
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  let s = n.toFixed(STROOP_DECIMALS);
+  // toFixed still emits exponent form for magnitudes >= 1e21; such an amount has
+  // no meaningful sub-unit precision, so fall back to its plain integer digits.
+  if (s.includes('e') || s.includes('E')) s = BigInt(Math.round(n)).toString();
+  const trimmed = s.replace(/\.?0+$/, '');
+  return trimmed === '' ? '0' : trimmed;
+}
+
 /** Convert stroops back into a human decimal string (trims trailing zeros). */
 export function fromStroops(stroops: bigint | string): string {
   const value = BigInt(stroops);
@@ -53,4 +71,9 @@ export function fromStroops(stroops: bigint | string): string {
 /** Build an explorer URL for a transaction hash. */
 export function explorerTxUrl(hash: string, base: string): string {
   return `${base.replace(/\/$/, '')}/tx/${hash}`;
+}
+
+/** Build an explorer URL for an account/contract address. */
+export function explorerAccountUrl(address: string, base: string): string {
+  return `${base.replace(/\/$/, '')}/account/${address}`;
 }

@@ -6,6 +6,8 @@ import type {
   BuildTxResponse,
   Card,
   Listing,
+  MintCardRequest,
+  MintCardResponse,
   Offer,
   PasskeyListRequest,
   PasskeySubmitRequest,
@@ -105,6 +107,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** Mint (issue) a new card asset; distributes copies to `owner`. */
+  mintCard: (body: MintCardRequest) =>
+    request<MintCardResponse>('/api/cards/mint', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Deliver a minted card's copies once a classic owner has trusted the asset. */
+  distributeCard: (cardId: string, owner: string) =>
+    request<MintCardResponse>(`/api/cards/${cardId}/distribute`, {
+      method: 'POST',
+      body: JSON.stringify({ owner }),
+    }),
+
   /** Dev-only: mint test USDC into a smart wallet so the first purchase has funds. */
   devFundWallet: (wallet: string, amountUsdc?: string) =>
     request<SubmitTxResponse & { amountUsdc: string }>('/api/dev/fund-wallet', {

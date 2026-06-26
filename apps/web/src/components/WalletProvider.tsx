@@ -7,7 +7,13 @@
  */
 
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
-import type { PathQuoteResponse, SmartWalletAccount, TradeAction } from '@cardmkt/shared';
+import type {
+  Card,
+  MintCardRequest,
+  PathQuoteResponse,
+  SmartWalletAccount,
+  TradeAction,
+} from '@cardmkt/shared';
 import { ApiRequestError, api } from '@/lib/api';
 import { connectWallet, signXdr } from '@/lib/wallet';
 import {
@@ -47,6 +53,12 @@ interface WalletContextValue {
    */
   passkeyList: (cardId: string, cardToken: string, priceUsdc: string) => Promise<string>;
   establishTrustline: (cardId: string) => Promise<string>;
+  /**
+   * Mint (issue) a brand-new card asset owned by the connected wallet, returning
+   * the created card. A passkey wallet receives its copies gaslessly; a classic
+   * wallet signs a one-time trustline so the issuer can deliver them.
+   */
+  mintCard: (meta: Omit<MintCardRequest, 'owner'>) => Promise<Card>;
   /**
    * Convert a source asset into the USDC a settlement needs (pay-with-any-asset).
    * Signs an optional USDC `change_trust`, then the path payment. Returns the
@@ -175,6 +187,24 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [address],
   );
 
+  const mintCard = useCallback(
+    async (meta: Omit<MintCardRequest, 'owner'>): Promise<Card> => {
+      if (!address) throw new Error('Connect a wallet first');
+      const res = await api.mintCard({ ...meta, owner: address });
+      // A passkey/smart wallet was funded its copies server-side already.
+      if (res.minted) return res.card;
+      // Classic owner: sign the one-time trustline, then claim the copies.
+      if (!res.trustlineXdr || !res.networkPassphrase) {
+        throw new Error('Mint did not return a trustline to sign');
+      }
+      const signed = await signXdr(res.trustlineXdr, address, res.networkPassphrase);
+      await api.submitClassic(signed);
+      const claimed = await api.distributeCard(res.card.id, address);
+      return claimed.card;
+    },
+    [address],
+  );
+
   const payWithAsset = useCallback(
     async (quote: PathQuoteResponse): Promise<string | null> => {
       if (!address) throw new Error('Connect a wallet first');
@@ -229,6 +259,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       passkeyBuyNow,
       passkeyList,
       establishTrustline,
+      mintCard,
       payWithAsset,
     }),
     [
@@ -242,6 +273,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       passkeyBuyNow,
       passkeyList,
       establishTrustline,
+      mintCard,
       payWithAsset,
     ],
   );

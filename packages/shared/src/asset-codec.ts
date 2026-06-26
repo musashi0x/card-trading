@@ -27,6 +27,20 @@ export function assetCodeForSlug(slug: string): string {
   return code;
 }
 
+/**
+ * Generate a candidate asset code for a freshly minted card: up to 8 alphanumeric
+ * chars from the card name, plus a short random suffix so two cards with the same
+ * name don't collide on the same `code:issuer` asset. The caller should retry with
+ * a fresh code if its uniqueness check (vs. existing cards) fails.
+ */
+export function mintAssetCode(name: string, rand: () => number = Math.random): string {
+  const base = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'CARD';
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let suffix = '';
+  for (let i = 0; i < 4; i++) suffix += alphabet[Math.floor(rand() * alphabet.length)];
+  return `${base}${suffix}`.slice(0, 12);
+}
+
 /** Build the Stellar `Asset` for a card. */
 export function cardAsset(assetCode: string, issuer: string): Asset {
   if (!isValidAssetCode(assetCode)) {

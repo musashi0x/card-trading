@@ -21,6 +21,7 @@ import {
   scValToNative,
   type xdr,
 } from '@stellar/stellar-sdk';
+import { MarketplaceContract } from '@cardmkt/shared';
 import { env } from './env.js';
 
 export const rpcServer = new rpc.Server(env.stellar.rpcUrl, {
@@ -39,19 +40,45 @@ export class PreflightError extends Error {
   }
 }
 
+/**
+ * A contract call that depends on state written by a just-submitted classic tx
+ * can transiently fail because the soroban RPC's ledger view briefly lags
+ * Horizon. Two shapes show up right after minting + distributing a card, before
+ * its `list`:
+ *  - `Account not found` from `getAccount` — the freshly funded seller isn't
+ *    indexed by the RPC yet (Horizon already reports it).
+ *  - `Storage, MissingValue` from simulation — the seller's just-minted card
+ *    balance isn't visible yet when `list` simulates its transfer.
+ * Both clear within a ledger or two, so they're worth a short retry, not a 500.
+ */
+function isLaggingLedgerError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /MissingValue/.test(msg) || /Account not found/i.test(msg);
+}
+
 /** Build, simulate, and assemble a contract-call tx; return unsigned XDR. */
 export async function buildContractTx(source: string, operation: xdr.Operation): Promise<string> {
-  const account = await rpcServer.getAccount(source);
-  const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: env.stellar.networkPassphrase,
-  })
-    .addOperation(operation)
-    .setTimeout(180)
-    .build();
+  // Retry on a lagging-ledger error so the RPC can catch up to the state Horizon
+  // already reports (see isLaggingLedgerError). Each attempt refetches the
+  // account for a current sequence number.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const account = await rpcServer.getAccount(source);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: env.stellar.networkPassphrase,
+      })
+        .addOperation(operation)
+        .setTimeout(180)
+        .build();
 
-  const prepared = await rpcServer.prepareTransaction(tx);
-  return prepared.toXDR();
+      const prepared = await rpcServer.prepareTransaction(tx);
+      return prepared.toXDR();
+    } catch (err) {
+      if (attempt >= 5 || !isLaggingLedgerError(err)) throw err;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
 }
 
 export interface SubmitResult {
@@ -87,6 +114,60 @@ export async function submitSignedTx(signedXdr: string): Promise<SubmitResult> {
     }
   }
   return { hash: sent.hash, successful, returnValue };
+}
+
+/** The platform issuer's current sequence number, as the soroban RPC sees it. */
+async function issuerSequence(): Promise<bigint> {
+  const account = await rpcServer.getAccount(env.platformIssuer);
+  return BigInt(account.sequenceNumber());
+}
+
+/** A bad-sequence rejection — duplicate/stale sequence; retryable once re-synced. */
+function isBadSeqError(err: unknown): boolean {
+  const name = (err as { details?: { errorResult?: { _attributes?: { result?: { _switch?: { name?: string } } } } } })
+    ?.details?.errorResult?._attributes?.result?._switch?.name;
+  if (name === 'txBadSeq') return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /txBadSeq|tx_bad_seq|bad sequence/i.test(msg);
+}
+
+/**
+ * Run an issuer-sourced operation with sequence safety. Every server-side issuer
+ * op (SAC deploy, royalty registration, card/USDC mint) sources from the same
+ * account, so without coordination overlapping ops fetch the same sequence and
+ * all but one fail on-chain with tx_bad_seq (surfaced as SUBMIT_FAILED /
+ * SAC_DEPLOY_FAILED / ROYALTY_FAILED / MINT_FAILED). Two safeguards:
+ *  1. After each op, poll until the RPC reflects the consumed sequence, so the
+ *     next op builds on a fresh one rather than a stale duplicate.
+ *  2. Retry on a bad-sequence rejection, since load-balanced RPC nodes can still
+ *     briefly disagree on the latest sequence; re-fetching clears it.
+ */
+async function runIssuerOp<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const before = await issuerSequence();
+    try {
+      const result = await fn();
+      for (let i = 0; i < 20 && (await issuerSequence()) <= before; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return result;
+    } catch (err) {
+      if (attempt >= 4 || !isBadSeqError(err)) throw err;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+}
+
+/** Serializes issuer-sourced operations so their sequence handling can't interleave. */
+let issuerTxQueue: Promise<unknown> = Promise.resolve();
+function withIssuerLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = issuerTxQueue.then(() => runIssuerOp(fn));
+  // Keep the chain alive regardless of any single op's outcome.
+  issuerTxQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 /**
@@ -298,17 +379,125 @@ export async function mintUsdcTo(
   amountStroops: bigint,
   issuerSecret: string,
 ): Promise<SubmitResult> {
-  const usdc = new Asset(env.usdc.code, env.usdc.issuer);
-  const sac = new Contract(usdc.contractId(env.stellar.networkPassphrase));
-  const op = sac.call(
-    'mint',
-    new Address(recipient).toScVal(),
-    nativeToScVal(amountStroops, { type: 'i128' }),
-  );
-  const unsignedXdr = await buildContractTx(env.usdc.issuer, op);
-  const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
-  tx.sign(Keypair.fromSecret(issuerSecret));
-  return submitSignedTx(tx.toXDR());
+  return withIssuerLock(async () => {
+    const usdc = new Asset(env.usdc.code, env.usdc.issuer);
+    const sac = new Contract(usdc.contractId(env.stellar.networkPassphrase));
+    const op = sac.call(
+      'mint',
+      new Address(recipient).toScVal(),
+      nativeToScVal(amountStroops, { type: 'i128' }),
+    );
+    const unsignedXdr = await buildContractTx(env.usdc.issuer, op);
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+    tx.sign(Keypair.fromSecret(issuerSecret));
+    return submitSignedTx(tx.toXDR());
+  });
+}
+
+// --- card minting (issue a new card asset at runtime) ---
+
+/** One card copy in stroops — assets carry 7 decimals, so 1 copy = 1.0 unit. */
+const ONE_CARD = 10_000_000n;
+
+/** Whether an address is a Soroban contract account (`C…`) vs. a classic `G…`. */
+export function isContractAddress(address: string): boolean {
+  return address.startsWith('C');
+}
+
+/**
+ * Deploy the Stellar Asset Contract for a freshly issued card asset, signed by
+ * the platform issuer. Returns the deterministic SAC address. Idempotent at the
+ * address level: the SAC id derives from the asset, so a re-deploy of the same
+ * asset would fail on-chain — callers mint with a fresh (random) asset code.
+ */
+export async function deployCardSac(asset: Asset, issuerSecret: string): Promise<string> {
+  return withIssuerLock(async () => {
+    const op = Operation.createStellarAssetContract({ asset });
+    const unsignedXdr = await buildContractTx(env.platformIssuer, op);
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+    tx.sign(Keypair.fromSecret(issuerSecret));
+    const result = await submitSignedTx(tx.toXDR());
+    if (!result.successful) {
+      throw new PreflightError('Card SAC deployment did not succeed on-chain', 'SAC_DEPLOY_FAILED', {
+        hash: result.hash,
+      });
+    }
+    return asset.contractId(env.stellar.networkPassphrase);
+  });
+}
+
+/**
+ * Distribute `copies` of a card to `owner`, signed by the platform issuer.
+ *  - Smart wallet (`C…`): SAC `mint(owner, amount)` — gasless, no trustline.
+ *  - Classic (`G…`): a classic issuer `payment` — requires `owner` to already
+ *    trust the asset (enforced by the caller before this runs).
+ * Returns the settlement tx hash.
+ */
+export async function mintCardCopies(
+  asset: Asset,
+  sacAddress: string,
+  owner: string,
+  copies: number,
+  issuerSecret: string,
+): Promise<string> {
+  return withIssuerLock(async () => {
+    if (isContractAddress(owner)) {
+      const sac = new Contract(sacAddress);
+      const op = sac.call(
+        'mint',
+        new Address(owner).toScVal(),
+        nativeToScVal(BigInt(copies) * ONE_CARD, { type: 'i128' }),
+      );
+      const unsignedXdr = await buildContractTx(env.platformIssuer, op);
+      const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+      tx.sign(Keypair.fromSecret(issuerSecret));
+      const result = await submitSignedTx(tx.toXDR());
+      if (!result.successful) {
+        throw new PreflightError('Card mint did not succeed on-chain', 'MINT_FAILED', {
+          hash: result.hash,
+        });
+      }
+      return result.hash;
+    }
+    // Classic owner: standard issuer payment over Horizon.
+    const issuer = await horizon.loadAccount(env.platformIssuer);
+    const tx = new TransactionBuilder(issuer, {
+      fee: BASE_FEE,
+      networkPassphrase: env.stellar.networkPassphrase,
+    })
+      .addOperation(Operation.payment({ destination: owner, asset, amount: String(copies) }))
+      .setTimeout(180)
+      .build();
+    tx.sign(Keypair.fromSecret(issuerSecret));
+    const res = await horizon.submitTransaction(tx);
+    return res.hash;
+  });
+}
+
+/**
+ * Register a creator royalty for a newly minted card on the settlement contract,
+ * signed by the contract admin (the platform). Mirrors the deploy script's
+ * `set_royalty`; rejected on-chain if `royaltyBps` exceeds the configured cap.
+ */
+export async function setCardRoyalty(
+  sacAddress: string,
+  creator: string,
+  royaltyBps: number,
+  adminSecret: string,
+): Promise<string> {
+  return withIssuerLock(async () => {
+    const op = new MarketplaceContract(env.contractId).setRoyalty(sacAddress, creator, royaltyBps);
+    const unsignedXdr = await buildContractTx(env.platformIssuer, op);
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+    tx.sign(Keypair.fromSecret(adminSecret));
+    const result = await submitSignedTx(tx.toXDR());
+    if (!result.successful) {
+      throw new PreflightError('Royalty registration did not succeed on-chain', 'ROYALTY_FAILED', {
+        hash: result.hash,
+      });
+    }
+    return result.hash;
+  });
 }
 
 // --- passkey smart-wallet (contract-account) pre-flight ---

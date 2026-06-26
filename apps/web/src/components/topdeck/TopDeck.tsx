@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'react';
 import type { Card } from '@cardmkt/shared';
 import { api } from '@/lib/api';
-import { explorerTx } from '@/lib/explorer';
+import { explorerAccount, explorerTx } from '@/lib/explorer';
 import { useWallet } from '@/components/WalletProvider';
 import { TopDeckApp } from './TopDeckApp';
 import { mapListing, mockCards, type TopCard } from './lib';
@@ -40,6 +40,7 @@ export function TopDeck() {
     runAction,
     passkeyBuyNow,
     passkeyList,
+    mintCard,
     payWithAsset,
   } = useWallet();
   const [seed, setSeed] = useState<TopCard[] | null>(null);
@@ -78,11 +79,13 @@ export function TopDeck() {
         runAction: (action, body) => runAction(action, body),
         passkeyBuyNow,
         passkeyList,
+        mintCard,
         payWithAsset,
       }}
       seedCards={seed}
       catalog={catalog}
       explorerTx={explorerTx}
+      explorerAddress={explorerAccount}
     />
   );
 }

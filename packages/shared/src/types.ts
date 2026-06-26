@@ -199,6 +199,40 @@ export interface SubmitTxResponse {
   successful: boolean;
 }
 
+/**
+ * Mint (issue) a brand-new card asset. The platform issues the asset, deploys
+ * its Stellar Asset Contract, distributes `supply` copies to `owner`, and (when
+ * `royaltyBps > 0`) registers `owner` as the card's creator royalty payee.
+ */
+export interface MintCardRequest {
+  /** Wallet that will own the minted copies — classic `G…` or smart-wallet `C…`. */
+  owner: string;
+  name: string;
+  set: string;
+  rarity: string;
+  /** Card art: an http(s) URL or a `data:` URL from the upload picker. */
+  imageUrl: string;
+  /** How many copies to issue (>= 1). */
+  supply: number;
+  /** Creator royalty in basis points (0–maxRoyaltyBps); 0 = no royalty. */
+  royaltyBps: number;
+}
+
+/**
+ * Result of a mint. For a smart-wallet (`C…`) owner the copies are minted
+ * gaslessly server-side (`minted: true`). For a classic (`G…`) owner that does
+ * not yet trust the new asset, `minted` is false and `trustlineXdr` must be
+ * signed + submitted before calling `distribute` to receive the copies.
+ */
+export interface MintCardResponse {
+  card: Card;
+  /** Whether the owner already holds the issued copies. */
+  minted: boolean;
+  /** Set when a classic owner must establish a trustline before distribution. */
+  trustlineXdr?: string;
+  networkPassphrase?: string;
+}
+
 /** Structured, actionable error returned by pre-flight validation. */
 export interface ApiError {
   error: string;
