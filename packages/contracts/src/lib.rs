@@ -108,10 +108,18 @@ impl Marketplace {
         );
 
         let id = next_id(&env, &DataKey::ListingCount);
-        let listing = Listing { seller: seller.clone(), card_token, price, status: STATUS_OPEN };
-        env.storage().persistent().set(&DataKey::Listing(id), &listing);
+        let listing = Listing {
+            seller: seller.clone(),
+            card_token,
+            price,
+            status: STATUS_OPEN,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Listing(id), &listing);
 
-        env.events().publish((Symbol::new(&env, "list"), id), (seller, price));
+        env.events()
+            .publish((Symbol::new(&env, "list"), id), (seller, price));
         id
     }
 
@@ -132,8 +140,11 @@ impl Marketplace {
             &ONE_CARD,
         );
         listing.status = STATUS_CANCELLED;
-        env.storage().persistent().set(&DataKey::Listing(listing_id), &listing);
-        env.events().publish((Symbol::new(&env, "cancel"), listing_id), seller);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Listing(listing_id), &listing);
+        env.events()
+            .publish((Symbol::new(&env, "cancel"), listing_id), seller);
     }
 
     // --- 3.4 make_offer / withdraw_offer ---
@@ -152,10 +163,18 @@ impl Marketplace {
         usdc(&env).transfer(&buyer, &env.current_contract_address(), &amount);
 
         let id = next_id(&env, &DataKey::OfferCount);
-        let offer = Offer { buyer: buyer.clone(), listing_id, amount, status: STATUS_OPEN };
+        let offer = Offer {
+            buyer: buyer.clone(),
+            listing_id,
+            amount,
+            status: STATUS_OPEN,
+        };
         env.storage().persistent().set(&DataKey::Offer(id), &offer);
 
-        env.events().publish((Symbol::new(&env, "offer"), id), (buyer, listing_id, amount));
+        env.events().publish(
+            (Symbol::new(&env, "offer"), id),
+            (buyer, listing_id, amount),
+        );
         id
     }
 
@@ -172,8 +191,11 @@ impl Marketplace {
         }
         usdc(&env).transfer(&env.current_contract_address(), &buyer, &offer.amount);
         offer.status = STATUS_CANCELLED;
-        env.storage().persistent().set(&DataKey::Offer(offer_id), &offer);
-        env.events().publish((Symbol::new(&env, "withdraw"), offer_id), buyer);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Offer(offer_id), &offer);
+        env.events()
+            .publish((Symbol::new(&env, "withdraw"), offer_id), buyer);
     }
 
     // --- 3.5 accept_offer (atomic settlement) ---
@@ -198,7 +220,11 @@ impl Marketplace {
         let fee = split_fee(&env, offer.amount);
         let seller_amount = offer.amount - fee;
         let u = usdc(&env);
-        u.transfer(&env.current_contract_address(), &listing.seller, &seller_amount);
+        u.transfer(
+            &env.current_contract_address(),
+            &listing.seller,
+            &seller_amount,
+        );
         if fee > 0 {
             u.transfer(&env.current_contract_address(), &platform(&env), &fee);
         }
@@ -210,8 +236,12 @@ impl Marketplace {
 
         listing.status = STATUS_DONE;
         offer.status = STATUS_DONE;
-        env.storage().persistent().set(&DataKey::Listing(offer.listing_id), &listing);
-        env.storage().persistent().set(&DataKey::Offer(offer_id), &offer);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Listing(offer.listing_id), &listing);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Offer(offer_id), &offer);
 
         env.events().publish(
             (Symbol::new(&env, "settle"), offer.listing_id),
@@ -245,7 +275,9 @@ impl Marketplace {
         );
 
         listing.status = STATUS_DONE;
-        env.storage().persistent().set(&DataKey::Listing(listing_id), &listing);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Listing(listing_id), &listing);
         env.events().publish(
             (Symbol::new(&env, "settle"), listing_id),
             (buyer, listing.seller, listing.price, fee),

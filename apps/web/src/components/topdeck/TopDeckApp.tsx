@@ -66,6 +66,7 @@ interface Form {
 interface State {
   screen: 'browse' | 'detail' | 'mybids' | 'sell';
   selectedId: string | null;
+  query: string;
   sort: string;
   facets: { cats: string[]; rarities: string[]; graded: boolean; buyNow: boolean; ending: boolean; price: string };
   bidOpen: boolean;
@@ -97,7 +98,7 @@ export class TopDeckApp extends Component<Props, State> {
   constructor(props: Props) {
     super(props);
     this.state = {
-      screen: 'browse', selectedId: null, sort: 'ending', now: Date.now(),
+      screen: 'browse', selectedId: null, query: '', sort: 'ending', now: Date.now(),
       facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
       bidOpen: false, bidAmount: '', toast: null, toastKind: 'win',
       watched: {}, status: {}, myMax: {},
@@ -139,7 +140,12 @@ export class TopDeckApp extends Component<Props, State> {
   private setPrice = (v: string) => this.setState((s) => ({ facets: { ...s.facets, price: v } }));
   private setSort = (v: string) => this.setState({ sort: v });
   private clearFilters = () =>
-    this.setState({ sort: 'ending', facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' } });
+    this.setState({ query: '', sort: 'ending', facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' } });
+
+  // ----- search -----
+  private setQuery = (e: React.ChangeEvent<HTMLInputElement>) =>
+    this.setState((s) => ({ query: e.target.value, screen: s.screen === 'detail' || s.screen === 'sell' ? 'browse' : s.screen }));
+  private clearQuery = () => this.setState({ query: '' });
 
   // ----- watch -----
   private toggleWatch = (e: React.MouseEvent, id: string) => {
@@ -314,7 +320,12 @@ export class TopDeckApp extends Component<Props, State> {
     const wallet = this.props.wallet;
 
     // filtered + sorted browse list
+    const query = st.query.trim().toLowerCase();
     let list = st.cards.filter((c) => {
+      if (query) {
+        const hay = `${c.name} ${c.setLine} ${c.condition} ${c.seller} ${c.rarity}`.toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
       if (fc.cats.length && !fc.cats.some((cat) => c.cats.includes(cat))) return false;
       if (fc.rarities.length && !fc.rarities.includes(c.rarity)) return false;
       if (fc.graded && !c.cats.includes('Graded')) return false;
@@ -343,7 +354,7 @@ export class TopDeckApp extends Component<Props, State> {
       { key: 'ending', label: '⏱ Ending soon' }, { key: 'buyNow', label: '⚡ Buy Now available' }, { key: 'graded', label: '🛡 Graded only' },
     ];
     const sortOpts: Array<[string, string]> = [['ending', 'Ending soon'], ['priceUp', 'Price: low → high'], ['priceDown', 'Price: high → low'], ['bids', 'Most bids']];
-    const activeCount = fc.cats.length + fc.rarities.length + (fc.graded ? 1 : 0) + (fc.buyNow ? 1 : 0) + (fc.ending ? 1 : 0) + (fc.price !== 'any' ? 1 : 0);
+    const activeCount = fc.cats.length + fc.rarities.length + (fc.graded ? 1 : 0) + (fc.buyNow ? 1 : 0) + (fc.ending ? 1 : 0) + (fc.price !== 'any' ? 1 : 0) + (query ? 1 : 0);
 
     // my bids / selling derived
     const statusMeta = (s: string) =>
@@ -360,8 +371,8 @@ export class TopDeckApp extends Component<Props, State> {
 
     const sel = this.getCard(st.selectedId);
 
-    const filterChip = (label: string, active: boolean, onClick: () => void, extra?: React.ReactNode) => (
-      <div onClick={onClick} style={{ display: extra ? 'flex' : undefined, alignItems: 'center', gap: 9, fontSize: 12.5, fontWeight: 700, padding: '8px 12px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer', ...this.chipStyle(active) }}>
+    const filterChip = (key: string, label: string, active: boolean, onClick: () => void, extra?: React.ReactNode) => (
+      <div key={key} onClick={onClick} style={{ display: extra ? 'flex' : undefined, alignItems: 'center', gap: 9, fontSize: 12.5, fontWeight: 700, padding: '8px 12px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer', ...this.chipStyle(active) }}>
         {extra}{label}
       </div>
     );
@@ -370,9 +381,22 @@ export class TopDeckApp extends Component<Props, State> {
       <div style={{ minHeight: '100vh', background: '#fff7ec', fontFamily: SANS, color: INK }}>
         {/* ===== TOP NAV ===== */}
         <div style={{ position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: 18, padding: '14px 32px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
-          <div onClick={this.goHome} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></div>
-          <div style={{ flex: 1, maxWidth: 460, display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, padding: '9px 14px', fontSize: 13.5, color: 'rgba(26,19,5,.45)', fontWeight: 500 }}>
-            <span style={{ fontSize: 14 }}>⌕</span> Search 2.4M cards &amp; collectibles…
+          <div onClick={this.goHome} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>
+            <img src="/logo.png" alt="TopDeck Logo" style={{ width: 28, height: 28, borderRadius: '50%', border: `2.5px solid ${INK}` }} />
+            <span>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></span>
+          </div>
+          <div style={{ flex: 1, maxWidth: 460, display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, padding: '9px 14px' }}>
+            <span style={{ fontSize: 14, color: 'rgba(26,19,5,.45)' }}>⌕</span>
+            <input
+              value={st.query}
+              onChange={this.setQuery}
+              placeholder="Search 2.4M cards & collectibles…"
+              aria-label="Search auctions"
+              style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: SANS, fontSize: 13.5, fontWeight: 500, color: INK }}
+            />
+            {st.query && (
+              <span onClick={this.clearQuery} title="Clear search" style={{ cursor: 'pointer', fontSize: 13, fontWeight: 800, color: 'rgba(26,19,5,.45)', padding: '0 2px' }}>✕</span>
+            )}
           </div>
           <div style={{ flex: 1 }} />
           <div onClick={this.goHome} style={{ cursor: 'pointer' }}>
@@ -423,26 +447,26 @@ export class TopDeckApp extends Component<Props, State> {
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 9 }}>RARITY</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                      {rarityOpts.map(([v, label, dot]) => filterChip(label, fc.rarities.includes(v), () => this.toggleRarity(v),
+                      {rarityOpts.map(([v, label, dot]) => filterChip(v, label, fc.rarities.includes(v), () => this.toggleRarity(v),
                         <span key="d" style={{ width: 11, height: 11, borderRadius: '50%', background: dot, border: `2px solid ${INK}`, flex: 'none' }} />))}
                     </div>
                   </div>
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 9 }}>PRICE</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                      {priceOpts.map(([v, label]) => filterChip(label, fc.price === v, () => this.setPrice(v)))}
+                      {priceOpts.map(([v, label]) => filterChip(v, label, fc.price === v, () => this.setPrice(v)))}
                     </div>
                   </div>
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 9 }}>STATUS</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                      {statusOpts.map((o) => filterChip(o.label, fc[o.key], () => this.toggleFlag(o.key)))}
+                      {statusOpts.map((o) => filterChip(o.key, o.label, fc[o.key], () => this.toggleFlag(o.key)))}
                     </div>
                   </div>
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 9 }}>SORT BY</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                      {sortOpts.map(([v, label]) => filterChip(label, st.sort === v, () => this.setSort(v)))}
+                      {sortOpts.map(([v, label]) => filterChip(v, label, st.sort === v, () => this.setSort(v)))}
                     </div>
                   </div>
                 </div>
@@ -453,9 +477,9 @@ export class TopDeckApp extends Component<Props, State> {
                 {list.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '60px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16 }}>
                     <div style={{ fontSize: 42 }}>🔍</div>
-                    <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 21, marginTop: 10 }}>No lots match those filters</div>
-                    <div style={{ fontSize: 13.5, color: 'rgba(26,19,5,.55)', fontWeight: 500, marginTop: 6 }}>Try loosening a filter or two.</div>
-                    <div onClick={this.clearFilters} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Clear filters</div>
+                    <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 21, marginTop: 10 }}>{query ? `No lots match “${st.query.trim()}”` : 'No lots match those filters'}</div>
+                    <div style={{ fontSize: 13.5, color: 'rgba(26,19,5,.55)', fontWeight: 500, marginTop: 6 }}>{query ? 'Try a different search or clear it.' : 'Try loosening a filter or two.'}</div>
+                    <div onClick={this.clearFilters} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>{query ? 'Clear search & filters' : 'Clear filters'}</div>
                   </div>
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 20 }}>
