@@ -1,0 +1,27 @@
+{
+  "name": "card-marketplace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Non-custodial trading card marketplace on Stellar (Consumer & Merchant Payment Flows)",
+  "packageManager": "pnpm@10.17.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "db:generate": "pnpm --filter @cardmkt/db run generate",
+    "db:migrate": "pnpm --filter @cardmkt/db run migrate",
+    "db:seed": "pnpm --filter @cardmkt/db run seed",
+    "stellar:setup": "pnpm --filter @cardmkt/scripts run setup",
+    "contract:build": "pnpm --filter @cardmkt/contracts run build",
+    "contract:deploy": "pnpm --filter @cardmkt/contracts run deploy"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0",
+    "typescript": "^5.6.3",
+    "prettier": "^3.3.3"
+  }
+}

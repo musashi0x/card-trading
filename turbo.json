@@ -1,0 +1,32 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "NODE_ENV",
+    "DATABASE_URL",
+    "STELLAR_NETWORK",
+    "STELLAR_RPC_URL",
+    "STELLAR_HORIZON_URL",
+    "STELLAR_NETWORK_PASSPHRASE",
+    "CONTRACT_ID",
+    "USDC_ASSET_CODE",
+    "USDC_ISSUER",
+    "PLATFORM_ISSUER",
+    "NEXT_PUBLIC_API_URL",
+    "NEXT_PUBLIC_STELLAR_NETWORK",
+    "NEXT_PUBLIC_EXPLORER_URL"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {},
+    "typecheck": {
+      "dependsOn": ["^build"]
+    }
+  }
+}

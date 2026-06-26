@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cardmkt-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cardmkt
+    ports:
+      - '5433:5432'
+    volumes:
+      - cardmkt-pg:/var/lib/postgresql/data
+
+volumes:
+  cardmkt-pg:

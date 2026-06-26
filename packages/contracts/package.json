@@ -1,0 +1,15 @@
+{
+  "name": "@cardmkt/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "stellar contract build",
+    "test": "cargo test",
+    "deploy": "tsx scripts/deploy.ts",
+    "lint": "cargo fmt --check || true",
+    "typecheck": "echo \"(typecheck) rust crate — see cargo\""
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

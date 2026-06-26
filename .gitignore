@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.next/
+.turbo/
+*.log
+.env
+.env.local
+.DS_Store
+
+# Rust / Soroban
+target/
+**/*.rs.bk
+*.wasm
+
+# Generated
+.stellar/
+deploy.json
+
+.agent/
+.claude/
