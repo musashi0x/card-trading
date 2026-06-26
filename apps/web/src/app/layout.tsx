@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { WalletProvider } from '@/components/WalletProvider';
+import { DevAnnotations } from '@/components/DevAnnotations';
 
 export const metadata: Metadata = {
   title: 'TopDeck — bid, win, collect',
@@ -21,6 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <WalletProvider>{children}</WalletProvider>
+        <DevAnnotations />
       </body>
     </html>
   );

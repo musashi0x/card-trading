@@ -31,6 +31,7 @@ import {
 const INK = '#1a1305';
 const DISPLAY = "'Bricolage Grotesque'";
 const SANS = "'DM Sans',system-ui";
+const PAGE_SIZE = 12; // lots per browse page (multiple of 3 to fill the grid)
 
 interface WalletProps {
   address: string | null;
@@ -83,6 +84,7 @@ interface State {
   form: Form;
   cards: TopCard[];
   now: number;
+  page: number;
 }
 
 const EMPTY_FORM: Form = {
@@ -98,7 +100,7 @@ export class TopDeckApp extends Component<Props, State> {
   constructor(props: Props) {
     super(props);
     this.state = {
-      screen: 'browse', selectedId: null, query: '', sort: 'ending', now: Date.now(),
+      screen: 'browse', selectedId: null, query: '', sort: 'ending', now: Date.now(), page: 1,
       facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
       bidOpen: false, bidAmount: '', toast: null, toastKind: 'win',
       watched: {}, status: {}, myMax: {},
@@ -130,22 +132,27 @@ export class TopDeckApp extends Component<Props, State> {
   private goSell = () => { this.setState({ screen: 'sell', sellStep: 1 }); window.scrollTo(0, 0); };
   private setMyBidsTab = (t: 'bidding' | 'selling') => this.setState({ myBidsTab: t });
 
+  // ----- pagination -----
+  // Any change to the result set (filter/sort/search) sends the user back to
+  // page 1, otherwise they could be stranded on a now-empty trailing page.
+  private setPage = (p: number) => { this.setState({ page: p }); window.scrollTo(0, 0); };
+
   // ----- filters -----
   private toggleCat = (v: string) =>
-    this.setState((s) => ({ facets: { ...s.facets, cats: s.facets.cats.includes(v) ? s.facets.cats.filter((x) => x !== v) : [...s.facets.cats, v] } }));
+    this.setState((s) => ({ page: 1, facets: { ...s.facets, cats: s.facets.cats.includes(v) ? s.facets.cats.filter((x) => x !== v) : [...s.facets.cats, v] } }));
   private toggleRarity = (v: string) =>
-    this.setState((s) => ({ facets: { ...s.facets, rarities: s.facets.rarities.includes(v) ? s.facets.rarities.filter((x) => x !== v) : [...s.facets.rarities, v] } }));
+    this.setState((s) => ({ page: 1, facets: { ...s.facets, rarities: s.facets.rarities.includes(v) ? s.facets.rarities.filter((x) => x !== v) : [...s.facets.rarities, v] } }));
   private toggleFlag = (k: 'graded' | 'buyNow' | 'ending') =>
-    this.setState((s) => ({ facets: { ...s.facets, [k]: !s.facets[k] } }));
-  private setPrice = (v: string) => this.setState((s) => ({ facets: { ...s.facets, price: v } }));
-  private setSort = (v: string) => this.setState({ sort: v });
+    this.setState((s) => ({ page: 1, facets: { ...s.facets, [k]: !s.facets[k] } }));
+  private setPrice = (v: string) => this.setState((s) => ({ page: 1, facets: { ...s.facets, price: v } }));
+  private setSort = (v: string) => this.setState({ page: 1, sort: v });
   private clearFilters = () =>
-    this.setState({ query: '', sort: 'ending', facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' } });
+    this.setState({ page: 1, query: '', sort: 'ending', facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' } });
 
   // ----- search -----
   private setQuery = (e: React.ChangeEvent<HTMLInputElement>) =>
-    this.setState((s) => ({ query: e.target.value, screen: s.screen === 'detail' || s.screen === 'sell' ? 'browse' : s.screen }));
-  private clearQuery = () => this.setState({ query: '' });
+    this.setState((s) => ({ page: 1, query: e.target.value, screen: s.screen === 'detail' || s.screen === 'sell' ? 'browse' : s.screen }));
+  private clearQuery = () => this.setState({ page: 1, query: '' });
 
   // ----- watch -----
   private toggleWatch = (e: React.MouseEvent, id: string) => {
@@ -314,6 +321,57 @@ export class TopDeckApp extends Component<Props, State> {
     return { background: active ? INK : '#fff', color: active ? '#fff' : INK };
   }
 
+  // ----- pagination controls -----
+  // Build a windowed list of page numbers around the current page, with '…'
+  // gaps so the bar stays compact even with many pages (e.g. 1 … 4 5 6 … 20).
+  private pageItems(page: number, total: number): Array<number | 'gap'> {
+    const items = new Set<number>([1, total, page, page - 1, page + 1]);
+    const pages = [...items].filter((p) => p >= 1 && p <= total).sort((a, b) => a - b);
+    const out: Array<number | 'gap'> = [];
+    let prev = 0;
+    pages.forEach((p) => {
+      if (prev && p - prev > 1) out.push('gap');
+      out.push(p);
+      prev = p;
+    });
+    return out;
+  }
+
+  private renderPagination(page: number, total: number, count: number, start: number, shown: number) {
+    const btn = (label: React.ReactNode, opts: { active?: boolean; disabled?: boolean; onClick?: () => void; key: string }) => (
+      <div
+        key={opts.key}
+        onClick={opts.disabled ? undefined : opts.onClick}
+        aria-current={opts.active ? 'page' : undefined}
+        style={{
+          minWidth: 38, textAlign: 'center', fontSize: 13, fontWeight: 800, padding: '9px 12px',
+          border: `2.5px solid ${INK}`, borderRadius: 9, fontFamily: DISPLAY,
+          background: opts.active ? INK : '#fff', color: opts.active ? '#fff' : INK,
+          boxShadow: opts.active ? 'none' : `2px 2px 0 ${INK}`,
+          cursor: opts.disabled ? 'not-allowed' : 'pointer', opacity: opts.disabled ? 0.4 : 1,
+        }}
+      >
+        {label}
+      </div>
+    );
+    return (
+      <div style={{ marginTop: 28, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {btn('← Prev', { key: 'prev', disabled: page <= 1, onClick: () => this.setPage(page - 1) })}
+          {this.pageItems(page, total).map((it, i) =>
+            it === 'gap'
+              ? <div key={`gap-${i}`} style={{ fontSize: 13, fontWeight: 800, color: 'rgba(26,19,5,.4)', padding: '0 2px' }}>…</div>
+              : btn(it, { key: `p-${it}`, active: it === page, onClick: () => this.setPage(it) }),
+          )}
+          {btn('Next →', { key: 'next', disabled: page >= total, onClick: () => this.setPage(page + 1) })}
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>
+          Showing {start + 1}–{start + shown} of {count} lots
+        </div>
+      </div>
+    );
+  }
+
   render() {
     const st = this.state;
     const fc = st.facets;
@@ -346,6 +404,12 @@ export class TopDeckApp extends Component<Props, State> {
       bids: (a, b) => b.bids.length - a.bids.length,
     };
     list = [...list].sort(sortFns[st.sort] || sortFns.ending);
+
+    // pagination: clamp the page in case the filtered list shrank below it
+    const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+    const page = Math.min(st.page, totalPages);
+    const pageStart = (page - 1) * PAGE_SIZE;
+    const pageList = list.slice(pageStart, pageStart + PAGE_SIZE);
 
     const catOpts = ['Pokémon', 'Sports', 'Other'].map((v) => ({ label: v, value: v, active: fc.cats.includes(v), onClick: () => this.toggleCat(v) }));
     const rarityOpts: Array<[Rarity, string, string]> = [['common', 'Common', '#13c06a'], ['rare', 'Rare', '#2d5bff'], ['epic', 'Epic', '#7c3aed'], ['legendary', 'Legendary', '#e0a92e']];
@@ -482,9 +546,12 @@ export class TopDeckApp extends Component<Props, State> {
                     <div onClick={this.clearFilters} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>{query ? 'Clear search & filters' : 'Clear filters'}</div>
                   </div>
                 ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 20 }}>
-                    {list.map((c) => this.cardTile(c, 172))}
-                  </div>
+                  <>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 20 }}>
+                      {pageList.map((c) => this.cardTile(c, 172))}
+                    </div>
+                    {totalPages > 1 && this.renderPagination(page, totalPages, list.length, pageStart, pageList.length)}
+                  </>
                 )}
               </div>
             </div>
