@@ -16,24 +16,40 @@ import {
   buyNowSchema,
   cancelListingSchema,
   cardAsset,
+  fromStellarAsset,
   listInputSchema,
   makeOfferSchema,
+  passkeySubmitSchema,
+  pathPaymentBuildSchema,
+  pathQuoteSchema,
   submitTxSchema,
+  toStellarAsset,
   toStroops,
   usdcAsset,
   withdrawOfferSchema,
+  type PathQuoteResponse,
   type TradeAction,
 } from '@cardmkt/shared';
 import { env } from '../env.js';
 import {
   PreflightError,
+  buildChangeTrustTx,
   buildContractTx,
+  buildPathPaymentTx,
   buildTrustlineTx,
+  findStrictReceivePath,
+  getAssetBalance,
+  hasTrustline,
   requireBalance,
+  requireSmartWalletUsdc,
+  requireSourceBalance,
   requireTrustline,
   submitClassicTx,
   submitSignedTx,
+  transactionReturnValue,
+  withSlippage,
 } from '../stellar.js';
+import { relaySubmitter } from '../relay.js';
 
 export const txRouter: Router = Router();
 
@@ -216,6 +232,95 @@ txRouter.post('/trustline', async (req, res, next) => {
   }
 });
 
+// --- build: quote a pay-with-any-asset conversion ---
+// Prices a source-asset -> USDC route and sizes the conversion to the buyer's
+// USDC shortfall, so a buyer already holding enough USDC converts nothing.
+txRouter.post('/quote-path', async (req, res, next) => {
+  try {
+    const input = pathQuoteSchema.parse(req.body);
+    const sourceAsset = toStellarAsset(input.sourceAsset);
+
+    // Only convert the gap between what's needed and what the buyer already holds.
+    const currentUsdc = await getAssetBalance(input.buyer, usdc);
+    const shortfall = Math.max(0, Number(input.destUsdc) - Number(currentUsdc));
+
+    const slippageBps = env.pathPaymentSlippageBps;
+    if (shortfall <= 0) {
+      // Already funded — signal "no conversion" with a zero quote.
+      const quote: PathQuoteResponse = {
+        sourceAsset: input.sourceAsset,
+        destUsdc: '0',
+        sendAmount: '0',
+        sendMax: '0',
+        slippageBps,
+        path: [],
+      };
+      res.json(quote);
+      return;
+    }
+
+    const destUsdc = shortfall.toFixed(7);
+    const found = await findStrictReceivePath(sourceAsset, usdc, destUsdc);
+    if (!found) {
+      throw new PreflightError(
+        `No path from ${input.sourceAsset.code} to ${usdc.getCode()} for ${destUsdc}`,
+        'NO_PATH',
+        { sourceAsset: input.sourceAsset, destUsdc },
+      );
+    }
+
+    const quote: PathQuoteResponse = {
+      sourceAsset: input.sourceAsset,
+      destUsdc,
+      sendAmount: found.sendAmount,
+      sendMax: withSlippage(found.sendAmount, slippageBps),
+      slippageBps,
+      path: found.path.map(fromStellarAsset),
+    };
+    res.json(quote);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: pay-with-any-asset path payment (top-up to USDC) ---
+// Pre-flight: a missing USDC trustline returns MISSING_TRUSTLINE plus a
+// change_trust build to run first; an insufficient source balance is rejected.
+txRouter.post('/path-payment', async (req, res, next) => {
+  try {
+    const input = pathPaymentBuildSchema.parse(req.body);
+    const sourceAsset = toStellarAsset(input.sourceAsset);
+    const path = input.path.map(toStellarAsset);
+
+    if (!(await hasTrustline(input.buyer, usdc))) {
+      const changeTrustXdr = await buildChangeTrustTx(input.buyer, usdc);
+      throw new PreflightError(
+        `Establish a ${usdc.getCode()} trustline before converting`,
+        'MISSING_TRUSTLINE',
+        {
+          assetCode: usdc.getCode(),
+          assetIssuer: usdc.getIssuer(),
+          xdr: changeTrustXdr,
+          networkPassphrase: env.stellar.networkPassphrase,
+        },
+      );
+    }
+    await requireSourceBalance(input.buyer, sourceAsset, input.sendMax);
+
+    const xdr = await buildPathPaymentTx(
+      input.buyer,
+      sourceAsset,
+      input.sendMax,
+      usdc,
+      input.destUsdc,
+      path,
+    );
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- submit: classic tx (trustline), no contract reconciliation ---
 txRouter.post('/submit-classic', async (req, res, next) => {
   try {
@@ -325,6 +430,77 @@ txRouter.post('/submit', async (req, res, next) => {
         }
         break;
       }
+    }
+
+    res.json({ hash: result.hash, successful: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- submit: passkey smart-wallet deployment (deploy-on-first-use), relay only ---
+txRouter.post('/passkey-deploy', async (req, res, next) => {
+  try {
+    const { signedXdr } = submitTxSchema.parse(req.body);
+    const result = await relaySubmitter().submit(signedXdr);
+    res.json({ hash: result.hash, successful: result.successful });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- submit: passkey smart-wallet (gasless relay) + reconcile DB ---
+//
+// The browser builds + passkey-signs the marketplace call client-side (the
+// relayer is the tx source, the smart wallet is the buyer), so this path does
+// not reuse the `G…`-only build endpoints. It pre-flights the smart wallet's
+// USDC, relays the signed envelope, and reconciles using the `C…` address as
+// buyer of record. A relay/tx failure throws before any DB mutation.
+txRouter.post('/passkey-submit', async (req, res, next) => {
+  try {
+    const input = passkeySubmitSchema.parse(req.body);
+    const { listing, card } = await getListingWithCard(input.listingId);
+    needContractId(listing.contractListingId, 'Listing');
+
+    // Pre-flight the contract-account buyer's USDC (no classic trustline check;
+    // tolerant of an undeployed wallet).
+    const need = input.action === 'buy_now' ? listing.priceUsdc : input.amountUsdc;
+    if (input.action === 'make_offer' && !need) {
+      throw new PreflightError('amountUsdc is required for make_offer', 'BAD_REQUEST');
+    }
+    await requireSmartWalletUsdc(input.buyer, need!);
+
+    const result = await relaySubmitter().submit(input.signedXdr);
+    if (!result.successful) {
+      throw new PreflightError('Relayed transaction did not succeed on-chain', 'TX_FAILED', {
+        hash: result.hash,
+      });
+    }
+
+    if (input.action === 'buy_now') {
+      await db.update(listings).set({ status: 'sold' }).where(eq(listings.id, listing.id));
+      await db.insert(trades).values({
+        listingId: listing.id,
+        buyer: input.buyer, // the smart-wallet C-address, not the relay source
+        seller: listing.seller,
+        priceUsdc: listing.priceUsdc,
+        feeUsdc: feeFor(listing.priceUsdc),
+        royaltyUsdc: royaltyFor(listing.priceUsdc, card, listing.seller),
+        settleTxHash: result.hash,
+      });
+    } else {
+      // make_offer: the relayer submitted the tx, so recover the contract's
+      // returned offer id from the on-chain result for later reconciliation.
+      const returned = await transactionReturnValue(result.hash);
+      const contractOfferId = returned == null ? null : Number(returned);
+      await db.insert(offers).values({
+        listingId: listing.id,
+        buyer: input.buyer,
+        amountUsdc: need!,
+        status: 'open',
+        contractOfferId: Number.isFinite(contractOfferId) ? contractOfferId : null,
+        escrowTxHash: result.hash,
+      });
     }
 
     res.json({ hash: result.hash, successful: true });

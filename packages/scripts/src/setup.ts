@@ -78,6 +78,11 @@ async function main() {
   // The creator receives royalties on resale; it must trust USDC so atomic
   // settlement can deliver its cut.
   const creator = Keypair.random();
+  // Provides XLM↔USDC liquidity on the DEX so a pay-with-any-asset path payment
+  // always has a route on testnet.
+  const marketMaker = Keypair.random();
+  // A buyer that holds only XLM (no USDC), to demo pay-with-any-asset checkout.
+  const xlmBuyer = Keypair.random();
 
   console.log('[setup] funding accounts via friendbot...');
   await Promise.all([
@@ -85,6 +90,8 @@ async function main() {
     friendbot(merchant.publicKey()),
     friendbot(consumer.publicKey()),
     friendbot(creator.publicKey()),
+    friendbot(marketMaker.publicKey()),
+    friendbot(xlmBuyer.publicKey()),
   ]);
 
   const usdc = new Asset(USDC_CODE, platform.publicKey());
@@ -94,6 +101,25 @@ async function main() {
   await trustAndReceive(merchant, platform, usdc, '1000');
   // Creator only needs the trustline (0 balance) to be able to receive royalties.
   await trustAndReceive(creator, platform, usdc, '0');
+  // Market maker holds USDC to sell into the XLM/USDC book.
+  await trustAndReceive(marketMaker, platform, usdc, '20000');
+  // The XLM-only buyer just needs a USDC trustline (0 balance) so a path payment
+  // can deliver converted USDC into it.
+  await trustAndReceive(xlmBuyer, platform, usdc, '0');
+
+  console.log('[setup] seeding XLM↔USDC liquidity (sell USDC for XLM)...');
+  // A sell offer of USDC for XLM gives strict-receive path finding a route from
+  // XLM to USDC. Price is XLM per 1 USDC.
+  await submit(marketMaker, (b) =>
+    b.addOperation(
+      Operation.manageSellOffer({
+        selling: usdc,
+        buying: Asset.native(),
+        amount: '15000',
+        price: '2',
+      }),
+    ),
+  );
 
   console.log('[setup] issuing sample cards to the merchant...');
   const cards: { slug: string; assetCode: string; issuer: string }[] = [];
@@ -119,6 +145,8 @@ async function main() {
     merchant: { publicKey: merchant.publicKey(), secret: merchant.secret() },
     consumer: { publicKey: consumer.publicKey(), secret: consumer.secret() },
     creator: { publicKey: creator.publicKey(), secret: creator.secret() },
+    marketMaker: { publicKey: marketMaker.publicKey(), secret: marketMaker.secret() },
+    xlmBuyer: { publicKey: xlmBuyer.publicKey(), secret: xlmBuyer.secret() },
     usdc: { code: USDC_CODE, issuer: platform.publicKey() },
     cards,
   };

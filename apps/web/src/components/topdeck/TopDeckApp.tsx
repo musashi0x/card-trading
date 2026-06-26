@@ -14,7 +14,9 @@
  */
 
 import { Component, type CSSProperties } from 'react';
-import type { Card } from '@cardmkt/shared';
+import type { Card, PathQuoteResponse, StellarAsset } from '@cardmkt/shared';
+import { XLM_ASSET } from '@cardmkt/shared';
+import { ApiRequestError, api } from '@/lib/api';
 import {
   type Rarity,
   type TopCard,
@@ -36,10 +38,27 @@ const PAGE_SIZE = 12; // lots per browse page (multiple of 3 to fill the grid)
 interface WalletProps {
   address: string | null;
   connecting: boolean;
+  /** Whether the connected wallet is a passkey smart wallet vs. a classic one. */
+  walletKind: 'classic' | 'passkey' | null;
+  /** Whether passkey checkout can be offered on this device/build. */
+  passkeyAvailable: boolean;
   connect: () => void;
+  /** Connect (or create) a passkey smart wallet via Face ID / Touch ID. */
+  connectViaPasskey: () => Promise<void>;
   disconnect: () => void;
   runAction: (action: 'list', body: Record<string, unknown>) => Promise<string>;
+  /** Buy a real listing with the passkey smart wallet (gasless). Returns tx hash. */
+  passkeyBuyNow: (listingId: string, contractListingId: number) => Promise<string>;
+  /** Convert a held asset into the settlement USDC (pay-with-any-asset). */
+  payWithAsset: (quote: PathQuoteResponse) => Promise<string | null>;
 }
+
+/** Source assets the buyer can pay with. USDC is the no-conversion default. */
+type PayAssetId = 'USDC' | 'XLM';
+const PAY_ASSETS: Array<{ id: PayAssetId; label: string; asset: StellarAsset | null }> = [
+  { id: 'USDC', label: 'USDC', asset: null },
+  { id: 'XLM', label: 'XLM', asset: XLM_ASSET },
+];
 
 interface Props {
   wallet: WalletProps;
@@ -85,6 +104,17 @@ interface State {
   cards: TopCard[];
   now: number;
   page: number;
+  /** Source asset selected in the buy panel (USDC = no conversion). */
+  payAsset: PayAssetId;
+  /** Live conversion quote for the selected non-USDC asset. */
+  quote: PathQuoteResponse | null;
+  quoting: boolean;
+  /** User-facing quote/conversion error (NO_PATH, INSUFFICIENT_BALANCE, …). */
+  quoteErr: string | null;
+  /** A passkey "Pay with Face ID" checkout is in flight. */
+  paying: boolean;
+  /** User-facing passkey-checkout error (declined / relay failure). */
+  payErr: string | null;
 }
 
 const EMPTY_FORM: Form = {
@@ -107,6 +137,8 @@ export class TopDeckApp extends Component<Props, State> {
       sellStep: 1, myBidsTab: 'bidding', publishing: false, lastHash: null,
       form: { ...EMPTY_FORM },
       cards: props.seedCards,
+      payAsset: 'USDC', quote: null, quoting: false, quoteErr: null,
+      paying: false, payErr: null,
     };
   }
 
@@ -126,7 +158,7 @@ export class TopDeckApp extends Component<Props, State> {
   private getCard(id: string | null) {
     return this.state.cards.find((c) => c.id === id);
   }
-  private open = (id: string) => { this.setState({ screen: 'detail', selectedId: id }); window.scrollTo(0, 0); };
+  private open = (id: string) => { this.setState({ screen: 'detail', selectedId: id, payAsset: 'USDC', quote: null, quoteErr: null }); window.scrollTo(0, 0); };
   private goHome = () => { this.setState({ screen: 'browse' }); window.scrollTo(0, 0); };
   private goMyBids = () => { this.setState({ screen: 'mybids' }); window.scrollTo(0, 0); };
   private goSell = () => { this.setState({ screen: 'sell', sellStep: 1 }); window.scrollTo(0, 0); };
@@ -220,11 +252,98 @@ export class TopDeckApp extends Component<Props, State> {
     }, 4200);
   }
 
-  private buyNow = () => {
+  /** Human-readable message for a pay-with-any-asset failure code. */
+  private quoteError(err: unknown): string {
+    if (err instanceof ApiRequestError) {
+      if (err.code === 'NO_PATH') return 'No swap route for this asset right now';
+      if (err.code === 'INSUFFICIENT_BALANCE') return 'Not enough of this asset to cover the price';
+      if (err.code === 'ACCOUNT_NOT_FOUND') return 'Fund your wallet to pay with this asset';
+      return err.message;
+    }
+    return 'Could not fetch a quote';
+  }
+
+  /** Switch the source asset and, for a non-USDC pick, fetch a live quote. */
+  private selectPayAsset = (id: PayAssetId) => {
+    this.setState({ payAsset: id, quote: null, quoteErr: null });
+    const def = PAY_ASSETS.find((a) => a.id === id);
+    if (!def?.asset) return; // USDC — no conversion needed
+    const c = this.getCard(this.state.selectedId);
+    const { address } = this.props.wallet;
+    if (!c || !address) {
+      if (!address) this.setState({ quoteErr: 'Connect your wallet to see a quote' });
+      return;
+    }
+    const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+    this.setState({ quoting: true });
+    api
+      .quotePath({ buyer: address, sourceAsset: def.asset, destUsdc: String(price) })
+      .then((quote) => {
+        // Ignore a stale response if the user switched assets meanwhile.
+        if (this.state.selectedId === c.id && this.state.payAsset === id) {
+          this.setState({ quote, quoting: false });
+        }
+      })
+      .catch((err) => {
+        if (this.state.selectedId === c.id && this.state.payAsset === id) {
+          this.setState({ quoting: false, quoteErr: this.quoteError(err) });
+        }
+      });
+  };
+
+  private buyNow = async () => {
     const c = this.getCard(this.state.selectedId);
     if (!c) return;
-    this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' } }));
-    this.showToast('Purchased! ' + c.name + ' is yours 🎉', 'win');
+    const { address, connect, payWithAsset } = this.props.wallet;
+    const def = PAY_ASSETS.find((a) => a.id === this.state.payAsset);
+
+    // Default USDC path stays simulated (no on-chain buy contract in this skin).
+    if (!def?.asset) {
+      this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' } }));
+      this.showToast('Purchased! ' + c.name + ' is yours 🎉', 'win');
+      return;
+    }
+
+    // Pay-with-any-asset: convert to USDC on-chain, then settle.
+    if (!address) {
+      this.showToast('Connect your wallet to pay', 'outbid');
+      connect();
+      return;
+    }
+    const quote = this.state.quote;
+    if (!quote) {
+      this.showToast('Fetching a quote — try again in a moment', 'outbid');
+      return;
+    }
+    this.setState({ quoting: true, quoteErr: null });
+    try {
+      await payWithAsset(quote);
+      this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, quoting: false }));
+      this.showToast(`Paid with ${def.label} — ${c.name} is yours 🎉`, 'win');
+    } catch (err) {
+      this.setState({ quoting: false, quoteErr: this.quoteError(err) });
+      this.showToast(this.quoteError(err), 'outbid');
+    }
+  };
+
+  // ----- passkey "Pay with Face ID" checkout -----
+  private payWithPasskey = async () => {
+    const c = this.getCard(this.state.selectedId);
+    if (!c?.real || c.contractListingId == null || !c.listingId) return;
+    const { passkeyBuyNow, walletKind, connectViaPasskey } = this.props.wallet;
+    this.setState({ paying: true, payErr: null });
+    try {
+      // One flow: connect/create the passkey wallet if needed, then one
+      // biometric prompt authorizes the gasless purchase.
+      if (walletKind !== 'passkey') await connectViaPasskey();
+      const hash = await passkeyBuyNow(c.listingId, c.contractListingId);
+      this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, paying: false, lastHash: hash }));
+      this.showToast(`Face ID confirmed — ${c.name} is yours 🎉`, 'win');
+    } catch (err) {
+      const msg = err instanceof ApiRequestError ? err.message : 'Purchase cancelled — try again';
+      this.setState({ paying: false, payErr: msg });
+      this.showToast(msg, 'outbid');
+    }
   };
 
   // ----- sell flow -----
@@ -445,8 +564,7 @@ export class TopDeckApp extends Component<Props, State> {
       <div style={{ minHeight: '100vh', background: '#fff7ec', fontFamily: SANS, color: INK }}>
         {/* ===== TOP NAV ===== */}
         <div style={{ position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: 18, padding: '14px 32px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
-          <div onClick={this.goHome} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>
-            <img src="/logo.png" alt="TopDeck Logo" style={{ width: 28, height: 28, borderRadius: '50%', border: `2.5px solid ${INK}` }} />
+          <div onClick={this.goHome} style={{ display: 'flex', alignItems: 'center', fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>
             <span>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></span>
           </div>
           <div style={{ flex: 1, maxWidth: 460, display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, padding: '9px 14px' }}>
@@ -470,9 +588,12 @@ export class TopDeckApp extends Component<Props, State> {
             <div style={{ fontSize: 13.5, fontWeight: 700, color: st.screen === 'mybids' ? INK : 'rgba(26,19,5,.55)', paddingBottom: 2, borderBottom: st.screen === 'mybids' ? `2.5px solid ${INK}` : '2.5px solid transparent' }}>My bids</div>
           </div>
           <div onClick={this.goSell} style={{ fontSize: 13, fontWeight: 700, padding: '9px 16px', background: '#2d5bff', color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>Sell a card</div>
+          {wallet.passkeyAvailable && !wallet.address && (
+            <div onClick={() => { if (!wallet.connecting) void wallet.connectViaPasskey(); }} title="Create or connect a passkey smart wallet — no seed phrase" style={{ fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>⚡ Face ID</div>
+          )}
           <div onClick={this.onWalletClick} title={wallet.address ?? 'Connect wallet'} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
             <span style={{ width: 9, height: 9, borderRadius: '50%', background: wallet.address ? '#13c06a' : 'rgba(26,19,5,.3)' }} />
-            {wallet.connecting ? 'Connecting…' : wallet.address ? shorten(wallet.address) : 'Connect'}
+            {wallet.connecting ? 'Connecting…' : wallet.address ? `${wallet.walletKind === 'passkey' ? '⚡ ' : ''}${shorten(wallet.address)}` : 'Connect'}
           </div>
         </div>
 
@@ -595,6 +716,70 @@ export class TopDeckApp extends Component<Props, State> {
 
   // ===== DETAIL =====
   /**
+   * Pay-with-any-asset picker: choose the source asset and, for a non-USDC
+   * choice, show a live Stellar path-payment quote — what the buyer spends, the
+   * slippage-capped maximum, and the USDC the seller still receives. Selecting
+   * USDC is the no-conversion default.
+   */
+  private renderPayWith(c: TopCard) {
+    const st = this.state;
+    const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+    const sel = st.payAsset;
+    const trim = (s: string) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+
+    return (
+      <div style={{ marginTop: 18, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13, padding: '14px 18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 14 }}>Pay with</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {PAY_ASSETS.map((a) => (
+              <div
+                key={a.id}
+                onClick={() => this.selectPayAsset(a.id)}
+                style={{
+                  fontSize: 12.5, fontWeight: 800, padding: '7px 14px', borderRadius: 9, cursor: 'pointer',
+                  border: `2.5px solid ${INK}`, fontFamily: DISPLAY,
+                  background: sel === a.id ? INK : '#fff', color: sel === a.id ? '#fff' : INK,
+                }}
+              >
+                {a.label}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {sel !== 'USDC' && (
+          <div style={{ marginTop: 12, fontSize: 12.5, fontWeight: 600 }}>
+            {st.quoting && !st.quote ? (
+              <div style={{ color: 'rgba(26,19,5,.55)' }}>Fetching best price…</div>
+            ) : st.quoteErr ? (
+              <div style={{ color: '#a3160a', fontWeight: 700 }}>⚠ {st.quoteErr}</div>
+            ) : st.quote && Number(st.quote.destUsdc) <= 0 ? (
+              <div style={{ color: '#0a5e34', fontWeight: 700 }}>
+                ✓ You already hold enough USDC — no swap needed
+              </div>
+            ) : st.quote ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <div>
+                  You pay ≈ <strong>{trim(st.quote.sendAmount)} {sel}</strong> → seller receives{' '}
+                  <strong>{trim(st.quote.destUsdc)} USDC</strong>
+                </div>
+                <div style={{ color: 'rgba(26,19,5,.55)' }}>
+                  Max {trim(st.quote.sendMax)} {sel} · {(st.quote.slippageBps / 100).toFixed(2)}% slippage cap
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: 'rgba(26,19,5,.55)' }}>
+                Converted on-chain to {money(price)} USDC via a Stellar path payment.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /**
    * The on-chain settlement breakdown for this listing: the sale price splits
    * atomically into seller proceeds, a 2% platform fee, and — on resale of a
    * card with a registered royalty — a creator royalty. Surfaced here in the
@@ -716,9 +901,23 @@ export class TopDeckApp extends Component<Props, State> {
                   <div onClick={this.buyNow} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Buy now · {money(c.buyNow)}</div>
                 )}
               </div>
+              {this.props.wallet.passkeyAvailable && c.real && c.contractListingId != null && (
+                <>
+                  <div
+                    onClick={this.state.paying ? undefined : this.payWithPasskey}
+                    style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: this.state.paying ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: this.state.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                  >
+                    {this.state.paying ? 'Confirming…' : `⚡ Pay with Face ID · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                  </div>
+                  <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
+                    {this.state.payErr ?? 'No seed phrase · no extension · fees sponsored'}
+                  </div>
+                </>
+              )}
               <div style={{ textAlign: 'center', fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>🛡 Buyer protection · authenticated by TopDeck Vault before shipping</div>
             </div>
 
+            {c.buyNow > 0 && this.renderPayWith(c)}
             {this.renderSettlement(c)}
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginTop: 18, padding: '14px 16px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13 }}>

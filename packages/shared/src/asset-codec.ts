@@ -8,6 +8,8 @@
 
 import { Asset } from '@stellar/stellar-sdk';
 
+import type { StellarAsset } from './types';
+
 /** Stellar asset codes are 1-12 alphanumeric characters. */
 const ASSET_CODE_RE = /^[A-Za-z0-9]{1,12}$/;
 
@@ -36,6 +38,24 @@ export function cardAsset(assetCode: string, issuer: string): Asset {
 /** Build the Stellar `Asset` for the test payment currency (USDC-equivalent). */
 export function usdcAsset(code: string, issuer: string): Asset {
   return new Asset(code, issuer);
+}
+
+/** The native asset (XLM) as a {@link StellarAsset} — `issuer` is `null`. */
+export const XLM_ASSET: StellarAsset = { code: 'XLM', issuer: null };
+
+/** True when a {@link StellarAsset} refers to the native asset (XLM). */
+export function isNativeAsset(asset: StellarAsset): boolean {
+  return asset.issuer === null;
+}
+
+/** Convert a {@link StellarAsset} into a Stellar SDK `Asset` (native when issuerless). */
+export function toStellarAsset(asset: StellarAsset): Asset {
+  return isNativeAsset(asset) ? Asset.native() : new Asset(asset.code, asset.issuer as string);
+}
+
+/** Convert a Stellar SDK `Asset` into a {@link StellarAsset} wire shape. */
+export function fromStellarAsset(asset: Asset): StellarAsset {
+  return asset.isNative() ? { ...XLM_ASSET } : { code: asset.getCode(), issuer: asset.getIssuer() };
 }
 
 /** A stable string key for an asset, used in DB rows and contract args. */

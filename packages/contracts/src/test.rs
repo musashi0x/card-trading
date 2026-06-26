@@ -79,9 +79,21 @@ fn offer_then_accept_settles_atomically_with_fee() {
     f.client.accept_offer(&f.seller, &offer_id);
 
     let fee = offer_amount * (FEE_BPS as i128) / 10_000; // 0.8 USDC
-    assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD, "buyer receives card");
-    assert_eq!(f.usdc_token.balance(&f.seller), offer_amount - fee, "seller receives minus fee");
-    assert_eq!(f.usdc_token.balance(&f.platform), fee, "platform receives fee");
+    assert_eq!(
+        f.card_token.balance(&f.buyer),
+        ONE_CARD,
+        "buyer receives card"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.seller),
+        offer_amount - fee,
+        "seller receives minus fee"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.platform),
+        fee,
+        "platform receives fee"
+    );
     // Escrow drained.
     assert_eq!(f.usdc_token.balance(&f.client.address), 0);
     assert_eq!(f.card_token.balance(&f.client.address), 0);
@@ -235,4 +247,58 @@ fn card_without_royalty_settles_two_ways() {
     assert_eq!(f.usdc_token.balance(&f.seller), price - fee);
     assert_eq!(f.usdc_token.balance(&f.platform), fee);
     assert_eq!(f.usdc_token.balance(&f.creator), 0, "no royalty taken");
+}
+
+#[test]
+fn buy_now_settles_for_contract_address_buyer() {
+    // A passkey smart wallet is a contract account (a `C…` address), not a
+    // classic `G…` key. The buyer is plain `Address`, so settlement must work
+    // identically when the buyer is a contract: `require_auth` and the USDC SAC
+    // transfer are Address-generic. This guards against any classic-only
+    // assumption sneaking into `buy_now`.
+    let f = setup();
+    let wallet: Address = f.env.register(Marketplace, ());
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&wallet, &(1000 * USDC));
+
+    let price = 60 * USDC;
+    let listing_id = f.client.list(&f.seller, &f.card, &price);
+    f.client.buy_now(&wallet, &listing_id);
+
+    let fee = price * (FEE_BPS as i128) / 10_000;
+    assert_eq!(
+        f.card_token.balance(&wallet),
+        ONE_CARD,
+        "contract-address buyer receives the card"
+    );
+    assert_eq!(f.usdc_token.balance(&f.seller), price - fee);
+    assert_eq!(f.usdc_token.balance(&f.platform), fee);
+}
+
+#[test]
+fn make_offer_accepts_from_contract_address_buyer() {
+    // Same Address-generic guarantee for the offer/accept path: a contract
+    // account can escrow USDC via `make_offer` and receive the card on settle.
+    let f = setup();
+    let wallet: Address = f.env.register(Marketplace, ());
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&wallet, &(1000 * USDC));
+
+    let price = 50 * USDC;
+    let offer_amount = 40 * USDC;
+    let listing_id = f.client.list(&f.seller, &f.card, &price);
+    let offer_id = f.client.make_offer(&wallet, &listing_id, &offer_amount);
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        offer_amount,
+        "contract-address buyer's USDC is escrowed"
+    );
+
+    f.client.accept_offer(&f.seller, &offer_id);
+    let fee = offer_amount * (FEE_BPS as i128) / 10_000;
+    assert_eq!(
+        f.card_token.balance(&wallet),
+        ONE_CARD,
+        "contract-address buyer receives the card on settle"
+    );
+    assert_eq!(f.usdc_token.balance(&f.seller), offer_amount - fee);
+    assert_eq!(f.usdc_token.balance(&f.platform), fee);
 }

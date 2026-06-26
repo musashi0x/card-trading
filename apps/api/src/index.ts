@@ -9,6 +9,7 @@ import { env } from './env.js';
 import { catalogRouter } from './routes/catalog.js';
 import { txRouter } from './routes/tx.js';
 import { tradesRouter } from './routes/trades.js';
+import { devRouter } from './routes/dev.js';
 import { startIndexer } from './indexer.js';
 
 const app = express();
@@ -21,6 +22,8 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.use('/api', catalogRouter);
 app.use('/api/tx', txRouter);
 app.use('/api/trades', tradesRouter);
+// Dev-only conveniences (e.g. funding a smart wallet with test USDC).
+if (env.stellar.network !== 'mainnet') app.use('/api/dev', devRouter);
 
 // Centralized error shape so the web client can rely on { error, code }.
 app.use(

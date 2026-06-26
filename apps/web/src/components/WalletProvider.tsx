@@ -6,18 +6,46 @@
  * trade action goes through one place.
  */
 
-import { createContext, useCallback, useContext, useMemo, useState } from 'react';
-import type { TradeAction } from '@cardmkt/shared';
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import type { PathQuoteResponse, SmartWalletAccount, TradeAction } from '@cardmkt/shared';
 import { ApiRequestError, api } from '@/lib/api';
 import { connectWallet, signXdr } from '@/lib/wallet';
+import {
+  connectPasskey,
+  disconnectPasskey,
+  passkeyEnabled,
+  signBuyNow,
+  takePendingDeploy,
+} from '@/lib/passkey';
+
+/** How the connected account authorizes: classic keypair/extension vs. passkey. */
+export type WalletKind = 'classic' | 'passkey';
 
 interface WalletContextValue {
   address: string | null;
   connecting: boolean;
+  /** The kind of the connected wallet, or `null` when disconnected. */
+  walletKind: WalletKind | null;
+  /** Whether a passkey smart wallet can be offered on this device/build. */
+  passkeyAvailable: boolean;
   connect: () => Promise<void>;
+  /** Connect (or create) a passkey smart wallet via Face ID / Touch ID. */
+  connectViaPasskey: () => Promise<void>;
   disconnect: () => void;
   runAction: (action: TradeAction, body: Record<string, unknown>) => Promise<string>;
+  /**
+   * Buy a listing with the connected passkey smart wallet: one biometric prompt,
+   * gasless relay. Deploys the wallet first when needed (deploy-on-first-use).
+   * Returns the settlement tx hash.
+   */
+  passkeyBuyNow: (listingId: string, contractListingId: number) => Promise<string>;
   establishTrustline: (cardId: string) => Promise<string>;
+  /**
+   * Convert a source asset into the USDC a settlement needs (pay-with-any-asset).
+   * Signs an optional USDC `change_trust`, then the path payment. Returns the
+   * conversion tx hash, or `null` when the quote needs no conversion.
+   */
+  payWithAsset: (quote: PathQuoteResponse) => Promise<string | null>;
 }
 
 const WalletContext = createContext<WalletContextValue | null>(null);
@@ -25,17 +53,68 @@ const WalletContext = createContext<WalletContextValue | null>(null);
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [address, setAddress] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [walletKind, setWalletKind] = useState<WalletKind | null>(null);
+  const smartWallet = useRef<SmartWalletAccount | null>(null);
 
   const connect = useCallback(async () => {
     setConnecting(true);
     try {
       setAddress(await connectWallet());
+      setWalletKind('classic');
+      smartWallet.current = null;
     } finally {
       setConnecting(false);
     }
   }, []);
 
-  const disconnect = useCallback(() => setAddress(null), []);
+  const connectViaPasskey = useCallback(async () => {
+    setConnecting(true);
+    try {
+      const wallet = await connectPasskey();
+      smartWallet.current = { contractId: wallet.contractId, keyId: wallet.keyId };
+      setAddress(wallet.contractId);
+      setWalletKind('passkey');
+      // Fund a freshly created wallet with test USDC (dev only) so the first
+      // purchase has funds. Best-effort: the route is testnet-gated and absent
+      // in production, so ignore failures.
+      if (wallet.isNew) {
+        try {
+          await api.devFundWallet(wallet.contractId);
+        } catch (err) {
+          console.warn('[passkey] dev funding skipped:', (err as Error).message);
+        }
+      }
+    } finally {
+      setConnecting(false);
+    }
+  }, []);
+
+  const disconnect = useCallback(() => {
+    if (walletKind === 'passkey') disconnectPasskey();
+    smartWallet.current = null;
+    setWalletKind(null);
+    setAddress(null);
+  }, [walletKind]);
+
+  const passkeyBuyNow = useCallback(
+    async (listingId: string, contractListingId: number): Promise<string> => {
+      const wallet = smartWallet.current;
+      if (!wallet) throw new Error('Connect a passkey wallet first');
+      // Deploy-on-first-use: relay the held deployment before the first call so
+      // the wallet exists to authorize it.
+      const deploy = takePendingDeploy();
+      if (deploy) await api.passkeyDeploy(deploy);
+      const signedXdr = await signBuyNow(wallet, contractListingId);
+      const { hash } = await api.passkeySubmit({
+        action: 'buy_now',
+        listingId,
+        buyer: wallet.contractId,
+        signedXdr,
+      });
+      return hash;
+    },
+    [],
+  );
 
   /** build -> sign -> submit, returning the settlement/escrow tx hash. */
   const runAction = useCallback(
@@ -61,9 +140,73 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [address],
   );
 
+  const payWithAsset = useCallback(
+    async (quote: PathQuoteResponse): Promise<string | null> => {
+      if (!address) throw new Error('Connect a wallet first');
+      // A zero-conversion quote means the buyer already holds enough USDC.
+      if (Number(quote.destUsdc) <= 0) return null;
+
+      const buildBody = {
+        buyer: address,
+        sourceAsset: quote.sourceAsset,
+        destUsdc: quote.destUsdc,
+        sendMax: quote.sendMax,
+        path: quote.path,
+      };
+      let built;
+      try {
+        built = await api.pathPayment(buildBody);
+      } catch (err) {
+        // Missing USDC trustline: sign the returned change_trust, then retry.
+        if (
+          err instanceof ApiRequestError &&
+          err.code === 'MISSING_TRUSTLINE' &&
+          typeof err.details?.xdr === 'string'
+        ) {
+          const ctSigned = await signXdr(
+            err.details.xdr,
+            address,
+            String(err.details.networkPassphrase),
+          );
+          await api.submitClassic(ctSigned);
+          built = await api.pathPayment(buildBody);
+        } else {
+          throw err;
+        }
+      }
+      const signed = await signXdr(built.xdr, address, built.networkPassphrase);
+      const { hash } = await api.submitClassic(signed);
+      return hash;
+    },
+    [address],
+  );
+
   const value = useMemo(
-    () => ({ address, connecting, connect, disconnect, runAction, establishTrustline }),
-    [address, connecting, connect, disconnect, runAction, establishTrustline],
+    () => ({
+      address,
+      connecting,
+      walletKind,
+      passkeyAvailable: passkeyEnabled(),
+      connect,
+      connectViaPasskey,
+      disconnect,
+      runAction,
+      passkeyBuyNow,
+      establishTrustline,
+      payWithAsset,
+    }),
+    [
+      address,
+      connecting,
+      walletKind,
+      connect,
+      connectViaPasskey,
+      disconnect,
+      runAction,
+      passkeyBuyNow,
+      establishTrustline,
+      payWithAsset,
+    ],
   );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

@@ -19,6 +19,7 @@
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.36.4",
     "express": "^4.21.1",
+    "passkey-kit": "^0.12.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -46,6 +46,8 @@ export interface TopCard {
   real?: boolean;
   /** Real listing id (uuid) — present when `real`. */
   listingId?: string;
+  /** On-chain settlement-contract listing id — needed for passkey buy_now. */
+  contractListingId?: number | null;
   /** Real card id (uuid) — present when `real` or self-listed. */
   cardId?: string;
   /** True for the connected user's own listings (drives the Selling tab). */
@@ -147,6 +149,7 @@ export function mapListing(l: Listing, base = Date.now()): TopCard {
   return {
     id: l.id,
     listingId: l.id,
+    contractListingId: l.contractListingId,
     cardId: l.cardId,
     real: true,
     name: card.name,

@@ -1,3 +1,6 @@
 packages:
-  - "apps/*"
-  - "packages/*"
+  - apps/*
+  - packages/*
+
+patchedDependencies:
+  '@stellar/stellar-sdk@14.6.1': patches/@stellar__stellar-sdk@14.6.1.patch

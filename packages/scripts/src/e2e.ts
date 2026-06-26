@@ -22,6 +22,7 @@ const horizon = new Horizon.Server('https://horizon-testnet.stellar.org');
 const merchant = Keypair.fromSecret(accounts.merchant.secret);
 const consumer = Keypair.fromSecret(accounts.consumer.secret);
 const creator = Keypair.fromSecret(accounts.creator.secret);
+const xlmBuyer = Keypair.fromSecret(accounts.xlmBuyer.secret);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -117,6 +118,12 @@ async function usdcBalance(account: string): Promise<number> {
 async function cardBalance(account: string, assetCode: string): Promise<number> {
   const acct = await horizon.loadAccount(account);
   const b = acct.balances.find((x: any) => x.asset_code === assetCode);
+  return b ? Number(b.balance) : 0;
+}
+
+async function nativeBalance(account: string): Promise<number> {
+  const acct = await horizon.loadAccount(account);
+  const b = acct.balances.find((x: any) => x.asset_type === 'native');
   return b ? Number(b.balance) : 0;
 }
 
@@ -238,6 +245,78 @@ async function main() {
     assert(Math.abs(received - 49.0) < 0.001, `creator-seller received 49.0 (50 - 2% fee, no royalty), got ${received}`);
     const trades = await get('/api/trades');
     assert(Number(trades[0].royaltyUsdc) === 0, 'primary sale records zero royalty');
+  }
+
+  console.log('=== E. pay-with-any-asset (XLM buyer -> path payment -> buy-now) ===');
+  {
+    const cardId = await cardByCode('GROVE'); // no royalty -> clean two-way split
+    const price = '20';
+    const sellerUsdc0 = await usdcBalance(merchant.publicKey());
+    const { refId: listingId } = await action(
+      '/api/tx/list',
+      { cardId, seller: merchant.publicKey(), priceUsdc: price },
+      merchant,
+      'list',
+    );
+    await trustline(cardId, xlmBuyer); // card trustline so settlement can deliver
+    console.log('  listed GROVE @ 20; XLM buyer trustline -> GROVE');
+
+    // 1) Quote XLM -> USDC for the full price (the buyer holds no USDC).
+    const quote = await post('/api/tx/quote-path', {
+      buyer: xlmBuyer.publicKey(),
+      sourceAsset: { code: 'XLM', issuer: null },
+      destUsdc: price,
+    });
+    assert(
+      Math.abs(Number(quote.destUsdc) - Number(price)) < 0.0001,
+      `quote converts the full ${price} USDC (buyer holds none)`,
+    );
+    assert(Number(quote.sendMax) >= Number(quote.sendAmount), 'sendMax includes slippage headroom');
+
+    // 2) Convert: build the path payment, sign with the XLM buyer, submit.
+    const xlm0 = await nativeBalance(xlmBuyer.publicKey());
+    const built = await post('/api/tx/path-payment', {
+      buyer: xlmBuyer.publicKey(),
+      sourceAsset: { code: 'XLM', issuer: null },
+      destUsdc: quote.destUsdc,
+      sendMax: quote.sendMax,
+      path: quote.path,
+    });
+    const signed = sign(built.xdr, built.networkPassphrase, xlmBuyer);
+    await post('/api/tx/submit-classic', { signedXdr: signed });
+    console.log('  converted XLM -> USDC via path payment');
+
+    const spent = xlm0 - (await nativeBalance(xlmBuyer.publicKey()));
+    assert(spent > 0, 'buyer spent XLM on the conversion');
+    assert(
+      spent <= Number(quote.sendMax) + 0.01,
+      `XLM spent within sendMax (+fees): spent ${spent} <= ${quote.sendMax}`,
+    );
+    const buyerUsdc = await usdcBalance(xlmBuyer.publicKey());
+    assert(Math.abs(buyerUsdc - Number(price)) < 0.0001, `buyer now holds exactly ${price} USDC`);
+
+    // 3) Settle: buy-now, now that the buyer holds the converted USDC.
+    await action('/api/tx/buy-now', { listingId, buyer: xlmBuyer.publicKey() }, xlmBuyer, 'buy_now');
+    assert((await cardBalance(xlmBuyer.publicKey(), 'GROVE')) >= 1, 'XLM buyer received GROVE via buy-now');
+    // GROVE has no royalty: 2% fee on 20 -> seller nets 19.6.
+    const received = (await usdcBalance(merchant.publicKey())) - sellerUsdc0;
+    assert(Math.abs(received - 19.6) < 0.001, `seller received 19.6 (20 - 2% fee), got ${received}`);
+  }
+
+  console.log('=== F. pay-with-any-asset skip (USDC-holding buyer needs no conversion) ===');
+  {
+    // The consumer already holds USDC, so the quote should size the conversion
+    // to zero and the UI/flow skips the path payment entirely.
+    const quote = await post('/api/tx/quote-path', {
+      buyer: consumer.publicKey(),
+      sourceAsset: { code: 'XLM', issuer: null },
+      destUsdc: '20',
+    });
+    assert(Number(quote.destUsdc) === 0, 'USDC-holding buyer gets a zero-conversion quote');
+    assert(
+      quote.path.length === 0 && Number(quote.sendMax) === 0,
+      'no path payment is needed when USDC already suffices',
+    );
   }
 
   console.log('\n✅ ALL E2E SCENARIOS PASSED');
