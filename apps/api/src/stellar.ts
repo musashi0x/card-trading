@@ -320,9 +320,21 @@ export async function mintUsdcTo(
  * the balance can't be determined (e.g. the wallet/SAC entry doesn't exist yet).
  */
 export async function smartWalletUsdcStroops(walletContractId: string): Promise<bigint | null> {
+  const usdc = new Asset(env.usdc.code, env.usdc.issuer);
+  return smartWalletTokenStroops(usdc.contractId(env.stellar.networkPassphrase), walletContractId);
+}
+
+/**
+ * Read a smart wallet's (`C…`) balance of any token by simulating the token
+ * contract's `balance(addr)`. Returns stroops, or `null` when the balance can't
+ * be determined (e.g. the wallet/token entry doesn't exist yet).
+ */
+async function smartWalletTokenStroops(
+  tokenContractId: string,
+  walletContractId: string,
+): Promise<bigint | null> {
   try {
-    const usdc = new Asset(env.usdc.code, env.usdc.issuer);
-    const sac = new Contract(usdc.contractId(env.stellar.networkPassphrase));
+    const sac = new Contract(tokenContractId);
     const op = sac.call('balance', new Address(walletContractId).toScVal());
     const account = await rpcServer.getAccount(env.platformIssuer);
     const tx = new TransactionBuilder(account, {
@@ -366,6 +378,33 @@ export async function requireSmartWalletUsdc(
       `Insufficient USDC in smart wallet: have ${have} stroops, need ${need}`,
       'INSUFFICIENT_BALANCE',
       { have: have.toString(), need: need.toString() },
+    );
+  }
+}
+
+/**
+ * Ensure a smart-wallet seller (`C…`) holds at least one copy of a card token
+ * before listing it. Mirrors {@link requireSmartWalletUsdc}: tolerant of an
+ * unreadable balance (treated as unverifiable, not a hard fail) so an undeployed
+ * wallet's deploy-on-first-use isn't blocked; the on-chain `list` still enforces
+ * ownership atomically.
+ */
+export async function requireSmartWalletCard(
+  walletContractId: string,
+  cardSacAddress: string,
+): Promise<void> {
+  const have = await smartWalletTokenStroops(cardSacAddress, walletContractId);
+  if (have === null) {
+    console.warn(
+      `[preflight] could not read card balance for smart wallet ${walletContractId}; skipping ownership check`,
+    );
+    return;
+  }
+  if (have <= 0n) {
+    throw new PreflightError(
+      'Smart wallet does not hold a copy of this card',
+      'INSUFFICIENT_BALANCE',
+      { have: have.toString(), need: '10000000' },
     );
   }
 }

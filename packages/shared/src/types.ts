@@ -14,6 +14,8 @@ export interface Card {
   assetCode: string;
   /** Stellar account that issued the asset. */
   issuer: string;
+  /** Card token's Stellar Asset Contract address (`C…`), or null if not deployed. */
+  sacAddress: string | null;
   name: string;
   set: string;
   rarity: string;
@@ -173,6 +175,23 @@ export interface PasskeySubmitRequest {
   signedXdr: string;
   /** Offer amount; required for `make_offer`, ignored for `buy_now`. */
   amountUsdc?: string;
+}
+
+/**
+ * Submit a passkey-authorized `list` for gasless relay submission. The smart
+ * wallet is the seller of record; the browser builds the marketplace `list`
+ * call with the smart wallet as seller, passkey-signs its authorization entry
+ * (and, on first use, bundles wallet deployment), and serializes the result to
+ * `signedXdr`. The API relays it rather than using a classic Horizon submit.
+ */
+export interface PasskeyListRequest {
+  cardId: string;
+  /** Smart-wallet contract address (`C…`) acting as seller of record. */
+  seller: string;
+  /** Asking price in test USDC, as a decimal string. */
+  priceUsdc: string;
+  /** Passkey-signed transaction envelope (XDR), ready for the relay. */
+  signedXdr: string;
 }
 
 export interface SubmitTxResponse {

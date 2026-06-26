@@ -68,14 +68,29 @@ export function passkeyEnabled(): boolean {
 export async function connectPasskey(): Promise<SmartWalletAccount & { isNew: boolean }> {
   const k = getKit();
   const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(KEY_STORAGE) : null;
-  if (stored) {
-    const res = await k.connectWallet({ keyId: stored, rpId: RP_ID });
-    return { contractId: res.contractId, keyId: res.keyIdBase64, isNew: false };
+  try {
+    if (stored) {
+      const res = await k.connectWallet({ keyId: stored, rpId: RP_ID });
+      return { contractId: res.contractId, keyId: res.keyIdBase64, isNew: false };
+    }
+    const res = await k.createWallet(APP_NAME, 'TopDeck buyer', { rpId: RP_ID });
+    if (typeof localStorage !== 'undefined') localStorage.setItem(KEY_STORAGE, res.keyIdBase64);
+    pendingDeployXdr = res.signedTx.toXDR();
+    return { contractId: res.contractId, keyId: res.keyIdBase64, isNew: true };
+  } catch (err) {
+    // WebAuthn reports cancellation, timeout, and origin/rpId mismatch all as the
+    // same opaque NotAllowedError. Rewrite it into something actionable.
+    if ((err as Error)?.name === 'NotAllowedError') {
+      const host = typeof location !== 'undefined' ? location.host : '';
+      throw new Error(
+        `Passkey prompt was cancelled, timed out, or this page isn't served at the ` +
+          `passkey domain (rpId="${RP_ID ?? 'auto'}", current host="${host}"). Open the ` +
+          `app at http://localhost:3000 and complete the biometric prompt promptly.`,
+        { cause: err },
+      );
+    }
+    throw err;
   }
-  const res = await k.createWallet(APP_NAME, 'TopDeck buyer', { rpId: RP_ID });
-  if (typeof localStorage !== 'undefined') localStorage.setItem(KEY_STORAGE, res.keyIdBase64);
-  pendingDeployXdr = res.signedTx.toXDR();
-  return { contractId: res.contractId, keyId: res.keyIdBase64, isNew: true };
 }
 
 /** Take (and clear) a pending deploy envelope, if the wallet was just created. */
@@ -110,6 +125,20 @@ export async function signMakeOffer(
     wallet.contractId,
     contractListingId,
     toStroops(amountUsdc),
+  );
+  return signWalletCall(wallet, op);
+}
+
+/** Build + passkey-sign a `list` with the smart wallet as seller; return XDR. */
+export async function signList(
+  wallet: SmartWalletAccount,
+  cardToken: string,
+  priceUsdc: string,
+): Promise<string> {
+  const op = new MarketplaceContract(CONTRACT_ID).list(
+    wallet.contractId,
+    cardToken,
+    toStroops(priceUsdc),
   );
   return signWalletCall(wallet, op);
 }

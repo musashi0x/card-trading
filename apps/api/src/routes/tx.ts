@@ -19,6 +19,7 @@ import {
   fromStellarAsset,
   listInputSchema,
   makeOfferSchema,
+  passkeyListSchema,
   passkeySubmitSchema,
   pathPaymentBuildSchema,
   pathQuoteSchema,
@@ -41,6 +42,7 @@ import {
   getAssetBalance,
   hasTrustline,
   requireBalance,
+  requireSmartWalletCard,
   requireSmartWalletUsdc,
   requireSourceBalance,
   requireTrustline,
@@ -504,6 +506,53 @@ txRouter.post('/passkey-submit', async (req, res, next) => {
     }
 
     res.json({ hash: result.hash, successful: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- submit: passkey smart-wallet listing (gasless relay) + reconcile DB ---
+//
+// A smart-wallet seller (`C…`) can't authorize the `G…`-only `/list` build, so
+// the browser builds + passkey-signs the `list` call (the relayer is the tx
+// source, the smart wallet is the seller) and posts the envelope here. We
+// pre-flight card ownership, relay, recover the contract listing id from the
+// result, and insert the listing with the `C…` address as seller of record.
+// A relay/tx failure throws before any DB mutation.
+txRouter.post('/passkey-list', async (req, res, next) => {
+  try {
+    const input = passkeyListSchema.parse(req.body);
+    const [card] = await db.select().from(cards).where(eq(cards.id, input.cardId));
+    if (!card) notFound('Card');
+    if (!card.sacAddress) {
+      throw new PreflightError('Card asset contract not deployed', 'CARD_SAC_MISSING');
+    }
+    await requireSmartWalletCard(input.seller, card.sacAddress);
+
+    const result = await relaySubmitter().submit(input.signedXdr);
+    if (!result.successful) {
+      throw new PreflightError('Relayed transaction did not succeed on-chain', 'TX_FAILED', {
+        hash: result.hash,
+      });
+    }
+
+    // The contract's `list` returns the new listing id; recover it for later
+    // settlement reconciliation (mirrors the classic `/submit` list path).
+    const returned = await transactionReturnValue(result.hash);
+    const contractListingId = returned == null ? null : Number(returned);
+    const [listing] = await db
+      .insert(listings)
+      .values({
+        cardId: card.id,
+        seller: input.seller,
+        priceUsdc: input.priceUsdc,
+        status: 'open',
+        contractListingId: Number.isFinite(contractListingId) ? contractListingId : null,
+        escrowTxHash: result.hash,
+      })
+      .returning();
+
+    res.json({ hash: result.hash, successful: true, refId: listing!.id });
   } catch (err) {
     next(err);
   }

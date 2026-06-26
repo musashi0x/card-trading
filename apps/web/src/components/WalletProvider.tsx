@@ -15,6 +15,7 @@ import {
   disconnectPasskey,
   passkeyEnabled,
   signBuyNow,
+  signList,
   takePendingDeploy,
 } from '@/lib/passkey';
 
@@ -39,6 +40,12 @@ interface WalletContextValue {
    * Returns the settlement tx hash.
    */
   passkeyBuyNow: (listingId: string, contractListingId: number) => Promise<string>;
+  /**
+   * List a card for sale with the connected passkey smart wallet: one biometric
+   * prompt, gasless relay. Deploys the wallet first when needed. Returns the
+   * on-chain `list` tx hash.
+   */
+  passkeyList: (cardId: string, cardToken: string, priceUsdc: string) => Promise<string>;
   establishTrustline: (cardId: string) => Promise<string>;
   /**
    * Convert a source asset into the USDC a settlement needs (pay-with-any-asset).
@@ -55,6 +62,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [connecting, setConnecting] = useState(false);
   const [walletKind, setWalletKind] = useState<WalletKind | null>(null);
   const smartWallet = useRef<SmartWalletAccount | null>(null);
+  // Synchronous re-entry guard for the passkey ceremony: `connecting` state lags a
+  // render behind, so a fast double-click could start two WebAuthn ceremonies.
+  const passkeyInFlight = useRef(false);
 
   const connect = useCallback(async () => {
     setConnecting(true);
@@ -68,6 +78,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const connectViaPasskey = useCallback(async () => {
+    // A second ceremony started while the first dialog is open aborts the pending
+    // one with a misleading NotAllowedError — ignore overlapping invocations.
+    if (passkeyInFlight.current) return;
+    passkeyInFlight.current = true;
     setConnecting(true);
     try {
       const wallet = await connectPasskey();
@@ -85,6 +99,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         }
       }
     } finally {
+      passkeyInFlight.current = false;
       setConnecting(false);
     }
   }, []);
@@ -109,6 +124,26 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         action: 'buy_now',
         listingId,
         buyer: wallet.contractId,
+        signedXdr,
+      });
+      return hash;
+    },
+    [],
+  );
+
+  const passkeyList = useCallback(
+    async (cardId: string, cardToken: string, priceUsdc: string): Promise<string> => {
+      const wallet = smartWallet.current;
+      if (!wallet) throw new Error('Connect a passkey wallet first');
+      // Deploy-on-first-use: relay the held deployment before the first call so
+      // the wallet exists to authorize it.
+      const deploy = takePendingDeploy();
+      if (deploy) await api.passkeyDeploy(deploy);
+      const signedXdr = await signList(wallet, cardToken, priceUsdc);
+      const { hash } = await api.passkeyList({
+        cardId,
+        seller: wallet.contractId,
+        priceUsdc,
         signedXdr,
       });
       return hash;
@@ -192,6 +227,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       disconnect,
       runAction,
       passkeyBuyNow,
+      passkeyList,
       establishTrustline,
       payWithAsset,
     }),
@@ -204,6 +240,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       disconnect,
       runAction,
       passkeyBuyNow,
+      passkeyList,
       establishTrustline,
       payWithAsset,
     ],

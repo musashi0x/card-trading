@@ -13,7 +13,7 @@
  *   - placing bids, buy-now, countdown timers, watchlist, bid history, toasts
  */
 
-import { Component, type CSSProperties } from 'react';
+import { Component, type ChangeEvent, type CSSProperties, type DragEvent } from 'react';
 import type { Card, PathQuoteResponse, StellarAsset } from '@cardmkt/shared';
 import { XLM_ASSET } from '@cardmkt/shared';
 import { ApiRequestError, api } from '@/lib/api';
@@ -49,6 +49,8 @@ interface WalletProps {
   runAction: (action: 'list', body: Record<string, unknown>) => Promise<string>;
   /** Buy a real listing with the passkey smart wallet (gasless). Returns tx hash. */
   passkeyBuyNow: (listingId: string, contractListingId: number) => Promise<string>;
+  /** List a card with the passkey smart wallet (gasless). Returns tx hash. */
+  passkeyList: (cardId: string, cardToken: string, priceUsdc: string) => Promise<string>;
   /** Convert a held asset into the settlement USDC (pay-with-any-asset). */
   payWithAsset: (quote: PathQuoteResponse) => Promise<string | null>;
 }
@@ -100,6 +102,8 @@ interface State {
   myBidsTab: 'bidding' | 'selling';
   publishing: boolean;
   lastHash: string | null;
+  /** True while a card photo is being dragged over the upload dropzone. */
+  dragOver: boolean;
   form: Form;
   cards: TopCard[];
   now: number;
@@ -134,7 +138,7 @@ export class TopDeckApp extends Component<Props, State> {
       facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
       bidOpen: false, bidAmount: '', toast: null, toastKind: 'win',
       watched: {}, status: {}, myMax: {},
-      sellStep: 1, myBidsTab: 'bidding', publishing: false, lastHash: null,
+      sellStep: 1, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
       form: { ...EMPTY_FORM },
       cards: props.seedCards,
       payAsset: 'USDC', quote: null, quoting: false, quoteErr: null,
@@ -347,7 +351,31 @@ export class TopDeckApp extends Component<Props, State> {
   };
 
   // ----- sell flow -----
+  private fileInput: HTMLInputElement | null = null;
   private setForm = (k: keyof Form, v: unknown) => this.setState((s) => ({ form: { ...s.form, [k]: v } }));
+
+  /** Read a user-chosen image file into the form as a data URL for the live preview. */
+  private readImageFile = (file: File | undefined) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) return this.showToast('Please choose an image file', 'outbid');
+    if (file.size > 8 * 1024 * 1024) return this.showToast('Image must be under 8 MB', 'outbid');
+    const reader = new FileReader();
+    reader.onload = () => this.setForm('image', String(reader.result));
+    reader.onerror = () => this.showToast('Could not read that file — try another', 'outbid');
+    reader.readAsDataURL(file);
+  };
+
+  private onPickImage = (e: ChangeEvent<HTMLInputElement>) => {
+    this.readImageFile(e.target.files?.[0]);
+    e.target.value = ''; // let the user re-pick the same file after removing it
+  };
+
+  private onDropImage = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    this.setState({ dragOver: false });
+    this.readImageFile(e.dataTransfer.files?.[0]);
+  };
+
   private selectCatalogCard = (c: Card) =>
     this.setState((s) => ({
       form: { ...s.form, cardId: c.id, title: c.name, setLine: c.set, rarity: mapRarity(c.rarity), image: c.imageUrl, category: 'Other' },
@@ -377,7 +405,7 @@ export class TopDeckApp extends Component<Props, State> {
     const start = Number(f.startBid) || 0;
     if (!f.cardId) return this.showToast('Pick a card to list', 'outbid');
     if (!(start > 0)) return this.showToast('Enter a starting bid', 'outbid');
-    const { address, connect, runAction } = this.props.wallet;
+    const { address, walletKind, connect, runAction, passkeyList } = this.props.wallet;
     if (!address) {
       this.showToast('Connect your wallet to list', 'outbid');
       connect();
@@ -385,7 +413,16 @@ export class TopDeckApp extends Component<Props, State> {
     }
     this.setState({ publishing: true });
     try {
-      const hash = await runAction('list', { cardId: f.cardId, seller: address, priceUsdc: String(start) });
+      let hash: string;
+      if (walletKind === 'passkey') {
+        // A smart-wallet seller (`C…`) builds + passkey-signs the `list` call and
+        // relays it gaslessly; the classic `G…`-only build path can't sign for it.
+        const catalogCard = this.props.catalog.find((c) => c.id === f.cardId);
+        if (!catalogCard?.sacAddress) throw new Error('Card asset contract not deployed');
+        hash = await passkeyList(f.cardId, catalogCard.sacAddress, String(start));
+      } else {
+        hash = await runAction('list', { cardId: f.cardId, seller: address, priceUsdc: String(start) });
+      }
       const card = this.formToCard(f, hash);
       this.setState((s) => ({ cards: [card, ...s.cards], sellStep: 4, lastHash: hash, publishing: false }));
       window.scrollTo(0, 0);
@@ -1190,6 +1227,34 @@ export class TopDeckApp extends Component<Props, State> {
                       })}
                     </div>
                   )}
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CARD NAME</div>
+                  <input value={f.title} onChange={(e) => this.setForm('title', e.target.value)} placeholder="e.g. Solar Drake · 1st Edition" style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>SET &amp; NUMBER</div>
+                  <input value={f.setLine} onChange={(e) => this.setForm('setLine', e.target.value)} placeholder="e.g. Base Set · #006 / 102" style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CARD PHOTO</div>
+                  <div
+                    onClick={() => this.fileInput?.click()}
+                    onDragOver={(e) => { e.preventDefault(); if (!st.dragOver) this.setState({ dragOver: true }); }}
+                    onDragLeave={() => this.setState({ dragOver: false })}
+                    onDrop={this.onDropImage}
+                    style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 12, background: st.dragOver ? '#fff7e6' : '#fff', border: `2.5px dashed ${INK}`, borderRadius: 11, cursor: 'pointer', boxShadow: st.dragOver ? `3px 3px 0 ${INK}` : 'none' }}
+                  >
+                    <div style={{ width: 46, height: 46, flex: 'none', borderRadius: 8, border: `2px solid ${INK}`, background: previewArt }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 700 }}>{f.image ? 'Photo added — click to replace' : 'Upload your own photo'}</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>Drag &amp; drop or <span style={{ color: '#2d5bff', textDecoration: 'underline' }}>browse files</span> · PNG/JPG up to 8&nbsp;MB</div>
+                    </div>
+                    {f.image && (
+                      <span onClick={(e) => { e.stopPropagation(); this.setForm('image', undefined); }} style={{ fontSize: 12, fontWeight: 800, color: '#ff4d3d', flex: 'none' }}>Remove</span>
+                    )}
+                  </div>
+                  <input ref={(el) => { this.fileInput = el; }} type="file" accept="image/*" onChange={this.onPickImage} style={{ display: 'none' }} />
                 </div>
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CATEGORY</div>

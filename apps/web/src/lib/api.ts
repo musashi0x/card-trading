@@ -7,6 +7,7 @@ import type {
   Card,
   Listing,
   Offer,
+  PasskeyListRequest,
   PasskeySubmitRequest,
   PathPaymentBuildRequest,
   PathQuoteRequest,
@@ -95,6 +96,12 @@ export const api = {
   /** Relay a passkey-authorized buy_now / make_offer (gasless). */
   passkeySubmit: (body: PasskeySubmitRequest) =>
     request<SubmitTxResponse>('/api/tx/passkey-submit', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Relay a passkey-authorized listing as a smart-wallet seller (gasless). */
+  passkeyList: (body: PasskeyListRequest) =>
+    request<SubmitTxResponse & { refId: string }>('/api/tx/passkey-list', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

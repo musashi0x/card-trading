@@ -69,6 +69,21 @@ export const passkeySubmitSchema = z.object({
   amountUsdc: decimalAmount.optional(),
 });
 
+/**
+ * Passkey-authorized listing: the seller is a smart-wallet contract account
+ * (`C…`). The browser builds + passkey-signs the `list` call client-side and the
+ * signed envelope is relayed (gasless), so this path does not reuse the `G…`-only
+ * `/list` build endpoint.
+ */
+export const passkeyListSchema = z.object({
+  cardId: z.string().uuid(),
+  /** Smart-wallet contract address (`C…`) acting as seller of record. */
+  seller: stellarContractAddress,
+  priceUsdc: decimalAmount,
+  /** Passkey-signed envelope (XDR), ready for the relay. */
+  signedXdr: z.string().min(1),
+});
+
 /** A payable asset: `issuer: null` denotes native XLM, else a credit asset. */
 export const stellarAssetSchema = z.object({
   code: z.string().min(1).max(12),
@@ -101,5 +116,6 @@ export type MakeOfferInput = z.infer<typeof makeOfferSchema>;
 export type AcceptOfferInput = z.infer<typeof acceptOfferSchema>;
 export type BuyNowInput = z.infer<typeof buyNowSchema>;
 export type PasskeySubmitInput = z.infer<typeof passkeySubmitSchema>;
+export type PasskeyListInput = z.infer<typeof passkeyListSchema>;
 export type PathQuoteInput = z.infer<typeof pathQuoteSchema>;
 export type PathPaymentBuildInput = z.infer<typeof pathPaymentBuildSchema>;

@@ -39,6 +39,7 @@ export function TopDeck() {
     disconnect,
     runAction,
     passkeyBuyNow,
+    passkeyList,
     payWithAsset,
   } = useWallet();
   const [seed, setSeed] = useState<TopCard[] | null>(null);
@@ -76,6 +77,7 @@ export function TopDeck() {
         disconnect,
         runAction: (action, body) => runAction(action, body),
         passkeyBuyNow,
+        passkeyList,
         payWithAsset,
       }}
       seedCards={seed}
