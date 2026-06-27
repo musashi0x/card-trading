@@ -8,17 +8,18 @@
  * the browse grid, and the Sell publish flow all use the real API.
  */
 
-import type { Card, Fulfillment, Listing } from '@cardmkt/shared';
+import type { Auction, Bid as ApiBid, Card, Fulfillment, Listing } from '@cardmkt/shared';
 
 export type Rarity = 'common' | 'rare' | 'epic' | 'legendary';
 
 export interface Bid {
   bidder: string;
   amount: number;
-  /** Relative age in ms (mock seed data). */
-  ago?: number;
-  /** Absolute timestamp (live, client-placed bids). */
+  /** Absolute timestamp the bid was placed. */
   at?: number;
+  /** This bid was superseded by a higher one (drives the muted treatment). */
+  outbid?: boolean;
+  /** True when the connected wallet placed this bid. */
   you?: boolean;
 }
 
@@ -44,10 +45,22 @@ export interface TopCard {
   bids: Bid[];
   /** True when this card is backed by a real on-chain listing. */
   real?: boolean;
-  /** Real listing id (uuid) — present when `real`. */
+  /** Real listing id (uuid) — present when `real` and not an auction. */
   listingId?: string;
   /** On-chain settlement-contract listing id — needed for passkey buy_now. */
   contractListingId?: number | null;
+  /** True when this card is a timed auction rather than a fixed-price listing. */
+  isAuction?: boolean;
+  /** Real auction id (uuid) — present when `isAuction`. */
+  auctionId?: string;
+  /** On-chain settlement-contract auction id — needed for bid/settle/cancel. */
+  contractAuctionId?: number | null;
+  /** Auction status, present when `isAuction`. */
+  auctionStatus?: Auction['status'];
+  /** Current high bidder's address (auction only). */
+  highBidder?: string | null;
+  /** Seller's full Stellar address (auctions need it for self-bid checks). */
+  sellerAddress?: string;
   /** Real card id (uuid) — present when `real` or self-listed. */
   cardId?: string;
   /** True for the connected user's own listings (drives the Selling tab). */
@@ -132,20 +145,8 @@ export function shorten(addr: string): string {
   return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
 }
 
-/**
- * Deterministic auction end time for a real listing. A hash of the id picks a
- * stable offset so the countdown is consistent for a given listing within a
- * session (seeded once, at fetch time).
- */
-function simulatedEndsAt(id: string, base: number): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  const minutes = 20 + (h % (48 * 60)); // 20 min … 48 h out
-  return base + minutes * 60000;
-}
-
-/** Turn a real on-chain listing into the auction-card shape the UI renders. */
-export function mapListing(l: Listing, base = Date.now()): TopCard {
+/** Turn a real on-chain fixed-price listing into the card shape the UI renders. */
+export function mapListing(l: Listing): TopCard {
   const card = l.card!;
   const rarity = mapRarity(card.rarity);
   const price = Number(l.priceUsdc) || 0;
@@ -164,15 +165,69 @@ export function mapListing(l: Listing, base = Date.now()): TopCard {
     image: card.imageUrl,
     sellerArt: rarityArt(rarity),
     currentBid: price,
-    endsAt: simulatedEndsAt(l.id, base),
+    // Fixed-price listings have no countdown; `0` means "no auction timer".
+    endsAt: 0,
     buyNow: price,
     seller: shorten(l.seller),
+    sellerAddress: l.seller,
     sellerRating: '—',
     sellerSales: '0',
     setLine: (card.set || 'LISTING').toUpperCase(),
     bids: [],
     royaltyBps: card.royaltyBps ?? 0,
     fulfillment: l.fulfillment,
+  };
+}
+
+/** Map an API bid row into the UI bid shape. */
+export function mapBid(b: ApiBid, you?: string): Bid {
+  return {
+    bidder: shorten(b.bidder),
+    amount: Number(b.amountUsdc) || 0,
+    at: new Date(b.createdAt).getTime(),
+    outbid: b.outbidAt != null,
+    you: you != null && b.bidder === you,
+  };
+}
+
+/**
+ * Turn a real on-chain auction into the auction-card shape the UI renders. The
+ * countdown derives from the real `endsAt`; `currentBid` is the high bid (or the
+ * start price before any bids). `bids` are populated from the bids API.
+ */
+export function mapAuction(a: Auction, bids: ApiBid[] = [], you?: string): TopCard {
+  const card = a.card!;
+  const rarity = mapRarity(card.rarity);
+  const high = Number(a.highBidUsdc) || 0;
+  const start = Number(a.startPriceUsdc) || 0;
+  return {
+    id: a.id,
+    auctionId: a.id,
+    contractAuctionId: a.contractAuctionId,
+    isAuction: true,
+    auctionStatus: a.status,
+    highBidder: a.highBidder,
+    cardId: a.cardId,
+    real: true,
+    name: card.name,
+    rarity,
+    condition: card.set,
+    grade: 'Raw',
+    cats: [categoryFor(card)],
+    art: card.imageUrl ? `center/cover no-repeat url("${card.imageUrl}")` : rarityArt(rarity),
+    image: card.imageUrl,
+    sellerArt: rarityArt(rarity),
+    currentBid: high > 0 ? high : start,
+    endsAt: new Date(a.endsAt).getTime(),
+    // Auctions have no buy-now price.
+    buyNow: 0,
+    seller: shorten(a.seller),
+    sellerAddress: a.seller,
+    sellerRating: '—',
+    sellerSales: '0',
+    setLine: (card.set || 'AUCTION').toUpperCase(),
+    bids: bids.map((b) => mapBid(b, you)),
+    royaltyBps: card.royaltyBps ?? 0,
   };
 }
 

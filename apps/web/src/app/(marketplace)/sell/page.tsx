@@ -26,7 +26,14 @@ export default function SellPage() {
   const durLabel = f.duration === 1 ? '1 day' : f.duration + ' days';
   // Hold mode needs a selected card; mint mode needs a name + photo to issue one.
   const step1Valid = st.sellMode === 'mint' ? f.title.trim().length > 0 && !!f.image : !!f.cardId;
-  const step2Valid = startN > 0 && (!f.buyNowOn || buyN > startN) && (!f.graded || (f.grade || '').trim().length > 0);
+  const reserveN = Number(f.reserve) || 0;
+  const isAuction = f.listingType === 'auction';
+  const step2Valid =
+    startN > 0 &&
+    (!f.graded || (f.grade || '').trim().length > 0) &&
+    (isAuction
+      ? f.duration > 0 && (reserveN === 0 || reserveN >= startN)
+      : !f.buyNowOn || buyN > startN);
   const previewArt = f.image ? `center/cover no-repeat url("${f.image}")` : rarityArt(f.rarity);
   const chip = (active: boolean, label: ReactNode, onClick: () => void, key?: string | number) => (
     <div key={key} onClick={onClick} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...chipStyle(active) }}>{label}</div>
@@ -208,36 +215,56 @@ export default function SellPage() {
                 )}
               </div>
               <div>
-                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>STARTING BID (USDC)</div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>LISTING TYPE</div>
+                <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                  {chip(f.listingType === 'fixed', 'Fixed price', () => td.setForm('listingType', 'fixed'), 'fixed')}
+                  {chip(f.listingType === 'auction', <><TimerIcon sx={{ fontSize: 16 }} /> Auction</>, () => td.setForm('listingType', 'auction'), 'auction')}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>{f.listingType === 'auction' ? 'STARTING BID (USDC)' : 'PRICE (USDC)'}</div>
                 <div style={{ display: 'flex', alignItems: 'center', background: '#fff', border: `3px solid ${INK}`, borderRadius: 11, padding: '2px 15px', width: 240 }}>
                   <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20 }}>$</span>
                   <input type="number" value={f.startBid} onChange={(e) => td.setForm('startBid', e.target.value)} placeholder="0" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, padding: '11px 6px', width: '100%', color: INK }} />
                 </div>
-                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 6 }}>This is the listing price locked into the settlement contract.</div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 6 }}>{f.listingType === 'auction' ? 'The opening bid — bidders must meet or exceed this.' : 'This is the listing price locked into the settlement contract.'}</div>
               </div>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: 300 }}>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em' }}>BUY IT NOW</div>
-                    <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>Cosmetic preview — fixed-price sale settles at the listed price</div>
-                  </div>
-                  <div onClick={() => td.setForm('buyNowOn', !f.buyNowOn)} style={{ width: 46, height: 28, borderRadius: 999, border: `2.5px solid ${INK}`, background: f.buyNowOn ? '#13c06a' : '#fff', position: 'relative', cursor: 'pointer', flex: 'none' }}>
-                    <div style={{ position: 'absolute', top: 1, left: f.buyNowOn ? 18 : 2, width: 20, height: 20, borderRadius: '50%', background: '#fff', border: `2px solid ${INK}`, transition: 'left .15s' }} />
-                  </div>
-                </div>
-                {f.buyNowOn && (
-                  <div style={{ display: 'flex', alignItems: 'center', background: '#fff', border: `3px solid ${INK}`, borderRadius: 11, padding: '2px 15px', width: 240, marginTop: 12 }}>
+              {f.listingType === 'auction' ? (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>RESERVE PRICE (USDC) · optional</div>
+                  <div style={{ display: 'flex', alignItems: 'center', background: '#fff', border: `3px solid ${INK}`, borderRadius: 11, padding: '2px 15px', width: 240 }}>
                     <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20 }}>$</span>
-                    <input type="number" value={f.buyNow} onChange={(e) => td.setForm('buyNow', e.target.value)} placeholder="0" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, padding: '11px 6px', width: '100%', color: INK }} />
+                    <input type="number" value={f.reserve} onChange={(e) => td.setForm('reserve', e.target.value)} placeholder="0" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, padding: '11px 6px', width: '100%', color: INK }} />
                   </div>
-                )}
-              </div>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>AUCTION LENGTH</div>
-                <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
-                  {([[1, '1 day'], [3, '3 days'], [7, '7 days']] as Array<[number, string]>).map(([v, l]) => chip(f.duration === v, l, () => td.setForm('duration', v), v))}
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 6 }}>If the top bid doesn’t reach this, the card returns to you. Leave blank for no reserve.</div>
                 </div>
-              </div>
+              ) : (
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: 300 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em' }}>BUY IT NOW</div>
+                      <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>Cosmetic preview — fixed-price sale settles at the listed price</div>
+                    </div>
+                    <div onClick={() => td.setForm('buyNowOn', !f.buyNowOn)} style={{ width: 46, height: 28, borderRadius: 999, border: `2.5px solid ${INK}`, background: f.buyNowOn ? '#13c06a' : '#fff', position: 'relative', cursor: 'pointer', flex: 'none' }}>
+                      <div style={{ position: 'absolute', top: 1, left: f.buyNowOn ? 18 : 2, width: 20, height: 20, borderRadius: '50%', background: '#fff', border: `2px solid ${INK}`, transition: 'left .15s' }} />
+                    </div>
+                  </div>
+                  {f.buyNowOn && (
+                    <div style={{ display: 'flex', alignItems: 'center', background: '#fff', border: `3px solid ${INK}`, borderRadius: 11, padding: '2px 15px', width: 240, marginTop: 12 }}>
+                      <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20 }}>$</span>
+                      <input type="number" value={f.buyNow} onChange={(e) => td.setForm('buyNow', e.target.value)} placeholder="0" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, padding: '11px 6px', width: '100%', color: INK }} />
+                    </div>
+                  )}
+                </div>
+              )}
+              {f.listingType === 'auction' && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>AUCTION LENGTH</div>
+                  <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                    {([[1, '1 day'], [3, '3 days'], [7, '7 days']] as Array<[number, string]>).map(([v, l]) => chip(f.duration === v, l, () => td.setForm('duration', v), v))}
+                  </div>
+                </div>
+              )}
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>DELIVERY</div>
                 <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
@@ -258,7 +285,11 @@ export default function SellPage() {
             <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
               <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 17, padding: '15px 18px', borderBottom: `2.5px solid ${INK}`, background: '#ffd84d' }}>Review your listing</div>
               <div style={{ padding: '6px 18px 12px' }}>
-                {([['Card', f.title || 'Untitled card'], ['Set', f.setLine || '—'], ['Condition', f.graded ? `${f.grade} · Graded` : f.condition], ['Starting bid', money(startN)], ['Buy it now', f.buyNowOn && buyN > 0 ? money(buyN) : 'None'], ['Delivery', f.fulfillment === 'physical' ? 'Physical · escrow' : 'Digital · instant'], ['Runs for', durLabel]] as Array<[string, string]>).map(([k, v], i, arr) => (
+                {(
+                  isAuction
+                    ? [['Card', f.title || 'Untitled card'], ['Set', f.setLine || '—'], ['Condition', f.graded ? `${f.grade} · Graded` : f.condition], ['Type', 'Auction'], ['Starting bid', money(startN)], ['Reserve', reserveN > 0 ? money(reserveN) : 'None'], ['Runs for', durLabel]]
+                    : [['Card', f.title || 'Untitled card'], ['Set', f.setLine || '—'], ['Condition', f.graded ? `${f.grade} · Graded` : f.condition], ['Type', 'Fixed price'], ['Price', money(startN)], ['Buy it now', f.buyNowOn && buyN > 0 ? money(buyN) : 'None'], ['Delivery', f.fulfillment === 'physical' ? 'Physical · escrow' : 'Digital · instant']]
+                ) .map(([k, v], i, arr) => (
                   <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 0', borderBottom: i === arr.length - 1 ? 'none' : '1.5px solid rgba(26,19,5,.1)' }}>
                     <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>{k}</span>
                     <span style={{ fontSize: 13.5, fontWeight: 700 }}>{v}</span>

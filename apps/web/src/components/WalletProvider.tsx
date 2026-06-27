@@ -15,7 +15,7 @@ import type {
   SmartWalletAccount,
   TradeAction,
 } from '@cardmkt/shared';
-import { ApiRequestError, api } from '@/lib/api';
+import { ApiRequestError, api, type ProposeSwapBody, type SwapAction } from '@/lib/api';
 import { connectWallet, signXdr } from '@/lib/wallet';
 import {
   connectPasskey,
@@ -81,6 +81,17 @@ interface WalletContextValue {
     contractOrderId: number,
   ) => Promise<string>;
   establishTrustline: (cardId: string) => Promise<string>;
+  /**
+   * Propose a barter trade: build the `propose_swap` tx, sign it, and submit so
+   * the give-side cards lock into custody. Returns the new proposal id and tx
+   * hash. Classic wallets only (passkey swaps are a follow-up).
+   */
+  proposeSwap: (body: Omit<ProposeSwapBody, 'proposer'>) => Promise<{ proposalId: string; hash: string }>;
+  /**
+   * Act on an existing proposal (accept / decline / cancel): build the matching
+   * swap tx, sign it, and submit. Returns the settlement tx hash.
+   */
+  swapAction: (id: string, action: SwapAction) => Promise<string>;
   /**
    * Mint (issue) a brand-new card asset owned by the connected wallet, returning
    * the created card. A passkey wallet receives its copies gaslessly; a classic
@@ -279,6 +290,36 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [address],
   );
 
+  /** Propose a barter trade (classic build → sign → submit). */
+  const proposeSwap = useCallback(
+    async (body: Omit<ProposeSwapBody, 'proposer'>): Promise<{ proposalId: string; hash: string }> => {
+      if (!address) throw new Error('Connect a wallet first');
+      if (walletKind === 'passkey') {
+        throw new Error('Barter trades currently require a classic wallet');
+      }
+      const built = await api.proposeSwapBuild({ ...body, proposer: address });
+      const signed = await signXdr(built.xdr, address, built.networkPassphrase);
+      const { hash } = await api.proposeSwapSubmit(built.proposalId, signed);
+      return { proposalId: built.proposalId, hash };
+    },
+    [address, walletKind],
+  );
+
+  /** Accept / decline / cancel a proposal (classic build → sign → submit). */
+  const swapAction = useCallback(
+    async (id: string, action: SwapAction): Promise<string> => {
+      if (!address) throw new Error('Connect a wallet first');
+      if (walletKind === 'passkey') {
+        throw new Error('Barter trades currently require a classic wallet');
+      }
+      const built = await api.swapActionBuild(id, action, address);
+      const signed = await signXdr(built.xdr, address, built.networkPassphrase);
+      const { hash } = await api.swapActionSubmit(id, action, address, signed);
+      return hash;
+    },
+    [address, walletKind],
+  );
+
   const mintCard = useCallback(
     async (meta: Omit<MintCardRequest, 'owner'>): Promise<Card> => {
       if (!address) throw new Error('Connect a wallet first');
@@ -353,6 +394,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       escrowPurchase,
       orderAction,
       establishTrustline,
+      proposeSwap,
+      swapAction,
       mintCard,
       payWithAsset,
     }),
@@ -369,6 +412,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       escrowPurchase,
       orderAction,
       establishTrustline,
+      proposeSwap,
+      swapAction,
       mintCard,
       payWithAsset,
     ],

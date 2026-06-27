@@ -296,7 +296,7 @@ export async function computeBoardRows(
 }
 
 /** Cache-aware board rows; serves cached rows within the TTL window. */
-async function getBoardRows(
+export async function getBoardRows(
   board: LeaderboardBoard,
   limit: number,
   ratingAvailable: boolean,

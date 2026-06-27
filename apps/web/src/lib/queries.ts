@@ -6,7 +6,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import type { LeaderboardBoard, WatchlistEntry } from '@cardmkt/shared';
+import type { LeaderboardBoard, TradeProposalStatus, WatchlistEntry } from '@cardmkt/shared';
 import { api, type OrderWithCard } from '@/lib/api';
 
 type ListingFilters = { q?: string; set?: string; rarity?: string };
@@ -15,7 +15,12 @@ export const queryKeys = {
   cards: (owner?: string) => ['cards', owner ?? 'all'] as const,
   listings: (filters?: ListingFilters) => ['listings', filters ?? {}] as const,
   offers: (listingId: string) => ['offers', listingId] as const,
+  auctions: () => ['auctions'] as const,
+  auctionBids: (auctionId: string) => ['auctions', auctionId, 'bids'] as const,
+  myBids: (bidder: string) => ['my-bids', bidder] as const,
   trades: (account?: string) => ['trades', account ?? 'all'] as const,
+  tradeProposals: (party: string, status?: TradeProposalStatus) =>
+    ['tradeProposals', party, status ?? 'all'] as const,
   orders: (account: string) => ['orders', account] as const,
   disputedOrders: () => ['orders', 'disputed'] as const,
   watchlist: (account: string) => ['watchlist', account] as const,
@@ -46,6 +51,35 @@ export function useListings(filters?: ListingFilters) {
   });
 }
 
+/** Open timed auctions for the browse grid; polls so countdowns stay fresh. */
+export function useAuctions() {
+  return useQuery({
+    queryKey: queryKeys.auctions(),
+    queryFn: () => api.auctions('open'),
+    refetchInterval: 5000,
+  });
+}
+
+/** Bid history for a single auction, high bid first. Disabled without an id. */
+export function useAuctionBids(auctionId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.auctionBids(auctionId ?? ''),
+    queryFn: () => api.auctionBids(auctionId as string).then((r) => r.bids),
+    enabled: !!auctionId,
+    refetchInterval: 5000,
+  });
+}
+
+/** Every bid the connected wallet placed across auctions. Disabled until connected. */
+export function useMyBids(bidder: string | null) {
+  return useQuery({
+    queryKey: queryKeys.myBids(bidder ?? ''),
+    queryFn: () => api.myBids(bidder as string),
+    enabled: !!bidder,
+    refetchInterval: 5000,
+  });
+}
+
 /**
  * Cards held by `owner` (used by the Sell picker). Disabled until a wallet is
  * connected, so passing `null`/`undefined` is safe.
@@ -73,6 +107,25 @@ export function useTrades(account?: string | null) {
     queryKey: queryKeys.trades(account ?? undefined),
     queryFn: () => api.trades(account ?? undefined),
   });
+}
+
+/**
+ * Barter proposals where `party` is proposer or counterparty. Polls so the
+ * inbox reflects an accepted/declined/cancelled proposal shortly after it
+ * settles. Disabled until a wallet connects.
+ */
+export function useTradeProposals(party: string | null, status?: TradeProposalStatus) {
+  return useQuery({
+    queryKey: queryKeys.tradeProposals(party ?? '', status),
+    queryFn: () => api.tradeProposals(party as string, status),
+    enabled: !!party,
+    refetchInterval: 8000,
+  });
+}
+
+/** Invalidate the barter-proposal reads so the inbox refetches after an action. */
+export function invalidateTradeProposals(queryClient: QueryClient, party: string | null) {
+  if (party) queryClient.invalidateQueries({ queryKey: ['tradeProposals', party] });
 }
 
 /** Escrow orders where `account` is buyer or seller. */

@@ -29,7 +29,7 @@ export default function BrowsePage() {
     if (fc.rarities.length && !fc.rarities.includes(c.rarity)) return false;
     if (fc.graded && !c.cats.includes('Graded')) return false;
     if (fc.buyNow && !(c.buyNow > 0)) return false;
-    if (fc.ending && c.endsAt - st.now >= 3600000) return false;
+    if (fc.ending && !(c.isAuction && c.endsAt - st.now < 3600000)) return false;
     if (fc.price !== 'any') {
       const p = c.currentBid;
       if (fc.price === 'lt100' && !(p < 100)) return false;
@@ -39,7 +39,9 @@ export default function BrowsePage() {
     return true;
   });
   const sortFns: Record<string, (a: TopCard, b: TopCard) => number> = {
-    ending: (a, b) => a.endsAt - st.now - (b.endsAt - st.now),
+    // Auctions sort by time-left; fixed-price lots (no countdown) sink to the end.
+    ending: (a, b) =>
+      (a.isAuction ? a.endsAt : Infinity) - (b.isAuction ? b.endsAt : Infinity),
     priceUp: (a, b) => a.currentBid - b.currentBid,
     priceDown: (a, b) => b.currentBid - a.currentBid,
     bids: (a, b) => b.bids.length - a.bids.length,

@@ -913,7 +913,163 @@ impl Marketplace {
         );
     }
 
+    // --- barter swap: propose / execute / cancel / decline ---
+
+    /// Proposer locks their give-side card tokens (and any USDC sweetener) into
+    /// contract custody and records a pending swap targeted at `counterparty`.
+    /// Returns the proposal id. Only the proposer signs this tx.
+    pub fn propose_swap(
+        env: Env,
+        proposer: Address,
+        counterparty: Address,
+        give_tokens: Vec<Address>,
+        get_tokens: Vec<Address>,
+        usdc_amount: i128,
+    ) -> u32 {
+        require_init(&env);
+        require_not_paused(&env);
+        proposer.require_auth();
+        if proposer == counterparty {
+            panic_with(&env, Error::SelfTrade);
+        }
+        if give_tokens.is_empty() {
+            panic_with(&env, Error::BadAmount);
+        }
+        if usdc_amount < 0 {
+            panic_with(&env, Error::BadAmount);
+        }
+
+        let contract = env.current_contract_address();
+        // Pull each give-side card into custody.
+        for token_addr in give_tokens.iter() {
+            token::TokenClient::new(&env, &token_addr).transfer(&proposer, &contract, &ONE_CARD);
+        }
+        // Lock the USDC sweetener up front so it can move atomically when only the
+        // counterparty signs `execute_swap`.
+        if usdc_amount > 0 {
+            usdc(&env).transfer(&proposer, &contract, &usdc_amount);
+        }
+
+        let id = next_id(&env, &DataKey::SwapCount);
+        let proposal = SwapProposal {
+            proposer: proposer.clone(),
+            counterparty: counterparty.clone(),
+            give_tokens,
+            get_tokens,
+            usdc_amount,
+            status: SWAP_PROPOSED,
+        };
+        put_swap(&env, id, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "swap_proposed"), id),
+            (proposer, counterparty, usdc_amount),
+        );
+        id
+    }
+
+    /// Counterparty accepts: pulls their get-side cards to the proposer, releases
+    /// the proposer's escrowed give-side cards to the counterparty, and (for a
+    /// USDC sweetener) pays the platform fee and the remainder to the
+    /// counterparty — all atomically. Only the counterparty signs this tx.
+    pub fn execute_swap(env: Env, counterparty: Address, proposal_id: u32) {
+        require_init(&env);
+        require_not_paused(&env);
+        counterparty.require_auth();
+        let mut proposal = get_swap(&env, proposal_id);
+        if proposal.status != SWAP_PROPOSED {
+            panic_with(&env, Error::NotOpen);
+        }
+        if proposal.counterparty != counterparty {
+            panic_with(&env, Error::NotParticipant);
+        }
+
+        let contract = env.current_contract_address();
+        // Counterparty's get-side cards go straight to the proposer.
+        for token_addr in proposal.get_tokens.iter() {
+            token::TokenClient::new(&env, &token_addr).transfer(
+                &counterparty,
+                &proposal.proposer,
+                &ONE_CARD,
+            );
+        }
+        // Proposer's escrowed give-side cards are released to the counterparty.
+        for token_addr in proposal.give_tokens.iter() {
+            token::TokenClient::new(&env, &token_addr).transfer(&contract, &counterparty, &ONE_CARD);
+        }
+        // USDC sweetener (if any): fee to platform, remainder to the counterparty.
+        // Pure card-for-card swaps move no USDC and carry no fee.
+        let mut fee = 0i128;
+        if proposal.usdc_amount > 0 {
+            fee = split_fee(&env, proposal.usdc_amount);
+            let u = usdc(&env);
+            if fee > 0 {
+                u.transfer(&contract, &platform(&env), &fee);
+            }
+            u.transfer(&contract, &counterparty, &(proposal.usdc_amount - fee));
+        }
+
+        proposal.status = SWAP_ACCEPTED;
+        put_swap(&env, proposal_id, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "swap"), proposal_id),
+            (
+                proposal.proposer.clone(),
+                proposal.counterparty.clone(),
+                proposal.give_tokens.clone(),
+                proposal.get_tokens.clone(),
+                proposal.usdc_amount,
+                fee,
+            ),
+        );
+    }
+
+    /// Proposer cancels a still-pending proposal; all locked give-side cards and
+    /// the USDC sweetener are returned to the proposer.
+    pub fn cancel_swap(env: Env, proposer: Address, proposal_id: u32) {
+        require_init(&env);
+        proposer.require_auth();
+        let mut proposal = get_swap(&env, proposal_id);
+        if proposal.status != SWAP_PROPOSED {
+            panic_with(&env, Error::NotOpen);
+        }
+        if proposal.proposer != proposer {
+            panic_with(&env, Error::NotParticipant);
+        }
+        return_swap_assets(&env, &proposal);
+        proposal.status = SWAP_CANCELLED;
+        put_swap(&env, proposal_id, &proposal);
+        env.events()
+            .publish((Symbol::new(&env, "swap_cancel"), proposal_id), proposer);
+    }
+
+    /// Counterparty declines a pending proposal; all locked give-side cards and
+    /// the USDC sweetener are returned to the proposer.
+    pub fn decline_swap(env: Env, counterparty: Address, proposal_id: u32) {
+        require_init(&env);
+        counterparty.require_auth();
+        let mut proposal = get_swap(&env, proposal_id);
+        if proposal.status != SWAP_PROPOSED {
+            panic_with(&env, Error::NotOpen);
+        }
+        if proposal.counterparty != counterparty {
+            panic_with(&env, Error::NotParticipant);
+        }
+        return_swap_assets(&env, &proposal);
+        proposal.status = SWAP_DECLINED;
+        put_swap(&env, proposal_id, &proposal);
+        env.events().publish(
+            (Symbol::new(&env, "swap_decline"), proposal_id),
+            counterparty,
+        );
+    }
+
     // --- views ---
+
+    pub fn get_swap_view(env: Env, proposal_id: u32) -> SwapProposal {
+        get_swap(&env, proposal_id)
+    }
 
     pub fn get_auction_view(env: Env, auction_id: u32) -> Auction {
         get_auction(&env, auction_id)
@@ -1133,6 +1289,43 @@ fn put_offer(env: &Env, id: u32, offer: &Offer) {
     env.storage()
         .persistent()
         .extend_ttl(&key, ENTRY_TTL_THRESHOLD, ENTRY_TTL_EXTEND);
+}
+
+fn put_swap(env: &Env, id: u32, proposal: &SwapProposal) {
+    let key = DataKey::SwapProposal(id);
+    env.storage().persistent().set(&key, proposal);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, ENTRY_TTL_THRESHOLD, ENTRY_TTL_EXTEND);
+}
+
+fn get_swap(env: &Env, id: u32) -> SwapProposal {
+    let key = DataKey::SwapProposal(id);
+    let proposal = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| panic_with(env, Error::NotFound));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, ENTRY_TTL_THRESHOLD, ENTRY_TTL_EXTEND);
+    proposal
+}
+
+/// Return a pending proposal's escrowed assets to the proposer: every give-side
+/// card and the USDC sweetener. Shared by `cancel_swap` and `decline_swap`.
+fn return_swap_assets(env: &Env, proposal: &SwapProposal) {
+    let contract = env.current_contract_address();
+    for token_addr in proposal.give_tokens.iter() {
+        token::TokenClient::new(env, &token_addr).transfer(
+            &contract,
+            &proposal.proposer,
+            &ONE_CARD,
+        );
+    }
+    if proposal.usdc_amount > 0 {
+        usdc(env).transfer(&contract, &proposal.proposer, &proposal.usdc_amount);
+    }
 }
 
 fn put_order(env: &Env, id: u32, order: &Order) {

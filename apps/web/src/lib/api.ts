@@ -3,9 +3,13 @@
  */
 
 import type {
+  Auction,
+  AuctionListResponse,
+  BidListResponse,
   BuildTxResponse,
   Card,
   Listing,
+  MyBidsResponse,
   MintCardRequest,
   MintCardResponse,
   Offer,
@@ -27,6 +31,8 @@ import type {
   SubmitTxResponse,
   Trade,
   TradeAction,
+  TradeProposal,
+  TradeProposalStatus,
   WatchlistEntry,
 } from '@cardmkt/shared';
 
@@ -37,6 +43,18 @@ export type OrderWithCard = Order & {
 
 /** A settled trade with the derived seller-net the trades API computes per row. */
 export type TradeWithNet = Trade & { sellerNetUsdc: string };
+
+/** Body for creating a barter trade proposal. */
+export interface ProposeSwapBody {
+  proposer: string;
+  counterparty: string;
+  giveCardIds: string[];
+  getCardIds: string[];
+  cashUsdc?: string;
+}
+
+/** A swap action the proposer/counterparty can take on a proposal. */
+export type SwapAction = 'accept' | 'decline' | 'cancel';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
@@ -71,9 +89,55 @@ export const api = {
     return request<Listing[]>(`/api/listings${qs ? `?${qs}` : ''}`);
   },
   offers: (listingId: string) => request<Offer[]>(`/api/listings/${listingId}/offers`),
+
+  /** Open auctions for the catalog (with joined card metadata). */
+  auctions: (status: 'open' | 'settled' | 'cancelled' | 'no_winner' = 'open') =>
+    request<AuctionListResponse>(`/api/auctions?status=${status}`).then((r) => r.auctions),
+  /** A single auction's full state. */
+  auction: (auctionId: string) => request<Auction>(`/api/auctions/${auctionId}`),
+  /** Paginated bid history for an auction, high bid first. */
+  auctionBids: (auctionId: string, params?: { limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams(params as Record<string, string>).toString();
+    return request<BidListResponse>(`/api/auctions/${auctionId}/bids${qs ? `?${qs}` : ''}`);
+  },
+  /** Every bid a wallet placed, joined with auction state, for the my-bids page. */
+  myBids: (bidder: string) =>
+    request<MyBidsResponse>(`/api/auctions/bids?bidder=${encodeURIComponent(bidder)}`).then(
+      (r) => r.bids,
+    ),
   /** Settled trades, or — with `account` — only those where the wallet is buyer or seller. */
   trades: (account?: string) =>
     request<TradeWithNet[]>(`/api/trades${account ? `?account=${encodeURIComponent(account)}` : ''}`),
+
+  /** Barter proposals where `party` is proposer or counterparty (optional status filter). */
+  tradeProposals: (party: string, status?: TradeProposalStatus) =>
+    request<TradeProposal[]>(
+      `/api/trade-proposals?party=${encodeURIComponent(party)}${status ? `&status=${status}` : ''}`,
+    ),
+  /** Build a `propose_swap` tx + record the proposal; returns the XDR to sign. */
+  proposeSwapBuild: (body: ProposeSwapBody) =>
+    request<{ proposalId: string; xdr: string; networkPassphrase: string }>('/api/trade-proposals', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Submit the signed `propose_swap`; captures the on-chain proposal id. */
+  proposeSwapSubmit: (proposalId: string, signedXdr: string) =>
+    request<SubmitTxResponse & { contractSwapId: number }>('/api/trade-proposals', {
+      method: 'POST',
+      body: JSON.stringify({ proposalId, signedXdr }),
+    }),
+  /** Build an accept/decline/cancel tx for a proposal; returns the XDR to sign. */
+  swapActionBuild: (id: string, action: SwapAction, account: string) =>
+    request<BuildTxResponse>(`/api/trade-proposals/${id}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ account }),
+    }),
+  /** Submit the signed accept/decline/cancel tx for a proposal. */
+  swapActionSubmit: (id: string, action: SwapAction, account: string, signedXdr: string) =>
+    request<SubmitTxResponse>(`/api/trade-proposals/${id}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ account, signedXdr }),
+    }),
 
   /** A ranked leaderboard board, with the requesting account's own standing. */
   leaderboard: (params: { board: LeaderboardBoard; account?: string; limit?: number }) => {

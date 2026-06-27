@@ -97,7 +97,8 @@ export interface Offer {
 
 export interface Trade {
   id: string;
-  listingId: string;
+  /** Null for barter swaps, which settle a trade proposal rather than a listing. */
+  listingId: string | null;
   buyer: string;
   seller: string;
   priceUsdc: string;
@@ -105,7 +106,150 @@ export interface Trade {
   /** Creator royalty paid on this settlement (0 on a primary sale). */
   royaltyUsdc: string;
   settleTxHash: string;
+  /** Set on barter-swap settlements; links to the on-chain `execute_swap`. */
+  swapTxHash: string | null;
   settledAt: string;
+}
+
+/** Barter trade-proposal lifecycle. */
+export type TradeProposalStatus = 'proposed' | 'accepted' | 'declined' | 'cancelled' | 'expired';
+
+/**
+ * A peer-to-peer barter proposal mirrored from the contract's `SwapProposal`.
+ * `giveCards`/`getCards` are the joined card metadata the inbox renders; the
+ * `*CardIds` arrays are the underlying `cards.id` references.
+ */
+export interface TradeProposal {
+  id: string;
+  /** Address that proposed the swap and whose give-side cards are in custody. */
+  proposer: string;
+  /** Targeted counterparty who can accept or decline. */
+  counterparty: string;
+  giveCardIds: string[];
+  getCardIds: string[];
+  /** Joined card metadata for the give side (present on list responses). */
+  giveCards?: Card[];
+  /** Joined card metadata for the get side (present on list responses). */
+  getCards?: Card[];
+  /** One-way USDC sweetener from proposer to counterparty, decimal string. */
+  cashUsdc: string;
+  /** Platform fee taken on the sweetener at settlement, decimal string. */
+  feeUsdc: string;
+  status: TradeProposalStatus;
+  /** Proposal id inside the settlement contract (null until `propose_swap` confirms). */
+  contractSwapId: number | null;
+  proposeTxHash: string | null;
+  swapTxHash: string | null;
+  /** ISO timestamp the proposal auto-expires. */
+  expiresAt: string;
+  createdAt: string;
+}
+
+/** Timed-auction lifecycle, mirroring the contract's `AUCTION_*` codes. */
+export type AuctionStatus = 'open' | 'settled' | 'cancelled' | 'no_winner';
+
+/**
+ * A timed English auction. Ownership and escrowed funds live on-chain; this is
+ * the read-mirror the catalog, countdown, and bid history render from.
+ */
+export interface Auction {
+  id: string;
+  cardId: string;
+  card?: Card;
+  /** Auction id inside the settlement contract. */
+  contractAuctionId: number | null;
+  /** Stellar address of the seller. */
+  seller: string;
+  /** Opening price in test USDC, decimal string. */
+  startPriceUsdc: string;
+  /** Reserve price in test USDC; `0` means no reserve. */
+  reservePriceUsdc: string;
+  /** ISO timestamp the auction closes (extended on-chain by anti-snipe). */
+  endsAt: string;
+  /** Current high bidder's address, or null before the first bid. */
+  highBidder: string | null;
+  /** Current high bid in test USDC; `0` before the first bid. */
+  highBidUsdc: string;
+  status: AuctionStatus;
+  /** Tx hash of the on-chain `create_auction` call. */
+  escrowTxHash: string | null;
+  /** Tx hash of the terminal `settle_auction`/`cancel_auction`. */
+  settleTxHash: string | null;
+  createdAt: string;
+}
+
+/** A single bid placed on an auction. */
+export interface Bid {
+  id: string;
+  auctionId: string;
+  /** Stellar address of the bidder. */
+  bidder: string;
+  /** Bid amount in test USDC, decimal string. */
+  amountUsdc: string;
+  /** Tx hash of the on-chain `place_bid` call. */
+  escrowTxHash: string | null;
+  /** Tx hash of the refund paid when this bid was outbid (null while still high). */
+  refundTxHash: string | null;
+  /** ISO timestamp when a higher bid superseded this one, or null if still leading. */
+  outbidAt: string | null;
+  createdAt: string;
+}
+
+/** Build a `create_auction` transaction (seller escrows a card into an auction). */
+export interface CreateAuctionBuildRequest {
+  cardId: string;
+  seller: string;
+  /** Opening price in test USDC, decimal string. */
+  startPriceUsdc: string;
+  /** Reserve price in test USDC; omit or `0` for no reserve. */
+  reservePriceUsdc?: string;
+  /** Auction length in seconds (> 0, <= 30 days). */
+  durationSecs: number;
+}
+
+/** Build a `place_bid` transaction for an auction. */
+export interface PlaceBidBuildRequest {
+  auctionId: string;
+  bidder: string;
+  /** Bid amount in test USDC, decimal string. */
+  amountUsdc: string;
+}
+
+/** Build a `settle_auction` transaction (permissionless after `ends_at`). */
+export interface SettleAuctionBuildRequest {
+  auctionId: string;
+  /** Fee-paying source account submitting the settlement. */
+  account: string;
+}
+
+/** Build a `cancel_auction` transaction (seller reclaims a no-bid auction). */
+export interface CancelAuctionBuildRequest {
+  auctionId: string;
+  seller: string;
+}
+
+/** A list of open/closed auctions for the catalog. */
+export interface AuctionListResponse {
+  auctions: Auction[];
+}
+
+/** Paginated bid history for a single auction, high bid first. */
+export interface BidListResponse {
+  bids: Bid[];
+  /** Total bids on the auction (for pagination beyond the returned page). */
+  total: number;
+}
+
+/** A user's bid joined with its auction's current state, for the my-bids page. */
+export interface MyBid extends Bid {
+  auction: Auction;
+  /** True when this bidder is the auction's current high bidder. */
+  isHighBidder: boolean;
+}
+
+/** All of a wallet's bids across auctions, for the my-bids page. */
+export interface MyBidsResponse {
+  bids: MyBid[];
 }
 
 /** A user's editable profile, keyed by wallet address. */
@@ -322,7 +466,12 @@ export type TradeAction =
   | 'mark_shipped'
   | 'confirm_receipt'
   | 'claim_timeout'
-  | 'dispute';
+  | 'dispute'
+  | 'create_auction'
+  | 'place_bid'
+  | 'settle_auction'
+  | 'cancel_auction'
+  | 'claim_refund';
 
 /** Response from the API's transaction-build endpoints. */
 export interface BuildTxResponse {
