@@ -77,16 +77,21 @@ The web app SHALL let a seller accept an offer and let a buyer buy at the asking
 - **AND** on success SHALL show the trade as settled and the card transferred
 
 ### Requirement: Verifiable trade history
-The web app SHALL show trade history with the full settlement breakdown and a link to inspect each settlement on a block explorer.
+The web app SHALL show trade history with the full settlement breakdown — covering both cash trades and card barter swaps — and a link to inspect each settlement on a block explorer.
 
 #### Scenario: Inspect a settled trade
-- **WHEN** a user views a settled trade
+- **WHEN** a user views a settled cash trade
 - **THEN** the app SHALL display price, platform fee, creator royalty, the seller's net proceeds, and a link opening the settlement transaction on a block explorer
 
 #### Scenario: Primary sale shows no royalty
 - **WHEN** a user views a settled trade where the seller was the card's creator
 - **THEN** the app SHALL show the creator royalty as zero (or omit the royalty line)
 - **AND** SHALL display the seller's proceeds as price minus the platform fee
+
+#### Scenario: Accepted swap shown in trade history
+- **GIVEN** a swap settled with `swap_tx_hash`
+- **WHEN** the user opens Trade History
+- **THEN** the swap row SHALL show the give-side cards, get-side cards, USDC sweetener (if any), platform fee, and a link to the on-chain swap transaction
 
 ### Requirement: Listings disclose the creator royalty
 The web app SHALL disclose a card's creator royalty on its listing so a buyer or seller sees the royalty before trading.
@@ -407,4 +412,136 @@ these types from `@cardmkt/shared` rather than from `panels.ts`.
 - **WHEN** other pages import unrelated exports from `panels.ts` (e.g. portfolio, profile, trade panels)
 - **THEN** those imports SHALL continue to resolve without error
 - **AND** only the four leaderboard-specific exports SHALL be removed
+
+### Requirement: Real auction bid flow
+The web app SHALL allow a connected user to place a bid on an auction listing by building, signing, and submitting a `place_bid` transaction. The bid flow SHALL replace the previous simulated `confirmBid`/`scheduleRival` flow entirely. The UI SHALL pre-fill the minimum next bid based on the current high bid (fetched from the API), allow the user to enter a higher amount, and show a confirmation step before signing.
+
+#### Scenario: User places a bid
+- **WHEN** a connected user selects an auction, enters a valid bid amount, and confirms
+- **THEN** the app SHALL build and have them sign a `place_bid` transaction
+- **AND** on success SHALL refresh the bid history and show the updated high bid
+
+#### Scenario: Bid below current high bid is rejected before signing
+- **WHEN** a user enters a bid amount that does not exceed the current high bid
+- **THEN** the app SHALL show an inline error and SHALL NOT allow submission
+
+#### Scenario: Live countdown from real ends_at
+- **WHEN** an auction card is displayed
+- **THEN** the countdown timer SHALL derive from the `ends_at` field returned by the API (not a simulated hash)
+- **AND** when an anti-snipe extension occurs the timer SHALL update on the next API poll or WebSocket push
+
+#### Scenario: Expired auction shows settle button
+- **WHEN** an auction's `ends_at` has passed and status is still `open`
+- **THEN** the app SHALL show a "Settle Auction" button that any user can click to trigger `settle_auction`
+
+### Requirement: Real bid history
+The web app SHALL render a live bid history on the auction card detail page, sourced from the API's `GET /auctions/:id/bids` endpoint. The bid history SHALL show each bidder's address (truncated), bid amount, time placed, and whether the bid was outbid.
+
+#### Scenario: Bid history loads from the API
+- **WHEN** a user opens an auction card detail page
+- **THEN** the app SHALL fetch and render the bid history from the real bids API endpoint
+- **AND** SHALL NOT render mock bid data
+
+#### Scenario: Outbid bids are visually distinguished
+- **WHEN** a bid in the history has been outbid
+- **THEN** the app SHALL display it with a visual treatment (e.g., strikethrough or muted style) distinguishing it from the current high bid
+
+#### Scenario: Empty bid history
+- **WHEN** an auction has no bids
+- **THEN** the app SHALL display "No bids yet" rather than mock bid data
+
+#### Scenario: Bid history refreshes after a new bid
+- **WHEN** the user successfully places a bid
+- **THEN** the app SHALL re-fetch and re-render the bid history to include the new bid
+
+### Requirement: My bids page fed by real bids
+The web app's my-bids page SHALL query the real bids API (`GET /auctions/bids?bidder=<address>`) and display all bids placed by the connected user, grouped or sorted by auction status (active, won, ended-lost).
+
+#### Scenario: My bids shows real on-chain bids
+- **WHEN** a connected user navigates to the my-bids page
+- **THEN** the app SHALL fetch their bids from the API
+- **AND** SHALL display each bid with the auction name, their bid amount, the current high bid, and the auction status
+
+#### Scenario: Won auction is highlighted
+- **WHEN** the user is the `high_bidder` on a settled auction
+- **THEN** the my-bids page SHALL display the auction as "Won" with the settlement details
+
+#### Scenario: No bids state
+- **WHEN** the connected user has placed no bids
+- **THEN** the my-bids page SHALL display an appropriate empty state
+
+#### Scenario: Outbid notification
+- **WHEN** the user has been outbid on an active auction
+- **THEN** the my-bids page SHALL surface this clearly (e.g., "You've been outbid — current high bid: $X")
+
+### Requirement: Create an auction listing from the sell flow
+The web app SHALL allow a seller to create an auction listing (in addition to fixed-price listings) by entering a start price, optional reserve price, and auction duration. The flow SHALL build and submit a `create_auction` transaction.
+
+#### Scenario: Seller creates an auction
+- **WHEN** a seller chooses "Auction" as listing type, enters start price, reserve, and duration, and confirms
+- **THEN** the app SHALL build and have them sign a `create_auction` transaction
+- **AND** on success SHALL show the auction as active with the correct countdown timer
+
+#### Scenario: Fixed-price and auction listing types are independently available
+- **WHEN** a seller opens the "Sell" form
+- **THEN** the app SHALL offer both "Fixed price" and "Auction" as listing type options
+
+#### Scenario: Auction creation with invalid duration is rejected
+- **WHEN** a seller enters a duration of zero or leaves the duration field blank
+- **THEN** the app SHALL show a validation error and SHALL NOT submit
+
+#### Scenario: Auction card is visually distinguished from fixed-price listing
+- **WHEN** an auction card is rendered on the browse grid
+- **THEN** it SHALL display the live countdown and current bid rather than a static "Buy Now" price
+
+### Requirement: Card barter trade — propose
+
+The web app SHALL allow connected users to propose a peer-to-peer barter trade by
+selecting cards from their real on-chain holdings (give side) and from the
+counterparty's real on-chain holdings or active listings (get side), with an
+optional one-way USDC sweetener. Submitting the proposal SHALL call the API to
+lock give-side cards in contract custody and record the proposal. The `MY_CARDS`
+static mock, `TradeItem`, `TradeState`, `EMPTY_TRADE` types, and the no-op
+`sendTrade`, `openTradePicker`, `addTradeCard` actions SHALL be removed.
+
+#### Scenario: Proposer selects real holdings on the give side
+- **GIVEN** a connected user with card tokens on-chain
+- **WHEN** the user opens the trade page
+- **THEN** the give-side card picker SHALL display only cards returned by `GET /api/cards?owner=<wallet>`
+- **AND** no static mock data (`MY_CARDS`) SHALL appear
+
+#### Scenario: Proposer submits a proposal
+- **GIVEN** the proposer has selected give-side cards, get-side cards, and a counterparty address
+- **WHEN** the user clicks Propose Trade
+- **THEN** the app SHALL call `POST /api/trade-proposals`, build and relay the `propose_swap` XDR, and confirm the proposal is pending in the inbox
+
+#### Scenario: Proposal requires counterparty address
+- **WHEN** the proposer attempts to submit without entering a counterparty address
+- **THEN** the form SHALL show a validation error and prevent submission
+
+### Requirement: Card barter trade — inbox and actions
+
+The web app SHALL display a trade inbox showing all incoming and outgoing proposals
+for the connected wallet. Each proposal SHALL show the full card breakdown, USDC
+sweetener, status, expiry, and available actions (accept, decline, counter, cancel).
+
+#### Scenario: Incoming proposal appears in inbox
+- **GIVEN** a proposal with `counterparty = connected wallet`
+- **WHEN** the user opens the Trade Inbox tab
+- **THEN** the proposal SHALL appear with the give/get card names, USDC amount, proposer address, status, and time remaining
+
+#### Scenario: Counterparty accepts a proposal
+- **GIVEN** an incoming proposal with `status = proposed`
+- **WHEN** the counterparty clicks Accept
+- **THEN** the app SHALL call `POST /api/trade-proposals/:id/accept`, build and relay `execute_swap` XDR, and confirm both card transfers on success
+
+#### Scenario: Counterparty declines a proposal
+- **GIVEN** an incoming proposal with `status = proposed`
+- **WHEN** the counterparty clicks Decline
+- **THEN** the app SHALL call `POST /api/trade-proposals/:id/decline` and the proposal SHALL move to status `Declined`
+
+#### Scenario: Proposer cancels an outgoing proposal
+- **GIVEN** an outgoing proposal with `status = proposed`
+- **WHEN** the proposer clicks Cancel
+- **THEN** the app SHALL call `POST /api/trade-proposals/:id/cancel` and the locked cards SHALL be returned
 
