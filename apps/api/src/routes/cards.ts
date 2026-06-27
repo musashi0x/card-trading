@@ -71,6 +71,17 @@ cardsRouter.post('/mint', async (req, res, next) => {
     const issuer = env.platformIssuer;
     const secret = env.usdcIssuerSecret;
 
+    // The platform issuer can't own copies of an asset it issues: an issuer
+    // cannot hold a trustline to its own asset, so the classic flow would build a
+    // self-trustline `changeTrust` that Stellar rejects outright. Fail fast with a
+    // clear error before allocating a code, deploying a SAC, or writing a row.
+    if (body.owner === issuer) {
+      throw new PreflightError(
+        'Cannot mint to the issuer account — an issuer cannot hold a trustline to its own asset',
+        'OWNER_IS_ISSUER',
+      );
+    }
+
     // 1. Allocate the asset. A classic owner must be a real, funded account
     // *before* we deploy a SAC or write a row — `hasTrustline` throws
     // ACCOUNT_NOT_FOUND for a bogus owner, so this fails fast with no side effects.
@@ -132,6 +143,12 @@ cardsRouter.post('/:id/distribute', async (req, res, next) => {
       throw new PreflightError('Platform issuer secret not configured', 'NO_ISSUER_SECRET');
     }
     const { owner } = distributeSchema.parse(req.body);
+    if (owner === env.platformIssuer) {
+      throw new PreflightError(
+        'Cannot distribute to the issuer account — an issuer cannot hold a trustline to its own asset',
+        'OWNER_IS_ISSUER',
+      );
+    }
     const [card] = await db.select().from(cards).where(eq(cards.id, req.params.id));
     if (!card) throw new PreflightError('Card not found', 'CARD_NOT_FOUND');
     if (!card.sacAddress) throw new PreflightError('Card asset contract not deployed', 'NO_SAC');

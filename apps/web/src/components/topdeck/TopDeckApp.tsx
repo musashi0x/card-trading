@@ -1372,7 +1372,11 @@ export class TopDeckApp extends Component<Props, State> {
                   <div>
                     <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CHOOSE A CARD YOU HOLD</div>
                     {this.props.catalog.length === 0 ? (
-                      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>No cards available from the marketplace API. Make sure the API is running, then reopen this page.</div>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>
+                        {!this.props.wallet.address
+                          ? 'Connect your wallet to see the cards you hold.'
+                          : 'You don’t hold any cards yet. Switch to “Mint a new card” to issue one.'}
+                      </div>
                     ) : (
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10 }}>
                         {this.props.catalog.map((cat) => {

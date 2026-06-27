@@ -58,11 +58,28 @@ export function TopDeck() {
         if (active) setSeed(mockCards());
       }
     })();
-    api.cards().then((c) => active && setCatalog(c)).catch(() => undefined);
     return () => {
       active = false;
     };
   }, []);
+
+  // The Sell flow's "a card I hold" picker must show only the connected wallet's
+  // own cards, so the catalog is fetched per-address (and cleared when no wallet
+  // is connected — you can't list what you don't hold). Refetches on reconnect.
+  useEffect(() => {
+    if (!address) {
+      setCatalog([]);
+      return;
+    }
+    let active = true;
+    api
+      .cards(address)
+      .then((c) => active && setCatalog(c))
+      .catch(() => active && setCatalog([]));
+    return () => {
+      active = false;
+    };
+  }, [address]);
 
   if (!seed) return <Splash />;
 

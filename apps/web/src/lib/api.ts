@@ -44,7 +44,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  cards: () => request<Card[]>('/api/cards'),
+  /** The card registry, or — with `owner` — only the cards that wallet holds. */
+  cards: (owner?: string) =>
+    request<Card[]>(`/api/cards${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
   listings: (params?: { q?: string; set?: string; rarity?: string }) => {
     const qs = new URLSearchParams(params as Record<string, string>).toString();
     return request<Listing[]>(`/api/listings${qs ? `?${qs}` : ''}`);
