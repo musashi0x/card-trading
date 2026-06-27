@@ -22,7 +22,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <WalletProvider>{children}</WalletProvider>
+        <QueryProvider>
+          <WalletProvider>{children}</WalletProvider>
+        </QueryProvider>
         <DevAnnotations />
       </body>
     </html>

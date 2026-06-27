@@ -5,7 +5,7 @@
  * mutation to refetch the affected lists.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, type QueryClient } from '@tanstack/react-query';
 import { api, type OrderWithCard } from '@/lib/api';
 
 type ListingFilters = { q?: string; set?: string; rarity?: string };
@@ -19,11 +19,22 @@ export const queryKeys = {
   disputedOrders: () => ['orders', 'disputed'] as const,
 };
 
+/**
+ * Invalidate the escrow-order reads so they refetch. Call from a mutation's
+ * `onSuccess` after any action that changes order state (purchase, confirm,
+ * ship, dispute, arbiter resolution).
+ */
+export function invalidateOrders(queryClient: QueryClient, account: string | null) {
+  if (account) queryClient.invalidateQueries({ queryKey: queryKeys.orders(account) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.disputedOrders() });
+}
+
 /** Open listings, optionally filtered by query/set/rarity. */
 export function useListings(filters?: ListingFilters) {
   return useQuery({
     queryKey: queryKeys.listings(filters),
     queryFn: () => api.listings(filters),
+    refetchInterval: 5000, // Refetch every 5 seconds
   });
 }
 

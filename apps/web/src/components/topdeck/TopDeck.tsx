@@ -7,11 +7,18 @@
  * fall back to demo cards so the marketplace is never empty.
  */
 
-import { useEffect, useState } from 'react';
-import type { Card } from '@cardmkt/shared';
+import { useCallback, useMemo } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import {
+  invalidateOrders,
+  useCards,
+  useDisputedOrders,
+  useListings,
+  useOrders,
+} from '@/lib/queries';
 import { explorerAccount, explorerTx } from '@/lib/explorer';
-import { useWallet } from '@/components/WalletProvider';
+import { useWallet, type OrderAction } from '@/components/WalletProvider';
 import { TopDeckApp } from './TopDeckApp';
 import { mapListing, mockCards, type TopCard } from './lib';
 
@@ -45,43 +52,52 @@ export function TopDeck() {
     mintCard,
     payWithAsset,
   } = useWallet();
-  const [seed, setSeed] = useState<TopCard[] | null>(null);
-  const [catalog, setCatalog] = useState<Card[]>([]);
+  const { data: listings, isPending: listingsPending, isError: listingsError } = useListings();
 
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const listings = await api.listings();
-        const base = Date.now();
-        const mapped = listings.filter((l) => l.card).map((l) => mapListing(l, base));
-        if (active) setSeed(mapped.length ? mapped : mockCards(base));
-      } catch {
-        if (active) setSeed(mockCards());
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, []);
+  // Map live listings to seed cards; fall back to demo cards when the API is
+  // unreachable or has no open listings, so the marketplace is never empty.
+  const seed = useMemo<TopCard[] | null>(() => {
+    if (listingsPending) return null;
+    if (listingsError || !listings) return mockCards();
+    const base = Date.now();
+    const mapped = listings.filter((l) => l.card).map((l) => mapListing(l, base));
+    return mapped.length ? mapped : mockCards(base);
+  }, [listings, listingsPending, listingsError]);
 
-  // The Sell flow's "a card I hold" picker must show only the connected wallet's
-  // own cards, so the catalog is fetched per-address (and cleared when no wallet
-  // is connected — you can't list what you don't hold). Refetches on reconnect.
-  useEffect(() => {
-    if (!address) {
-      setCatalog([]);
-      return;
-    }
-    let active = true;
-    api
-      .cards(address)
-      .then((c) => active && setCatalog(c))
-      .catch(() => active && setCatalog([]));
-    return () => {
-      active = false;
-    };
-  }, [address]);
+  // The Sell flow's "a card I hold" picker shows only the connected wallet's own
+  // cards. The hook is disabled (and returns no data) when no wallet is
+  // connected — you can't list what you don't hold — and refetches on reconnect.
+  const { data: catalog = [] } = useCards(address);
+
+  // Escrow orders + open disputes for the connected wallet. Both are gated on a
+  // connected wallet, so they sit idle (no fetch) until one connects.
+  const ordersQuery = useOrders(address);
+  const disputedQuery = useDisputedOrders(!!address);
+  const queryClient = useQueryClient();
+  const refreshOrders = useCallback(
+    () => invalidateOrders(queryClient, address),
+    [queryClient, address],
+  );
+
+  // Order-mutating actions, each refetching the order reads on success so the
+  // Orders screen stays in sync without manual reloads. The class component
+  // calls these (the first two transparently via `wallet`) and manages its own
+  // per-row busy state and toasts.
+  const orderActionMut = useMutation({
+    mutationFn: (v: { action: OrderAction; orderId: string; contractOrderId: number }) =>
+      orderAction(v.action, v.orderId, v.contractOrderId),
+    onSuccess: refreshOrders,
+  });
+  const escrowPurchaseMut = useMutation({
+    mutationFn: (v: { listingId: string; contractListingId: number }) =>
+      escrowPurchase(v.listingId, v.contractListingId),
+    onSuccess: refreshOrders,
+  });
+  const resolveOrderMut = useMutation({
+    mutationFn: (v: { orderId: string; refund: boolean }) =>
+      api.resolveOrder(v.orderId, v.refund).then((r) => r.hash),
+    onSuccess: refreshOrders,
+  });
 
   if (!seed) return <Splash />;
 
@@ -98,10 +114,26 @@ export function TopDeck() {
         runAction: (action, body) => runAction(action, body),
         passkeyBuyNow,
         passkeyList,
-        escrowPurchase,
-        orderAction,
+        // Mutation-wrapped so a purchase / order action auto-refreshes orders.
+        escrowPurchase: (listingId, contractListingId) =>
+          escrowPurchaseMut.mutateAsync({ listingId, contractListingId }),
+        orderAction: (action, orderId, contractOrderId) =>
+          orderActionMut.mutateAsync({ action, orderId, contractOrderId }),
         mintCard,
         payWithAsset,
+      }}
+      orders={{
+        data: ordersQuery.data ?? [],
+        disputed: disputedQuery.data ?? [],
+        // Only the initial load shows the spinner; background refetches are silent.
+        loading: ordersQuery.isLoading,
+        error: !address
+          ? 'Connect a wallet to see your orders'
+          : ordersQuery.error
+            ? (ordersQuery.error as Error).message
+            : null,
+        resolve: (orderId, refund) => resolveOrderMut.mutateAsync({ orderId, refund }),
+        refresh: refreshOrders,
       }}
       seedCards={seed}
       catalog={catalog}

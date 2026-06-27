@@ -18,6 +18,11 @@ function makeQueryClient(): QueryClient {
         staleTime: 30 * 1000,
         retry: 1,
         refetchOnWindowFocus: false,
+        // `always` makes a failed fetch surface as an error instead of being
+        // paused as "offline". We talk to a configurable external API origin and
+        // want callers to fall back (e.g. demo cards) when it's unreachable —
+        // the default 'online' mode would leave queries stuck in `paused`.
+        networkMode: 'always',
       },
     },
   });

@@ -109,8 +109,29 @@ const PAY_ASSETS: Array<{ id: PayAssetId; label: string; asset: StellarAsset | n
   { id: 'XLM', label: 'XLM', asset: XLM_ASSET },
 ];
 
+/**
+ * Escrow-order server state, owned by the TanStack Query layer in the parent and
+ * passed down (this is a class component, so it can't use the query hooks
+ * directly). `resolve` / `refresh` are query mutations that refetch on success.
+ */
+interface OrdersProps {
+  /** The connected wallet's orders (buyer or seller). */
+  data: OrderWithCard[];
+  /** Open disputes for the arbiter tab. */
+  disputed: OrderWithCard[];
+  /** True only during the initial load; background refetches are silent. */
+  loading: boolean;
+  /** A connect prompt or a fetch error, else null. */
+  error: string | null;
+  /** Arbiter resolution (server-signed); refetches orders on success. Returns tx hash. */
+  resolve: (orderId: string, refund: boolean) => Promise<string>;
+  /** Force a re-fetch of orders + disputes. */
+  refresh: () => void;
+}
+
 interface Props {
   wallet: WalletProps;
+  orders: OrdersProps;
   seedCards: TopCard[];
   catalog: Card[];
   explorerTx: (hash: string) => string;
@@ -142,12 +163,6 @@ interface Form {
 
 interface State {
   screen: 'browse' | 'detail' | 'mybids' | 'sell' | 'leaderboard' | 'portfolio' | 'trade' | 'profile' | 'editprofile' | 'orders';
-  /** Escrow orders for the connected wallet (buyer or seller), loaded on demand. */
-  orders: OrderWithCard[];
-  /** Open disputes shown to the arbiter (the Orders screen's arbiter tab). */
-  disputed: OrderWithCard[];
-  ordersLoading: boolean;
-  ordersErr: string | null;
   /** Order id with an action in flight, so its buttons can show a spinner. */
   orderBusy: string | null;
   /** Whether the Orders screen is showing the arbiter (disputes) view. */
@@ -231,7 +246,7 @@ export class TopDeckApp extends Component<Props, State> {
       cards: props.seedCards,
       payAsset: 'USDC', quote: null, quoting: false, quoteErr: null,
       paying: false, payErr: null,
-      orders: [], disputed: [], ordersLoading: false, ordersErr: null, orderBusy: null, ordersArbiter: false,
+      orderBusy: null, ordersArbiter: false,
       walletMenuOpen: false, navMenuOpen: false, filtersOpen: false, addressCopied: false,
     };
   }
@@ -497,7 +512,6 @@ export class TopDeckApp extends Component<Props, State> {
       const hash = await escrowPurchase(c.listingId, c.contractListingId);
       this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, paying: false, lastHash: hash }));
       this.showToast(`Funds held in escrow — ${c.name} ships next 🛡`, 'win');
-      void this.loadOrders();
     } catch (err) {
       const msg = err instanceof ApiRequestError ? err.message : (err as Error).message;
       this.setState({ paying: false, payErr: msg });
@@ -505,26 +519,11 @@ export class TopDeckApp extends Component<Props, State> {
     }
   };
 
-  /** Load the connected wallet's orders (and open disputes for the arbiter view). */
-  private loadOrders = async () => {
-    const { address } = this.props.wallet;
-    if (!address) {
-      this.setState({ orders: [], disputed: [], ordersErr: 'Connect a wallet to see your orders' });
-      return;
-    }
-    this.setState({ ordersLoading: true, ordersErr: null });
-    try {
-      const [orders, disputed] = await Promise.all([
-        api.orders(address),
-        api.disputedOrders().catch(() => [] as OrderWithCard[]),
-      ]);
-      this.setState({ orders, disputed, ordersLoading: false });
-    } catch (err) {
-      this.setState({ ordersLoading: false, ordersErr: (err as Error).message });
-    }
-  };
-
-  /** A participant action (confirm / dispute / ship / timeout) on an order. */
+  /**
+   * A participant action (confirm / dispute / ship / timeout) on an order. The
+   * wallet action is mutation-wrapped upstream, so the order reads refetch
+   * automatically on success.
+   */
   private doOrderAction = async (action: OrderAction, o: OrderWithCard) => {
     if (o.contractOrderId == null) {
       this.showToast('Order is not yet confirmed on-chain', 'outbid');
@@ -535,21 +534,22 @@ export class TopDeckApp extends Component<Props, State> {
       const hash = await this.props.wallet.orderAction(action, o.id, o.contractOrderId);
       this.setState({ orderBusy: null, lastHash: hash });
       this.showToast('Done ✓', 'win');
-      void this.loadOrders();
     } catch (err) {
       this.setState({ orderBusy: null });
       this.showToast(err instanceof ApiRequestError ? err.message : (err as Error).message, 'outbid');
     }
   };
 
-  /** Arbiter resolution of a disputed order (server-signed with the arbiter key). */
+  /**
+   * Arbiter resolution of a disputed order (server-signed with the arbiter key).
+   * `orders.resolve` refetches the order reads on success.
+   */
   private resolveDispute = async (o: OrderWithCard, refund: boolean) => {
     this.setState({ orderBusy: o.id });
     try {
-      const { hash } = await api.resolveOrder(o.id, refund);
+      const hash = await this.props.orders.resolve(o.id, refund);
       this.setState({ orderBusy: null, lastHash: hash });
       this.showToast(refund ? 'Refunded the buyer' : 'Released to the seller', 'win');
-      void this.loadOrders();
     } catch (err) {
       this.setState({ orderBusy: null });
       this.showToast(err instanceof ApiRequestError ? err.message : (err as Error).message, 'outbid');
@@ -557,8 +557,9 @@ export class TopDeckApp extends Component<Props, State> {
   };
 
   private openOrders = () => {
+    // Orders fetch in the background as soon as a wallet is connected, so opening
+    // the screen just navigates — the query layer keeps the data fresh.
     this.setState({ screen: 'orders', navMenuOpen: false });
-    void this.loadOrders();
   };
 
   // ----- sell flow -----
@@ -1331,6 +1332,7 @@ export class TopDeckApp extends Component<Props, State> {
   private renderOrders() {
     const st = this.state;
     const { address } = this.props.wallet;
+    const { data: orders, disputed, loading, error } = this.props.orders;
     const tab = (label: string, on: boolean, onClick: () => void, count?: number) => (
       <div
         onClick={onClick}
@@ -1343,12 +1345,12 @@ export class TopDeckApp extends Component<Props, State> {
         {label}{count != null && count > 0 ? ` · ${count}` : ''}
       </div>
     );
-    const list = st.ordersArbiter ? st.disputed : st.orders;
+    const list = st.ordersArbiter ? disputed : orders;
     return (
       <div style={{ maxWidth: 920, margin: '0 auto', padding: '28px 20px 80px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
           <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, flex: 1 }}>Escrow orders</div>
-          <div onClick={() => void this.loadOrders()} style={{ fontSize: 13, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>↻ Refresh</div>
+          <div onClick={() => this.props.orders.refresh()} style={{ fontSize: 13, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>↻ Refresh</div>
         </div>
         <p style={{ color: '#5c5443', fontSize: 14, margin: '0 0 18px', maxWidth: 620 }}>
           Physical cards settle through a blockchain escrow: your funds are held by the contract
@@ -1357,14 +1359,14 @@ export class TopDeckApp extends Component<Props, State> {
         </p>
         <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
           {tab('My orders', !st.ordersArbiter, () => this.setState({ ordersArbiter: false }))}
-          {tab('Arbiter · disputes', st.ordersArbiter, () => this.setState({ ordersArbiter: true }), st.disputed.length)}
+          {tab('Arbiter · disputes', st.ordersArbiter, () => this.setState({ ordersArbiter: true }), disputed.length)}
         </div>
 
-        {st.ordersLoading && <div style={{ color: '#5c5443', fontSize: 14 }}>Loading orders…</div>}
-        {st.ordersErr && !st.ordersLoading && (
-          <div style={{ color: '#b3261e', fontSize: 14, fontWeight: 700 }}>{st.ordersErr}</div>
+        {loading && <div style={{ color: '#5c5443', fontSize: 14 }}>Loading orders…</div>}
+        {error && !loading && (
+          <div style={{ color: '#b3261e', fontSize: 14, fontWeight: 700 }}>{error}</div>
         )}
-        {!st.ordersLoading && !st.ordersErr && list.length === 0 && (
+        {!loading && !error && list.length === 0 && (
           <div style={{ border: `2.5px dashed ${INK}`, borderRadius: 14, padding: 40, textAlign: 'center', color: '#5c5443' }}>
             {st.ordersArbiter ? 'No open disputes.' : 'No escrow orders yet. Buy a physical listing to start one.'}
           </div>
