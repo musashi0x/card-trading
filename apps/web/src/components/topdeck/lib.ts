@@ -8,17 +8,18 @@
  * the browse grid, and the Sell publish flow all use the real API.
  */
 
-import type { Card, Fulfillment, Listing } from '@cardmkt/shared';
+import type { Auction, Bid as ApiBid, Card, Fulfillment, Listing } from '@cardmkt/shared';
 
 export type Rarity = 'common' | 'rare' | 'epic' | 'legendary';
 
 export interface Bid {
   bidder: string;
   amount: number;
-  /** Relative age in ms (mock seed data). */
-  ago?: number;
-  /** Absolute timestamp (live, client-placed bids). */
+  /** Absolute timestamp the bid was placed. */
   at?: number;
+  /** This bid was superseded by a higher one (drives the muted treatment). */
+  outbid?: boolean;
+  /** True when the connected wallet placed this bid. */
   you?: boolean;
 }
 
@@ -44,10 +45,22 @@ export interface TopCard {
   bids: Bid[];
   /** True when this card is backed by a real on-chain listing. */
   real?: boolean;
-  /** Real listing id (uuid) — present when `real`. */
+  /** Real listing id (uuid) — present when `real` and not an auction. */
   listingId?: string;
   /** On-chain settlement-contract listing id — needed for passkey buy_now. */
   contractListingId?: number | null;
+  /** True when this card is a timed auction rather than a fixed-price listing. */
+  isAuction?: boolean;
+  /** Real auction id (uuid) — present when `isAuction`. */
+  auctionId?: string;
+  /** On-chain settlement-contract auction id — needed for bid/settle/cancel. */
+  contractAuctionId?: number | null;
+  /** Auction status, present when `isAuction`. */
+  auctionStatus?: Auction['status'];
+  /** Current high bidder's address (auction only). */
+  highBidder?: string | null;
+  /** Seller's full Stellar address (auctions need it for self-bid checks). */
+  sellerAddress?: string;
   /** Real card id (uuid) — present when `real` or self-listed. */
   cardId?: string;
   /** True for the connected user's own listings (drives the Selling tab). */
@@ -60,8 +73,6 @@ export interface TopCard {
    */
   fulfillment?: Fulfillment;
 }
-
-const H = 3600000;
 
 export function money(n: number): string {
   return '$' + Math.round(n).toLocaleString();
@@ -134,20 +145,8 @@ export function shorten(addr: string): string {
   return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
 }
 
-/**
- * Deterministic auction end time for a real listing. A hash of the id picks a
- * stable offset so the countdown is consistent for a given listing within a
- * session (seeded once, at fetch time).
- */
-function simulatedEndsAt(id: string, base: number): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  const minutes = 20 + (h % (48 * 60)); // 20 min … 48 h out
-  return base + minutes * 60000;
-}
-
-/** Turn a real on-chain listing into the auction-card shape the UI renders. */
-export function mapListing(l: Listing, base = Date.now()): TopCard {
+/** Turn a real on-chain fixed-price listing into the card shape the UI renders. */
+export function mapListing(l: Listing): TopCard {
   const card = l.card!;
   const rarity = mapRarity(card.rarity);
   const price = Number(l.priceUsdc) || 0;
@@ -166,9 +165,11 @@ export function mapListing(l: Listing, base = Date.now()): TopCard {
     image: card.imageUrl,
     sellerArt: rarityArt(rarity),
     currentBid: price,
-    endsAt: simulatedEndsAt(l.id, base),
+    // Fixed-price listings have no countdown; `0` means "no auction timer".
+    endsAt: 0,
     buyNow: price,
     seller: shorten(l.seller),
+    sellerAddress: l.seller,
     sellerRating: '—',
     sellerSales: '0',
     setLine: (card.set || 'LISTING').toUpperCase(),
@@ -178,99 +179,55 @@ export function mapListing(l: Listing, base = Date.now()): TopCard {
   };
 }
 
-/**
- * Branded demo cards shown when the API is unreachable or has no open listings,
- * so the marketplace is never empty. Mirrors the original design's sample lots.
- */
-export function mockCards(base = Date.now()): TopCard[] {
-  const S = 1000,
-    M = 60000;
-  const seed: Array<Omit<TopCard, 'endsAt'> & { endsIn: number }> = [
-    {
-      id: 'drake', name: 'Solar Drake · 1st Ed', rarity: 'legendary', condition: 'PSA 10 · Gem Mint',
-      grade: 'PSA 10', cats: ['Pokémon', 'Graded'], art: 'linear-gradient(150deg,#ffb83d,#ff4d3d)',
-      sellerArt: 'linear-gradient(135deg,#ff4d3d,#ffb83d)', currentBid: 2450, endsIn: 2 * H + 14 * M,
-      buyNow: 3800, seller: 'VaultKings', sellerRating: '4.9', sellerSales: '3,204', setLine: 'BASE SET · #006 / 102',
-      bids: [
-        { bidder: 'cardwizard_88', amount: 2450, ago: 120 * S },
-        { bidder: 'DragonHoard', amount: 2300, ago: 9 * M },
-        { bidder: 'mintcondition', amount: 2100, ago: 24 * M },
-        { bidder: 'cardwizard_88', amount: 1900, ago: 51 * M },
-      ],
-    },
-    {
-      id: 'striker', name: 'Neon Striker', rarity: 'rare', condition: 'Near Mint', grade: 'Raw',
-      cats: ['Pokémon'], art: 'linear-gradient(150deg,#3ff0ff,#2d5bff)',
-      sellerArt: 'linear-gradient(135deg,#2d5bff,#3ff0ff)', currentBid: 180, endsIn: 42 * M, buyNow: 0,
-      seller: 'PullRatePro', sellerRating: '4.8', sellerSales: '912', setLine: 'NEON GENESIS · #045 / 188',
-      bids: [
-        { bidder: 'sleeve_king', amount: 180, ago: 3 * M },
-        { bidder: 'tcg_tom', amount: 165, ago: 14 * M },
-        { bidder: 'sleeve_king', amount: 140, ago: 38 * M },
-      ],
-    },
-    {
-      id: 'slugger', name: "Vintage Slugger '52", rarity: 'epic', condition: 'SGC 9 · Mint', grade: 'SGC 9',
-      cats: ['Sports', 'Graded'], art: 'linear-gradient(150deg,#c77dff,#7c3aed)',
-      sellerArt: 'linear-gradient(135deg,#7c3aed,#c77dff)', currentBid: 5900, endsIn: 28 * H, buyNow: 0,
-      seller: 'Cooperstown Co', sellerRating: '5.0', sellerSales: '5,781', setLine: 'TOPPS 1952 · #311',
-      bids: [
-        { bidder: 'diamondhands', amount: 5900, ago: 42 * M },
-        { bidder: 'vintage_vic', amount: 5500, ago: 3 * H },
-        { bidder: 'diamondhands', amount: 5100, ago: 7 * H },
-      ],
-    },
-    {
-      id: 'familiar', name: 'Pixel Familiar', rarity: 'common', condition: 'Lightly Played', grade: 'Raw',
-      cats: ['Pokémon'], art: 'linear-gradient(150deg,#7affb0,#13c06a)',
-      sellerArt: 'linear-gradient(135deg,#13c06a,#7affb0)', currentBid: 24, endsIn: 3 * H + 11 * M, buyNow: 40,
-      seller: 'BulkBinBets', sellerRating: '4.6', sellerSales: '421', setLine: '8-BIT SAGA · #112 / 200',
-      bids: [
-        { bidder: 'pennypincher', amount: 24, ago: 18 * M },
-        { bidder: 'starter_deck', amount: 18, ago: 55 * M },
-      ],
-    },
-    {
-      id: 'phoenix', name: 'Aurora Phoenix Holo', rarity: 'legendary', condition: 'PSA 9 · Mint', grade: 'PSA 9',
-      cats: ['Pokémon', 'Graded'], art: 'linear-gradient(150deg,#ff8edb,#ff4d9d)',
-      sellerArt: 'linear-gradient(135deg,#ff4d9d,#ff8edb)', currentBid: 3120, endsIn: 9 * M + 44 * S, buyNow: 4500,
-      seller: 'HoloHaven', sellerRating: '4.9', sellerSales: '2,055', setLine: 'CELESTIAL · #199 / 199',
-      bids: [
-        { bidder: 'shinyhunter', amount: 3120, ago: 50 * S },
-        { bidder: 'DragonHoard', amount: 2950, ago: 6 * M },
-        { bidder: 'foilfiend', amount: 2700, ago: 19 * M },
-      ],
-    },
-    {
-      id: 'chrome', name: 'Chrome Rookie', rarity: 'rare', condition: 'Mint · Graded', grade: 'BGS 9',
-      cats: ['Sports', 'Graded'], art: 'linear-gradient(150deg,#d4dae3,#94a0b3)',
-      sellerArt: 'linear-gradient(135deg,#94a0b3,#d4dae3)', currentBid: 410, endsIn: 5 * H + 27 * M, buyNow: 650,
-      seller: 'RookieRack', sellerRating: '4.7', sellerSales: '1,338', setLine: 'CHROME PRIZM · #88',
-      bids: [
-        { bidder: 'courtside', amount: 410, ago: 22 * M },
-        { bidder: 'rookie_radar', amount: 360, ago: 2 * H },
-      ],
-    },
-    {
-      id: 'mage', name: 'Galaxy Mage Prism', rarity: 'epic', condition: 'PSA 8 · NM-Mint', grade: 'PSA 8',
-      cats: ['Pokémon', 'Graded'], art: 'linear-gradient(150deg,#7c6bff,#3a2bd0)',
-      sellerArt: 'linear-gradient(135deg,#3a2bd0,#7c6bff)', currentBid: 940, endsIn: 28 * M, buyNow: 1400,
-      seller: 'PrismPalace', sellerRating: '4.8', sellerSales: '877', setLine: 'COSMIC ECLIPSE · #155 / 155',
-      bids: [
-        { bidder: 'arcanist', amount: 940, ago: 4 * M },
-        { bidder: 'spellslinger', amount: 880, ago: 16 * M },
-      ],
-    },
-    {
-      id: 'gold', name: 'Retro Slugger Gold', rarity: 'legendary', condition: 'BGS 9.5 · Gem', grade: 'BGS 9.5',
-      cats: ['Sports', 'Graded'], art: 'linear-gradient(150deg,#ffe27a,#e0a92e)',
-      sellerArt: 'linear-gradient(135deg,#e0a92e,#ffe27a)', currentBid: 7300, endsIn: 6 * H + 8 * M, buyNow: 0,
-      seller: 'GoldenEraCards', sellerRating: '5.0', sellerSales: '4,610', setLine: 'MINT GOLD REFRACTOR · 04 / 10',
-      bids: [
-        { bidder: 'hoftracker', amount: 7300, ago: 33 * M },
-        { bidder: 'goldglove', amount: 6800, ago: 4 * H },
-      ],
-    },
-  ];
-  return seed.map(({ endsIn, ...c }) => ({ ...c, endsAt: base + endsIn }));
+/** Map an API bid row into the UI bid shape. */
+export function mapBid(b: ApiBid, you?: string): Bid {
+  return {
+    bidder: shorten(b.bidder),
+    amount: Number(b.amountUsdc) || 0,
+    at: new Date(b.createdAt).getTime(),
+    outbid: b.outbidAt != null,
+    you: you != null && b.bidder === you,
+  };
 }
+
+/**
+ * Turn a real on-chain auction into the auction-card shape the UI renders. The
+ * countdown derives from the real `endsAt`; `currentBid` is the high bid (or the
+ * start price before any bids). `bids` are populated from the bids API.
+ */
+export function mapAuction(a: Auction, bids: ApiBid[] = [], you?: string): TopCard {
+  const card = a.card!;
+  const rarity = mapRarity(card.rarity);
+  const high = Number(a.highBidUsdc) || 0;
+  const start = Number(a.startPriceUsdc) || 0;
+  return {
+    id: a.id,
+    auctionId: a.id,
+    contractAuctionId: a.contractAuctionId,
+    isAuction: true,
+    auctionStatus: a.status,
+    highBidder: a.highBidder,
+    cardId: a.cardId,
+    real: true,
+    name: card.name,
+    rarity,
+    condition: card.set,
+    grade: 'Raw',
+    cats: [categoryFor(card)],
+    art: card.imageUrl ? `center/cover no-repeat url("${card.imageUrl}")` : rarityArt(rarity),
+    image: card.imageUrl,
+    sellerArt: rarityArt(rarity),
+    currentBid: high > 0 ? high : start,
+    endsAt: new Date(a.endsAt).getTime(),
+    // Auctions have no buy-now price.
+    buyNow: 0,
+    seller: shorten(a.seller),
+    sellerAddress: a.seller,
+    sellerRating: '—',
+    sellerSales: '0',
+    setLine: (card.set || 'AUCTION').toUpperCase(),
+    bids: bids.map((b) => mapBid(b, you)),
+    royaltyBps: card.royaltyBps ?? 0,
+  };
+}
+

@@ -4,14 +4,16 @@ import { useTopDeck } from '../TopDeckProvider';
 import { increment, money, type TopCard } from '../lib';
 import { DISPLAY, INK } from '../theme';
 
-/** Simulated bid modal — opened from the detail screen and the bid lists. */
+/** Real on-chain bid modal — opened from the detail screen and the bid lists. */
 export function BidModal({ card: c }: { card: TopCard }) {
   const td = useTopDeck();
   const st = td.state;
   const inc = increment(c.currentBid);
   const min = c.currentBid + inc;
   const amt = Number(st.bidAmount);
-  const valid = amt >= min;
+  // The contract only requires a bid above the current high bid; the suggested
+  // increment is a UI nicety, not a hard floor.
+  const valid = amt > c.currentBid && !st.bidBusy;
   const quickBids = [min, min + inc, min + 4 * inc];
   return (
     <div onClick={td.closeBid} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(26,19,5,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, animation: 'overlayIn .15s ease both' }}>
@@ -34,12 +36,12 @@ export function BidModal({ card: c }: { card: TopCard }) {
           ))}
         </div>
 
-        {st.bidAmount !== '' && !valid && (
-          <div style={{ marginTop: 13, fontSize: 12.5, fontWeight: 700, color: '#ff4d3d' }}>Enter at least {money(min)}</div>
+        {st.bidAmount !== '' && amt <= c.currentBid && (
+          <div style={{ marginTop: 13, fontSize: 12.5, fontWeight: 700, color: '#ff4d3d' }}>Enter more than {money(c.currentBid)}</div>
         )}
 
-        <div onClick={td.confirmBid} style={{ marginTop: 18, textAlign: 'center', fontFamily: DISPLAY, fontWeight: 800, fontSize: 16, padding: 16, border: `3px solid ${INK}`, borderRadius: 13, cursor: valid ? 'pointer' : 'default', background: valid ? '#ff4d3d' : '#e7ddc8', color: valid ? '#fff' : 'rgba(26,19,5,.4)', boxShadow: `3px 3px 0 ${INK}` }}>{valid ? `Confirm bid · ${money(amt)}` : 'Enter a higher bid'}</div>
-        <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 11 }}>Bids are simulated in this demo. Listings &amp; wallet are live on Stellar testnet.</div>
+        <div onClick={() => valid && td.placeBid()} style={{ marginTop: 18, textAlign: 'center', fontFamily: DISPLAY, fontWeight: 800, fontSize: 16, padding: 16, border: `3px solid ${INK}`, borderRadius: 13, cursor: valid ? 'pointer' : 'default', background: valid ? '#ff4d3d' : '#e7ddc8', color: valid ? '#fff' : 'rgba(26,19,5,.4)', boxShadow: `3px 3px 0 ${INK}` }}>{st.bidBusy ? 'Submitting…' : amt > c.currentBid ? `Confirm bid · ${money(amt)}` : 'Enter a higher bid'}</div>
+        <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 11 }}>Bids escrow USDC on Stellar testnet and refund automatically when outbid.</div>
       </div>
     </div>
   );

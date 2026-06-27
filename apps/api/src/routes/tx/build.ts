@@ -5,7 +5,11 @@ import {
   FULFILLMENT,
   acceptOfferSchema,
   buyNowSchema,
+  cancelAuctionSchema,
   cancelListingSchema,
+  createAuctionSchema,
+  placeBidSchema,
+  settleAuctionSchema,
   cardAsset,
   fromStellarAsset,
   listInputSchema,
@@ -36,6 +40,7 @@ import {
 } from '../../stellar.js';
 import * as listingsRepo from '../../data/listings.js';
 import * as ordersRepo from '../../data/orders.js';
+import * as auctionsRepo from '../../data/auctions.js';
 import {
   contract,
   usdc,
@@ -298,6 +303,125 @@ buildRouter.post('/claim-timeout', async (req, res, next) => {
     const op = contract.claimTimeout(oid);
     const xdr = await buildContractTx(input.account, op);
     res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: order.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: create_auction (seller escrows a card into a timed auction) ---
+buildRouter.post('/create-auction', async (req, res, next) => {
+  try {
+    const input = createAuctionSchema.parse(req.body);
+    const [card] = await db.select().from(cards).where(eq(cards.id, input.cardId));
+    if (!card) notFound('Card');
+    if (!card.sacAddress) {
+      throw new PreflightError('Card asset contract not deployed', 'CARD_SAC_MISSING');
+    }
+    const reserveUsdc = input.reservePriceUsdc ?? '0';
+    if (Number(reserveUsdc) > 0 && Number(reserveUsdc) < Number(input.startPriceUsdc)) {
+      throw new PreflightError('Reserve price must be at least the start price', 'BAD_RESERVE');
+    }
+    // Seller must actually hold a copy of the card to escrow it.
+    await requireBalance(input.seller, cardAsset(card.assetCode, card.issuer), '1');
+
+    const op = contract.createAuction(
+      input.seller,
+      card.sacAddress,
+      toStroops(input.startPriceUsdc),
+      toStroops(reserveUsdc),
+      input.durationSecs,
+    );
+    const xdr = await buildContractTx(input.seller, op);
+
+    const auction = await auctionsRepo.createAuctionRow({
+      cardId: card.id,
+      seller: input.seller,
+      startPriceUsdc: input.startPriceUsdc,
+      reservePriceUsdc: reserveUsdc,
+      endsAt: new Date(Date.now() + input.durationSecs * 1000),
+    });
+
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: auction.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: place_bid (bidder escrows USDC against an open auction) ---
+buildRouter.post('/place-bid', async (req, res, next) => {
+  try {
+    const input = placeBidSchema.parse(req.body);
+    const { auction, card } = await auctionsRepo.auctionWithCard(input.auctionId);
+    const cid = needContractId(auction.contractAuctionId, 'Auction');
+    if (auction.status !== 'open') {
+      throw new PreflightError('Auction is not open for bids', 'AUCTION_CLOSED');
+    }
+    // Bid must beat the current high bid and meet the start price.
+    if (
+      Number(input.amountUsdc) <= Number(auction.highBidUsdc) ||
+      Number(input.amountUsdc) < Number(auction.startPriceUsdc)
+    ) {
+      throw new PreflightError('Bid must exceed the current high bid', 'BID_TOO_LOW', {
+        highBidUsdc: auction.highBidUsdc,
+        startPriceUsdc: auction.startPriceUsdc,
+      });
+    }
+    // Bidder needs the USDC to escrow now, and a card trustline so settlement can deliver.
+    await requireBalance(input.bidder, usdc, input.amountUsdc);
+    await requireTrustline(input.bidder, cardAsset(card.assetCode, card.issuer));
+
+    const op = contract.placeBid(input.bidder, cid, toStroops(input.amountUsdc));
+    const xdr = await buildContractTx(input.bidder, op);
+
+    const bid = await auctionsRepo.createBidRow({
+      auctionId: auction.id,
+      bidder: input.bidder,
+      amountUsdc: input.amountUsdc,
+    });
+
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: bid.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: settle_auction (permissionless once the auction has ended) ---
+buildRouter.post('/settle-auction', async (req, res, next) => {
+  try {
+    const input = settleAuctionSchema.parse(req.body);
+    const { auction, card } = await auctionsRepo.auctionWithCard(input.auctionId);
+    const cid = needContractId(auction.contractAuctionId, 'Auction');
+    if (auction.status !== 'open') {
+      throw new PreflightError('Auction is already settled', 'AUCTION_CLOSED');
+    }
+    // If a royalty will be paid to the winner's settlement, the creator must be
+    // able to receive the USDC.
+    await requireCreatorTrustline(card, auction.seller);
+    // `settle_auction` takes no signer; `account` is just the fee-paying source.
+    const op = contract.settleAuction(cid);
+    const xdr = await buildContractTx(input.account, op);
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: auction.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: cancel_auction (seller reclaims a no-bid auction) ---
+buildRouter.post('/cancel-auction', async (req, res, next) => {
+  try {
+    const input = cancelAuctionSchema.parse(req.body);
+    const auction = await auctionsRepo.auctionLookup(input.auctionId);
+    if (!auction) notFound('Auction');
+    const cid = needContractId(auction.contractAuctionId, 'Auction');
+    if (auction.seller !== input.seller) {
+      throw new PreflightError('Only the seller can cancel an auction', 'NOT_SELLER');
+    }
+    if (Number(auction.highBidUsdc) > 0) {
+      throw new PreflightError('Auction with bids cannot be cancelled', 'AUCTION_HAS_BIDS');
+    }
+    const op = contract.cancelAuction(input.seller, cid);
+    const xdr = await buildContractTx(input.seller, op);
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: auction.id });
   } catch (err) {
     next(err);
   }

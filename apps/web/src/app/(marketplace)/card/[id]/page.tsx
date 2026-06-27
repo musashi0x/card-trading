@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useTopDeck, PAY_ASSETS, type PayAssetId } from '@/components/topdeck/TopDeckProvider';
-import { type TopCard, money, fmtLeft, fmtAgo, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
+import { type TopCard, money, fmtLeft, fmtAgo, mapBid, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
+import { useAuctionBids, useToggleWatch, useWatchlist } from '@/lib/queries';
 import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
 import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
 import BoltIcon from '@mui/icons-material/Bolt';
@@ -124,6 +125,10 @@ export default function CardDetailPage() {
   const id = params?.id;
   const td = useTopDeck();
   const st = td.state;
+  const { address, connect } = td.wallet;
+  const { data: watchEntries } = useWatchlist(address);
+  const toggleWatch = useToggleWatch(address);
+  const watchedSet = useMemo(() => new Set((watchEntries ?? []).map((e) => e.id)), [watchEntries]);
 
   useEffect(() => {
     if (id) {
@@ -132,6 +137,8 @@ export default function CardDetailPage() {
   }, [id]);
 
   const c = id ? td.getCard(id) : undefined;
+  // Real bid history for auctions, sourced from the bids API (high bid first).
+  const { data: apiBids = [] } = useAuctionBids(c?.isAuction ? (c.auctionId ?? null) : null);
 
   if (!c) {
     return (
@@ -159,13 +166,26 @@ export default function CardDetailPage() {
       : status === 'outbid' ? { icon: <BoltIcon sx={{ fontSize: 18 }} />, t: "You've been outbid — raise your bid to win", bg: '#ffd1cc', col: '#a3160a' }
         : status === 'won' ? { icon: <CelebrationIcon sx={{ fontSize: 18 }} />, t: 'Purchased — heading to the TopDeck Vault', bg: '#bff3d4', col: '#0a5e34' }
           : null;
-  const watched = st.watched[c.id];
-  const bids = c.bids.map((b, i) => ({
+  const watched = !!c.listingId && watchedSet.has(c.listingId);
+  const onToggleWatch = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!address) return connect();
+    if (!c.listingId) return;
+    toggleWatch.mutate({ listingId: c.listingId, watching: watched });
+  };
+  // Prefer the live API bid history for auctions; fall back to the card's own
+  // (optimistic) bids so a just-placed bid shows immediately.
+  const sourceBids =
+    c.isAuction && apiBids.length > 0
+      ? apiBids.map((b) => mapBid(b, address ?? undefined))
+      : c.bids;
+  const bids = sourceBids.map((b, i) => ({
     ...b,
-    when: b.at ? fmtAgo(st.now - b.at) : fmtAgo(b.ago ?? 0),
-    dot: b.you ? '#13c06a' : i === 0 ? '#ff4d3d' : 'rgba(26,19,5,.25)',
-    nameColor: b.you ? '#13c06a' : INK,
-    rowBg: b.you ? '#f0fff6' : i === 0 ? '#fff7ec' : '#fff',
+    when: b.at ? fmtAgo(st.now - b.at) : '',
+    dot: b.outbid ? 'rgba(26,19,5,.25)' : b.you ? '#13c06a' : i === 0 ? '#ff4d3d' : 'rgba(26,19,5,.25)',
+    nameColor: b.outbid ? 'rgba(26,19,5,.45)' : b.you ? '#13c06a' : INK,
+    rowBg: b.outbid ? '#faf6ee' : b.you ? '#f0fff6' : i === 0 ? '#fff7ec' : '#fff',
+    strike: !!b.outbid,
   }));
 
   return (
@@ -176,7 +196,7 @@ export default function CardDetailPage() {
         <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
           <div style={{ position: 'relative', aspectRatio: '3 / 4', borderRadius: 18, border: `3px solid ${INK}`, boxShadow: `7px 7px 0 ${INK}`, background: c.art, overflow: 'hidden' }}>
             <div style={{ position: 'absolute', top: 14, left: 14, fontSize: 12, fontWeight: 800, letterSpacing: '.03em', padding: '5px 13px', borderRadius: 8, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
-            <div onClick={(e) => td.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>
+            <div onClick={onToggleWatch} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>
               {watched ? <FavoriteIcon sx={{ fontSize: 20 }} /> : <FavoriteBorderIcon sx={{ fontSize: 20 }} />}
             </div>
             <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 16, background: 'linear-gradient(transparent,rgba(26,19,5,.55))', color: '#fff', fontWeight: 700, fontSize: 13 }}>{c.grade}</div>
@@ -228,11 +248,19 @@ export default function CardDetailPage() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 20 }}>
-              <div onClick={td.openBid} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Place bid</div>
+              {c.isAuction && c.auctionStatus === 'open' && left > 0 && (
+                <div onClick={td.openBid} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Place bid</div>
+              )}
+              {c.isAuction && c.auctionStatus === 'open' && left <= 0 && (
+                <div onClick={st.bidBusy ? undefined : () => td.settleAuction(c.id)} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: st.bidBusy ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.bidBusy ? 'default' : 'pointer', fontFamily: DISPLAY }}>{st.bidBusy ? 'Settling…' : 'Settle Auction'}</div>
+              )}
               {c.buyNow > 0 && (
                 <div onClick={td.buyNow} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Buy now · {money(c.buyNow)}</div>
               )}
             </div>
+            {c.isAuction && c.auctionStatus === 'open' && c.sellerAddress === address && c.bids.length === 0 && apiBids.length === 0 && (
+              <div onClick={st.bidBusy ? undefined : () => td.cancelAuction(c.id)} style={{ textAlign: 'center', fontSize: 13, fontWeight: 700, padding: 12, marginTop: 12, background: '#fff', color: INK, border: `2.5px solid ${INK}`, borderRadius: 11, cursor: st.bidBusy ? 'default' : 'pointer' }}>Cancel auction &amp; reclaim card</div>
+            )}
             {c.real && c.contractListingId != null && c.fulfillment === 'physical' && (
               <>
                 <div
@@ -304,9 +332,9 @@ export default function CardDetailPage() {
               {bids.map((b, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1.5px solid rgba(26,19,5,.1)', background: b.rowBg }}>
                   <div style={{ width: 9, height: 9, borderRadius: '50%', background: b.dot }} />
-                  <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: b.nameColor }}>{b.bidder}</div>
+                  <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: b.nameColor }}>{b.bidder}{b.you ? ' · you' : ''}</div>
                   <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(26,19,5,.45)' }}>{b.when}</div>
-                  <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, minWidth: 80, textAlign: 'right' }}>{money(b.amount)}</div>
+                  <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, minWidth: 80, textAlign: 'right', textDecoration: b.strike ? 'line-through' : 'none', color: b.strike ? 'rgba(26,19,5,.45)' : INK }}>{money(b.amount)}</div>
                 </div>
               ))}
             </div>

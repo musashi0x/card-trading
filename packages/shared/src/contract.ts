@@ -6,10 +6,15 @@
  * unsigned XDR to the wallet. The arg shapes mirror the Rust contract.
  */
 
-import { Address, Contract, nativeToScVal, type xdr } from '@stellar/stellar-sdk';
+import { Address, Contract, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 
 function addr(account: string): xdr.ScVal {
   return new Address(account).toScVal();
+}
+
+/** A Soroban `Vec<Address>` from a list of account/contract addresses. */
+function addressVec(accounts: string[]): xdr.ScVal {
+  return xdr.ScVal.scvVec(accounts.map(addr));
 }
 
 function i128(value: bigint): xdr.ScVal {
@@ -22,6 +27,10 @@ function u32(value: number): xdr.ScVal {
 
 function bool(value: boolean): xdr.ScVal {
   return nativeToScVal(value, { type: 'bool' });
+}
+
+function u64(value: bigint | number): xdr.ScVal {
+  return nativeToScVal(BigInt(value), { type: 'u64' });
 }
 
 /** Listing fulfillment modes; mirror the `FULFILL_*` constants in the contract. */
@@ -151,6 +160,97 @@ export class MarketplaceContract {
   /** get_order_view(order_id) — read-only, for the indexer. */
   getOrderView(orderId: number): xdr.Operation {
     return this.contract.call('get_order_view', u32(orderId));
+  }
+
+  // --- timed auctions ---
+
+  /**
+   * create_auction(seller, card_token, start_price, reserve_price, duration) -> auction_id.
+   * Escrows the card and opens a timed auction.
+   */
+  createAuction(
+    seller: string,
+    cardToken: string,
+    startPriceStroops: bigint,
+    reservePriceStroops: bigint,
+    durationSecs: number,
+  ): xdr.Operation {
+    return this.contract.call(
+      'create_auction',
+      addr(seller),
+      addr(cardToken),
+      i128(startPriceStroops),
+      i128(reservePriceStroops),
+      u64(durationSecs),
+    );
+  }
+
+  /** place_bid(bidder, auction_id, amount). Escrows USDC; refunds the previous high bidder. */
+  placeBid(bidder: string, auctionId: number, amountStroops: bigint): xdr.Operation {
+    return this.contract.call('place_bid', addr(bidder), u32(auctionId), i128(amountStroops));
+  }
+
+  /** settle_auction(auction_id). Permissionless once `ends_at` has passed. */
+  settleAuction(auctionId: number): xdr.Operation {
+    return this.contract.call('settle_auction', u32(auctionId));
+  }
+
+  /** cancel_auction(seller, auction_id). Seller reclaims a no-bid auction. */
+  cancelAuction(seller: string, auctionId: number): xdr.Operation {
+    return this.contract.call('cancel_auction', addr(seller), u32(auctionId));
+  }
+
+  /** claim_refund(bidder, auction_id). Safety valve to withdraw a stuck refund. */
+  claimRefund(bidder: string, auctionId: number): xdr.Operation {
+    return this.contract.call('claim_refund', addr(bidder), u32(auctionId));
+  }
+
+  /** get_auction_view(auction_id) — read-only, for the indexer. */
+  getAuctionView(auctionId: number): xdr.Operation {
+    return this.contract.call('get_auction_view', u32(auctionId));
+  }
+
+  // --- barter swap ---
+
+  /**
+   * propose_swap(proposer, counterparty, give_tokens[], get_tokens[], usdc_amount) -> proposal_id.
+   * Locks the proposer's give-side card tokens (and any USDC sweetener) into custody.
+   */
+  proposeSwap(
+    proposer: string,
+    counterparty: string,
+    giveTokens: string[],
+    getTokens: string[],
+    usdcAmountStroops: bigint,
+  ): xdr.Operation {
+    return this.contract.call(
+      'propose_swap',
+      addr(proposer),
+      addr(counterparty),
+      addressVec(giveTokens),
+      addressVec(getTokens),
+      i128(usdcAmountStroops),
+    );
+  }
+
+  /** execute_swap(counterparty, proposal_id). Atomic both-sided settlement. */
+  executeSwap(counterparty: string, proposalId: number): xdr.Operation {
+    return this.contract.call('execute_swap', addr(counterparty), u32(proposalId));
+  }
+
+  /** cancel_swap(proposer, proposal_id). Returns the proposer's locked assets. */
+  cancelSwap(proposer: string, proposalId: number): xdr.Operation {
+    return this.contract.call('cancel_swap', addr(proposer), u32(proposalId));
+  }
+
+  /** decline_swap(counterparty, proposal_id). Returns the proposer's locked assets. */
+  declineSwap(counterparty: string, proposalId: number): xdr.Operation {
+    return this.contract.call('decline_swap', addr(counterparty), u32(proposalId));
+  }
+
+  /** get_swap_view(proposal_id) — read-only, for the indexer. */
+  getSwapView(proposalId: number): xdr.Operation {
+    return this.contract.call('get_swap_view', u32(proposalId));
   }
 
   /** get_listing_view(listing_id) — read-only, for the indexer. */

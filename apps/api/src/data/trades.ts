@@ -41,6 +41,27 @@ export async function recordTrade(
   });
 }
 
+/**
+ * Record the settlement of a won auction as a trade row. Auctions have no
+ * listing, so `listingId` is null; price is the winning high bid.
+ */
+export async function recordAuctionTrade(
+  auction: { seller: string; highBidder: string | null; highBidUsdc: string },
+  card: { royaltyBps: number; creatorAccount: string | null },
+  hash: string,
+): Promise<void> {
+  if (!auction.highBidder) return;
+  await db.insert(trades).values({
+    listingId: null,
+    buyer: auction.highBidder,
+    seller: auction.seller,
+    priceUsdc: auction.highBidUsdc,
+    feeUsdc: feeFor(auction.highBidUsdc),
+    royaltyUsdc: royaltyFor(auction.highBidUsdc, card, auction.seller),
+    settleTxHash: hash,
+  });
+}
+
 /** Record the settlement of a released escrow order as a trade row. */
 export async function recordOrderTrade(
   order: { listingId: string; buyer: string; seller: string; amountUsdc: string },

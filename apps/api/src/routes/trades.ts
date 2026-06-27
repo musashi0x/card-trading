@@ -4,14 +4,24 @@
  */
 
 import { Router } from 'express';
-import { desc } from 'drizzle-orm';
+import { desc, eq, or } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 
 export const tradesRouter: Router = Router();
 
-tradesRouter.get('/', async (_req, res, next) => {
+tradesRouter.get('/', async (req, res, next) => {
   try {
-    const rows = await db.select().from(schema.trades).orderBy(desc(schema.trades.settledAt));
+    // Optional `?account=` narrows to trades where the wallet is buyer or seller
+    // (mirrors the `/api/orders?account=` pattern); absent, the full feed returns.
+    const account = typeof req.query.account === 'string' ? req.query.account : undefined;
+    const where = account
+      ? or(eq(schema.trades.buyer, account), eq(schema.trades.seller, account))
+      : undefined;
+    const rows = await db
+      .select()
+      .from(schema.trades)
+      .where(where)
+      .orderBy(desc(schema.trades.settledAt));
     // Surface the full split: price = seller net + platform fee + creator royalty.
     const withNet = rows.map((t) => ({
       ...t,

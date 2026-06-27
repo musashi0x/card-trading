@@ -3,9 +3,11 @@
 import { useTopDeck } from '@/components/topdeck/TopDeckProvider';
 import { INK, DISPLAY } from '@/components/topdeck/theme';
 import { CardTile } from '@/components/topdeck/shared/CardTile';
-import { rarityMeta, money, fmtLeft } from '@/components/topdeck/lib';
+import { rarityMeta, money, fmtLeft, mapAuction, mapListing } from '@/components/topdeck/lib';
 import type { TopCard } from '@/components/topdeck/lib';
-import type { ReactNode } from 'react';
+import type { MyBid } from '@cardmkt/shared';
+import { useMyBids, useWatchlist } from '@/lib/queries';
+import { useMemo, type ReactNode } from 'react';
 import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
 import BoltIcon from '@mui/icons-material/Bolt';
 import CelebrationIcon from '@mui/icons-material/Celebration';
@@ -21,18 +23,50 @@ export default function MyBidsPage() {
     s === 'winning' ? { label: 'Winning', icon: <EmojiEventsIcon sx={{ fontSize: 14 }} />, bg: '#bff3d4', col: '#0a5e34' }
       : s === 'outbid' ? { label: 'Outbid', icon: <BoltIcon sx={{ fontSize: 14 }} />, bg: '#ffd1cc', col: '#a3160a' }
         : s === 'won' ? { label: 'Won', icon: <CelebrationIcon sx={{ fontSize: 14 }} />, bg: INK, col: '#ffd84d' }
-          : { label: 'Leading', icon: <span style={{ fontSize: 10 }}>•</span>, bg: '#fff', col: INK };
+          : s === 'lost' ? { label: 'Ended', icon: <span style={{ fontSize: 10 }}>•</span>, bg: '#e7ddc8', col: 'rgba(26,19,5,.55)' }
+            : { label: 'Leading', icon: <span style={{ fontSize: 10 }}>•</span>, bg: '#fff', col: INK };
 
-  const involved = st.cards.filter((c) => st.myMax[c.id] != null || st.status[c.id] === 'won');
-  const winningCount = involved.filter((c) => st.status[c.id] === 'winning').length;
-  const outbidCount = involved.filter((c) => st.status[c.id] === 'outbid').length;
-  const watchList = st.cards.filter((c) => st.watched[c.id]);
-  const owned = st.cards.filter((c) => c.mine);
+  const { address, connect } = td.wallet;
+
+  // Real bids placed by the connected wallet, grouped one-per-auction (keeping
+  // the wallet's highest bid on each), with a derived status: winning/outbid on
+  // an open auction, won/lost once settled or cancelled.
+  const { data: myBids = [] } = useMyBids(address);
+  const involved = useMemo<Array<{ card: TopCard; myMax: number; status: string }>>(() => {
+    const byAuction = new Map<string, { card: TopCard; myMax: number; status: string }>();
+    for (const mb of myBids as MyBid[]) {
+      if (!mb.auction.card) continue;
+      const card = mapAuction(mb.auction, [], address ?? undefined);
+      const amt = Number(mb.amountUsdc) || 0;
+      const open = mb.auction.status === 'open';
+      const status = open
+        ? mb.isHighBidder
+          ? 'winning'
+          : 'outbid'
+        : mb.auction.status === 'settled' && mb.isHighBidder
+          ? 'won'
+          : 'lost';
+      const prev = byAuction.get(card.id);
+      if (!prev || amt > prev.myMax) byAuction.set(card.id, { card, myMax: amt, status });
+    }
+    return [...byAuction.values()];
+  }, [myBids, address]);
+  const winningCount = involved.filter((x) => x.status === 'winning').length;
+  const outbidCount = involved.filter((x) => x.status === 'outbid').length;
+  // Server-backed watchlist (per wallet). Filter out any optimistic stub rows
+  // that lack a joined card before mapping to the auction-card shape.
+  const { data: watchEntries } = useWatchlist(address);
+  const watchList = useMemo<TopCard[]>(
+    () => (watchEntries ?? []).filter((e) => e.card).map((e) => mapListing(e)),
+    [watchEntries],
+  );
+  // The connected wallet's own listings + auctions it created.
+  const owned = st.cards.filter((c) => c.mine || (c.isAuction && c.sellerAddress === address));
   const liveCount = owned.filter((c) => c.endsAt - st.now > 0).length;
 
   // ── renderBidding ─────────────────────────────────────────────────────────
   function renderBidding(
-    involved: TopCard[],
+    involved: Array<{ card: TopCard; myMax: number; status: string }>,
     watchList: TopCard[],
     winningCount: number,
     outbidCount: number,
@@ -55,14 +89,12 @@ export default function MyBidsPage() {
 
         {involved.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {involved.map((c) => {
+            {involved.map(({ card: c, myMax, status: stt }) => {
               const rm = rarityMeta(c.rarity);
               const left = c.endsAt - st.now;
               const ending = left < 3600000;
-              const stt = st.status[c.id] || 'winning';
               const sm = statusMeta(stt);
               const isOutbid = stt === 'outbid';
-              const myMax = st.myMax[c.id];
               return (
                 <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 16, background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '14px 16px' }}>
                   <div onClick={() => td.open(c.id)} style={{ position: 'relative', width: 80, height: 80, flex: 'none', borderRadius: 11, border: `2.5px solid ${INK}`, background: c.art, cursor: 'pointer' }}>
@@ -104,13 +136,20 @@ export default function MyBidsPage() {
           </div>
         )}
 
-        {watchList.length > 0 && (
-          <>
-            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, margin: '36px 0 16px' }}>♥ Watchlist</div>
-            <div className="td-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 20 }}>
-              {watchList.map((c) => <CardTile key={c.id} card={c} height={150} />)}
-            </div>
-          </>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, margin: '36px 0 16px' }}>♥ Watchlist</div>
+        {!address ? (
+          <div style={{ textAlign: 'center', padding: '40px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16 }}>
+            <div style={{ fontSize: 13.5, color: 'rgba(26,19,5,.6)', fontWeight: 600 }}>Connect your wallet to see the listings you’re watching.</div>
+            <div onClick={connect} style={{ display: 'inline-block', marginTop: 16, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '11px 22px', background: INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Connect wallet</div>
+          </div>
+        ) : watchList.length > 0 ? (
+          <div className="td-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 20 }}>
+            {watchList.map((c) => <CardTile key={c.id} card={c} height={150} />)}
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '40px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16, fontSize: 13.5, color: 'rgba(26,19,5,.55)', fontWeight: 500 }}>
+            Tap the ♥ on any lot to start a watchlist.
+          </div>
         )}
       </>
     );

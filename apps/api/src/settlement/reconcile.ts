@@ -3,6 +3,7 @@ import * as listings from '../data/listings.js';
 import * as offers from '../data/offers.js';
 import * as orders from '../data/orders.js';
 import * as trades from '../data/trades.js';
+import * as auctions from '../data/auctions.js';
 
 export interface ReconcileCtx {
   refId: string;        // listing/offer/order row id created at build time
@@ -88,6 +89,37 @@ const reconcilers: Record<TradeAction, (c: ReconcileCtx) => Promise<void>> = {
       await orders.markReleased(c.refId, c.hash);
       await trades.recordOrderTrade(order, card, c.hash);
     }
+  },
+  create_auction: async (c) => {
+    const contractAuctionId = c.returnValue == null ? null : Number(c.returnValue);
+    await auctions.setContractAuctionId(
+      c.refId,
+      Number.isFinite(contractAuctionId) ? contractAuctionId : null,
+      c.hash,
+    );
+  },
+  place_bid: async (c) => {
+    // refId is the bid row id created at build time.
+    await auctions.applyBid(c.refId, c.hash);
+  },
+  settle_auction: async (c) => {
+    const { auction, card } = await auctions.auctionWithCard(c.refId);
+    if (auction.status !== 'open') return;
+    const reserveMet =
+      auction.highBidder != null &&
+      Number(auction.highBidUsdc) >= Number(auction.reservePriceUsdc);
+    if (reserveMet) {
+      await auctions.markSettled(c.refId, c.hash);
+      await trades.recordAuctionTrade(auction, card, c.hash);
+    } else {
+      await auctions.markClosed(c.refId, 'no_winner', c.hash);
+    }
+  },
+  cancel_auction: async (c) => {
+    await auctions.markClosed(c.refId, 'cancelled', c.hash);
+  },
+  claim_refund: async () => {
+    // Safety-valve withdrawal; no read-mirror state to reconcile.
   },
 };
 

@@ -29,6 +29,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   Card,
   FulfillmentMode,
+  LeaderboardBoard,
   MintCardRequest,
   PathQuoteResponse,
   StellarAsset,
@@ -38,6 +39,8 @@ import { XLM_ASSET, formatAmount } from '@cardmkt/shared';
 import { ApiRequestError, api, type OrderWithCard } from '@/lib/api';
 import {
   invalidateOrders,
+  queryKeys,
+  useAuctions,
   useCards,
   useDisputedOrders,
   useListings,
@@ -48,14 +51,13 @@ import { useWallet, type OrderAction } from '@/components/WalletProvider';
 import { DISPLAY, INK } from './theme';
 import {
   increment,
+  mapAuction,
   mapListing,
   mapRarity,
-  mockCards,
   rarityArt,
   type Rarity,
   type TopCard,
 } from './lib';
-import { DEFAULT_PROFILE, EMPTY_TRADE, type LbTab, type ProfileData, type TradeState } from './panels';
 
 // ----- wallet / orders shapes consumed by the store -----
 
@@ -102,7 +104,11 @@ export interface Form {
   graded: boolean;
   grade: string;
   condition: string;
+  /** Fixed-price listing or a timed auction. */
+  listingType: 'fixed' | 'auction';
   startBid: string;
+  /** Optional reserve price for an auction; blank/0 = no reserve. */
+  reserve: string;
   buyNowOn: boolean;
   buyNow: string;
   duration: number;
@@ -113,7 +119,8 @@ export interface Form {
 
 export const EMPTY_FORM: Form = {
   cardId: '', title: '', setLine: '', category: 'Other', rarity: 'rare', image: undefined,
-  graded: false, grade: 'PSA 10', condition: 'Near Mint', startBid: '', buyNowOn: false, buyNow: '', duration: 3,
+  graded: false, grade: 'PSA 10', condition: 'Near Mint', listingType: 'fixed',
+  startBid: '', reserve: '', buyNowOn: false, buyNow: '', duration: 3,
   fulfillment: 'digital', supply: '1', royaltyPct: '0',
 };
 
@@ -139,18 +146,16 @@ export interface TopDeckState {
   selectedId: string | null;
   orderBusy: string | null;
   ordersArbiter: boolean;
-  lbTab: LbTab;
-  profile: ProfileData;
-  draft: ProfileData | null;
-  trade: TradeState;
+  lbTab: LeaderboardBoard;
   query: string;
   sort: string;
   facets: Facets;
   bidOpen: boolean;
   bidAmount: string;
+  /** A bid/settle/cancel transaction is in flight. */
+  bidBusy: boolean;
   toast: string | null;
   toastKind: 'win' | 'outbid';
-  watched: Record<string, boolean>;
   status: Record<string, string>;
   myMax: Record<string, number>;
   sellStep: number;
@@ -178,11 +183,11 @@ export interface TopDeckState {
 
 function makeInitialState(seed: TopCard[]): TopDeckState {
   return {
-    selectedId: null, lbTab: 'collectors', profile: { ...DEFAULT_PROFILE }, draft: null, trade: { ...EMPTY_TRADE },
+    selectedId: null, lbTab: 'collectors',
     query: '', sort: 'ending', now: Date.now(), page: 1,
     facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
-    bidOpen: false, bidAmount: '', toast: null, toastKind: 'win',
-    watched: {}, status: {}, myMax: {},
+    bidOpen: false, bidAmount: '', bidBusy: false, toast: null, toastKind: 'win',
+    status: {}, myMax: {},
     sellStep: 1, sellMode: 'hold', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
     form: { ...EMPTY_FORM },
     cards: seed,
@@ -214,6 +219,7 @@ export interface TopDeckContext {
   goLeaderboard: () => void;
   goPortfolio: () => void;
   goTrade: () => void;
+  goTrades: () => void;
   goProfile: () => void;
   openOrders: () => void;
   /** URL-sync the detail screen to a card id (called by /card/[id] on mount). */
@@ -229,20 +235,21 @@ export interface TopDeckContext {
   clearFilters: () => void;
   setQuery: (e: ChangeEvent<HTMLInputElement>) => void;
   clearQuery: () => void;
-  toggleWatch: (e: React.MouseEvent, id: string) => void;
   toggleFilters: () => void;
   closeFilters: () => void;
 
   // my bids
   setMyBidsTab: (t: 'bidding' | 'selling') => void;
 
-  // bidding (simulated)
+  // bidding (real on-chain auctions)
   openBid: () => void;
   openBidFor: (id: string) => void;
   closeBid: () => void;
   onBidInput: (e: ChangeEvent<HTMLInputElement>) => void;
   setBid: (v: number) => void;
-  confirmBid: () => void;
+  placeBid: () => Promise<void>;
+  settleAuction: (id?: string) => Promise<void>;
+  cancelAuction: (id?: string) => Promise<void>;
 
   // pay-with-any-asset + checkout
   selectPayAsset: (id: PayAssetId) => void;
@@ -269,23 +276,7 @@ export interface TopDeckContext {
   publishListing: () => Promise<void>;
 
   // leaderboard
-  setLbTab: (t: LbTab) => void;
-
-  // profile / edit
-  startEditProfile: () => void;
-  cancelEdit: () => void;
-  saveProfile: () => void;
-  setDraft: (k: keyof ProfileData, v: string) => void;
-  toggleDraft: (k: keyof ProfileData) => void;
-
-  // trade builder
-  openTradePicker: (side: 'give' | 'get') => void;
-  closeTradePicker: () => void;
-  addTradeCard: (side: 'give' | 'get', id: string) => void;
-  removeTradeCard: (side: 'give' | 'get', id: string) => void;
-  setTradeCash: (v: string) => void;
-  sendTrade: () => void;
-  resetTrade: () => void;
+  setLbTab: (t: LeaderboardBoard) => void;
 
   // wallet menu
   onWalletClick: () => void;
@@ -338,7 +329,6 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
 
   // timers
   const toastT = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const rivalT = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyT = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 1s clock — paused during a bid modal or on the sell screen (matches original).
@@ -352,7 +342,6 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   useEffect(
     () => () => {
       if (toastT.current) clearTimeout(toastT.current);
-      if (rivalT.current) clearTimeout(rivalT.current);
       if (copyT.current) clearTimeout(copyT.current);
     },
     [],
@@ -384,6 +373,7 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   const goLeaderboard = () => router.push('/leaderboard');
   const goPortfolio = () => router.push('/portfolio');
   const goTrade = () => router.push('/trade');
+  const goTrades = () => router.push('/trades');
   const goProfile = () => router.push('/profile');
   const openOrders = () => {
     setState({ navMenuOpen: false });
@@ -395,46 +385,11 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   const setSellMode = (mode: 'hold' | 'mint') =>
     setState((s) => ({ sellMode: mode, mintedCard: null, form: { ...s.form, cardId: '' } }));
   const setMyBidsTab = (t: 'bidding' | 'selling') => setState({ myBidsTab: t });
-  const setLbTab = (t: LbTab) => setState({ lbTab: t });
+  const setLbTab = (t: LeaderboardBoard) => setState({ lbTab: t });
 
-  // ----- edit profile -----
-  const startEditProfile = () => {
-    setState((s) => ({ draft: { ...s.profile } }));
-    router.push('/profile/edit');
-  };
-  const cancelEdit = () => {
-    setState({ draft: null });
-    router.push('/profile');
-  };
-  const saveProfile = () => {
-    setState((s) => ({ profile: s.draft ?? s.profile, draft: null }));
-    router.push('/profile');
-  };
-  const setDraft = (k: keyof ProfileData, v: string) =>
-    setState((s) => ({ draft: { ...(s.draft ?? s.profile), [k]: v } }));
-  const toggleDraft = (k: keyof ProfileData) =>
-    setState((s) => {
-      const d = s.draft ?? s.profile;
-      return { draft: { ...d, [k]: !d[k] } };
-    });
-
-  // ----- trade builder -----
-  const openTradePicker = (side: 'give' | 'get') => setState((s) => ({ trade: { ...s.trade, picker: side } }));
-  const closeTradePicker = () => setState((s) => ({ trade: { ...s.trade, picker: null } }));
-  const addTradeCard = (side: 'give' | 'get', id: string) =>
-    setState((s) => {
-      const arr = s.trade[side];
-      const next = arr.includes(id) ? arr : [...arr, id];
-      return { trade: { ...s.trade, [side]: next, picker: null } };
-    });
-  const removeTradeCard = (side: 'give' | 'get', id: string) =>
-    setState((s) => ({ trade: { ...s.trade, [side]: s.trade[side].filter((x) => x !== id) } }));
-  const setTradeCash = (v: string) => setState((s) => ({ trade: { ...s.trade, cash: v } }));
-  const sendTrade = () => {
-    setState((s) => ({ trade: { ...s.trade, sent: true } }));
-    window.scrollTo(0, 0);
-  };
-  const resetTrade = () => setState({ trade: { ...EMPTY_TRADE } });
+  // The barter trade builder and inbox are self-contained on the /trade route
+  // (see trade/page.tsx + TradeInbox), backed by the real `/api/trade-proposals`
+  // endpoints — they no longer route through this provider's state.
 
   // ----- pagination -----
   const setPage = (p: number) => {
@@ -462,12 +417,6 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   };
   const clearQuery = () => setState({ page: 1, query: '' });
 
-  // ----- watch -----
-  const toggleWatch = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    setState((s) => ({ watched: { ...s.watched, [id]: !s.watched[id] } }));
-  };
-
   // ----- bidding (simulated) -----
   const openBid = () => {
     const c = getCard(ref.current.selectedId);
@@ -485,40 +434,108 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   const onBidInput = (e: ChangeEvent<HTMLInputElement>) => setState({ bidAmount: e.target.value });
   const setBid = (v: number) => setState({ bidAmount: String(v) });
 
-  const scheduleRival = (id: string, beat: number) => {
-    if (rivalT.current) clearTimeout(rivalT.current);
-    rivalT.current = setTimeout(() => {
-      const c = getCard(id);
-      if (!c || ref.current.selectedId !== id) return;
-      if (c.currentBid !== beat) return;
-      if (Math.random() < 0.45) return;
-      const raise = c.currentBid + increment(c.currentBid);
+  /**
+   * Place a real on-chain bid: build → sign → submit `place_bid`. The amount must
+   * exceed the current high bid (validated here before signing). On success the
+   * card is optimistically promoted to the new high bid; the 5s auction poll then
+   * reconciles the authoritative state (and any anti-snipe extension).
+   */
+  const placeBid = async () => {
+    const c = getCard(ref.current.selectedId);
+    if (!c || !c.isAuction || !c.auctionId) return;
+    const amt = Number(ref.current.bidAmount);
+    if (!amt || amt <= c.currentBid) {
+      showToast('Enter a bid above the current high bid', 'outbid');
+      return;
+    }
+    const { address, connect, runAction } = wallet;
+    if (!address) {
+      showToast('Connect your wallet to bid', 'outbid');
+      connect();
+      return;
+    }
+    if (c.sellerAddress === address) {
+      showToast('You cannot bid on your own auction', 'outbid');
+      return;
+    }
+    setState({ bidBusy: true });
+    try {
+      const hash = await runAction('place_bid', {
+        auctionId: c.auctionId,
+        bidder: address,
+        amountUsdc: formatAmount(amt),
+      });
       setState((s) => ({
         cards: s.cards.map((x) =>
-          x.id === id ? { ...x, currentBid: raise, bids: [{ bidder: 'DragonHoard', amount: raise, at: Date.now() }, ...x.bids] } : x,
+          x.id === c.id
+            ? {
+                ...x,
+                currentBid: amt,
+                highBidder: address,
+                bids: [
+                  { bidder: 'You', amount: amt, at: Date.now(), you: true },
+                  ...x.bids.map((b) => ({ ...b, outbid: true })),
+                ],
+              }
+            : x,
         ),
-        status: { ...s.status, [id]: 'outbid' },
+        status: { ...s.status, [c.id]: 'winning' },
+        myMax: { ...s.myMax, [c.id]: amt },
+        bidOpen: false,
+        bidBusy: false,
+        lastHash: hash,
       }));
-      showToast('Outbid by DragonHoard — bid again to win!', 'outbid');
-    }, 4200);
+      showToast("You're the highest bidder!", 'win');
+    } catch (err) {
+      setState({ bidBusy: false });
+      showToast(err instanceof ApiRequestError ? err.message : 'Bid failed — try again', 'outbid');
+    }
   };
 
-  const confirmBid = () => {
-    const c = getCard(ref.current.selectedId);
-    if (!c) return;
-    const min = c.currentBid + increment(c.currentBid);
-    const amt = Number(ref.current.bidAmount);
-    if (!amt || amt < min) return;
-    setState((s) => ({
-      cards: s.cards.map((x) =>
-        x.id === c.id ? { ...x, currentBid: amt, bids: [{ bidder: 'You', amount: amt, at: Date.now(), you: true }, ...x.bids] } : x,
-      ),
-      status: { ...s.status, [c.id]: 'winning' },
-      myMax: { ...s.myMax, [c.id]: amt },
-      bidOpen: false,
-    }));
-    showToast("You're the highest bidder!", 'win');
-    scheduleRival(c.id, amt);
+  /** Settle an expired auction (permissionless): build → sign → submit `settle_auction`. */
+  const settleAuction = async (id?: string) => {
+    const c = getCard(id ?? ref.current.selectedId);
+    if (!c?.isAuction || !c.auctionId) return;
+    const { address, connect, runAction } = wallet;
+    if (!address) {
+      showToast('Connect your wallet to settle', 'outbid');
+      connect();
+      return;
+    }
+    setState({ bidBusy: true });
+    try {
+      const hash = await runAction('settle_auction', { auctionId: c.auctionId, account: address });
+      setState((s) => ({ bidBusy: false, lastHash: hash }));
+      showToast('Auction settled ✓', 'win');
+    } catch (err) {
+      setState({ bidBusy: false });
+      showToast(err instanceof ApiRequestError ? err.message : 'Settle failed', 'outbid');
+    }
+  };
+
+  /** Cancel a no-bid auction the connected wallet owns: `cancel_auction`. */
+  const cancelAuction = async (id?: string) => {
+    const c = getCard(id ?? ref.current.selectedId);
+    if (!c?.isAuction || !c.auctionId) return;
+    const { address, connect, runAction } = wallet;
+    if (!address) {
+      showToast('Connect your wallet to cancel', 'outbid');
+      connect();
+      return;
+    }
+    setState({ bidBusy: true });
+    try {
+      const hash = await runAction('cancel_auction', { auctionId: c.auctionId, seller: address });
+      setState((s) => ({
+        cards: s.cards.filter((x) => x.id !== c.id),
+        bidBusy: false,
+        lastHash: hash,
+      }));
+      showToast('Auction cancelled — card returned', 'win');
+    } catch (err) {
+      setState({ bidBusy: false });
+      showToast(err instanceof ApiRequestError ? err.message : 'Cancel failed', 'outbid');
+    }
   };
 
   // ----- pay-with-any-asset -----
@@ -736,16 +753,19 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   };
 
   const formToCard = (f: Form, hash: string): TopCard => {
+    const isAuction = f.listingType === 'auction';
     const start = Number(f.startBid) || 0;
-    const buy = f.buyNowOn ? Number(f.buyNow) || 0 : 0;
+    const buy = !isAuction && f.buyNowOn ? Number(f.buyNow) || 0 : 0;
     const image = f.image;
     return {
       id: 'self-' + hash.slice(0, 12), cardId: f.cardId, real: true, mine: true,
+      isAuction, auctionStatus: isAuction ? 'open' : undefined,
+      sellerAddress: wallet.address ?? undefined,
       name: f.title || 'Untitled card', rarity: f.rarity,
       condition: f.graded ? f.grade + ' · Graded' : f.condition, grade: f.graded ? f.grade : 'Raw',
       cats: [f.category], art: image ? `center/cover no-repeat url("${image}")` : rarityArt(f.rarity),
       image, sellerArt: 'linear-gradient(135deg,#ff4d3d,#ffb83d)',
-      currentBid: start, endsAt: Date.now() + f.duration * 86400000, buyNow: buy,
+      currentBid: start, endsAt: isAuction ? Date.now() + f.duration * 86400000 : 0, buyNow: buy,
       seller: 'You', sellerRating: 'New', sellerSales: '0',
       setLine: (f.setLine || 'YOUR LISTING').toUpperCase(), bids: [],
     };
@@ -754,7 +774,9 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   const publishListing = async () => {
     const f = ref.current.form;
     const isMint = ref.current.sellMode === 'mint';
+    const isAuction = f.listingType === 'auction';
     const start = Number(f.startBid) || 0;
+    const reserve = Number(f.reserve) || 0;
     if (isMint) {
       if (!f.title.trim()) return showToast('Name your new card', 'outbid');
       if (!f.image) return showToast('Add a photo for your new card', 'outbid');
@@ -762,11 +784,20 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
       return showToast('Pick a card to list', 'outbid');
     }
     if (!(start > 0)) return showToast('Enter a starting bid', 'outbid');
+    if (isAuction) {
+      if (!(f.duration > 0)) return showToast('Choose an auction duration', 'outbid');
+      if (reserve > 0 && reserve < start) {
+        return showToast('Reserve must be at least the start price', 'outbid');
+      }
+    }
     const { address, walletKind, connect, runAction, passkeyList, mintCard } = wallet;
     if (!address) {
       showToast('Connect your wallet to list', 'outbid');
       connect();
       return;
+    }
+    if (isAuction && walletKind === 'passkey') {
+      return showToast('Auctions require a standard Stellar wallet', 'outbid');
     }
     setState({ publishing: true });
     try {
@@ -787,7 +818,15 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
       }
 
       let hash: string;
-      if (walletKind === 'passkey') {
+      if (isAuction) {
+        hash = await runAction('create_auction', {
+          cardId,
+          seller: address,
+          startPriceUsdc: formatAmount(start),
+          reservePriceUsdc: formatAmount(reserve),
+          durationSecs: f.duration * 86400,
+        });
+      } else if (walletKind === 'passkey') {
         if (!sacAddress) {
           sacAddress = catalog.find((c) => c.id === cardId)?.sacAddress ?? null;
         }
@@ -847,18 +886,16 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     explorerTx,
     explorerAddress: explorerAccount,
     getCard,
-    open, goHome, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goProfile, openOrders, viewCard,
+    open, goHome, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goTrades, goProfile, openOrders, viewCard,
     setPage, toggleCat, toggleRarity, toggleFlag, setPrice, setSort, clearFilters, setQuery, clearQuery,
-    toggleWatch, toggleFilters, closeFilters,
+    toggleFilters, closeFilters,
     setMyBidsTab,
-    openBid, openBidFor, closeBid, onBidInput, setBid, confirmBid,
+    openBid, openBidFor, closeBid, onBidInput, setBid, placeBid, settleAuction, cancelAuction,
     selectPayAsset, buyNow, payWithPasskey, escrowBuy,
     doOrderAction, resolveDispute, setOrdersArbiter,
     setSellMode, setForm, readImageFile, onPickImage, onDropImage, setDragOver, selectCatalogCard,
     sellNext, sellBack, listAnother, publishListing,
     setLbTab,
-    startEditProfile, cancelEdit, saveProfile, setDraft, toggleDraft,
-    openTradePicker, closeTradePicker, addTradeCard, removeTradeCard, setTradeCash, sendTrade, resetTrade,
     onWalletClick, closeWalletMenu, toggleNavMenu, closeNavMenu, disconnectWallet, copyAddress,
     showToast,
   };
@@ -875,8 +912,22 @@ function Splash() {
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, background: '#fff7ec', color: INK, fontFamily: "'DM Sans',system-ui" }}>
       <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 40, letterSpacing: '-.03em' }}>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4d3d', animation: 'pulseDot 1.3s infinite' }} />Loading live auctions…
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4d3d', animation: 'pulseDot 1.3s infinite' }} />Loading marketplace…
       </div>
+    </div>
+  );
+}
+
+/** Shown when the first listings fetch fails — never a fabricated fallback. */
+function ErrorPanel({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, background: '#fff7ec', color: INK, fontFamily: "'DM Sans',system-ui", padding: 24, textAlign: 'center' }}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 40, letterSpacing: '-.03em' }}>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></div>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 22 }}>Couldn’t load the marketplace</div>
+      <div style={{ fontSize: 14, fontWeight: 500, color: 'rgba(26,19,5,.6)', maxWidth: 380 }}>
+        We couldn’t reach the listings service. Check your connection and try again.
+      </div>
+      <div onClick={onRetry} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Retry</div>
     </div>
   );
 }
@@ -899,16 +950,21 @@ export function TopDeckProvider({ children }: { children: ReactNode }) {
     payWithAsset,
   } = useWallet();
   const { data: listings, isPending: listingsPending, isError: listingsError } = useListings();
+  const { data: auctions = [] } = useAuctions();
 
-  // Map live listings to seed cards; fall back to demo cards when the API is
-  // unreachable or has no open listings, so the marketplace is never empty.
-  const seed = useMemo<TopCard[] | null>(() => {
+  // Map live listings + open auctions to seed cards. Tri-state: `null` while the
+  // first listings fetch is in flight, the `'error'` sentinel when it fails,
+  // otherwise the (possibly empty) real lots. We never fabricate demo cards — an
+  // empty or errored response renders an honest empty/error state instead.
+  const seed = useMemo<TopCard[] | 'error' | null>(() => {
     if (listingsPending) return null;
-    if (listingsError || !listings) return mockCards();
-    const base = Date.now();
-    const mapped = listings.filter((l) => l.card).map((l) => mapListing(l, base));
-    return mapped.length ? mapped : mockCards(base);
-  }, [listings, listingsPending, listingsError]);
+    if (listingsError || !listings) return 'error';
+    const auctionCards = auctions
+      .filter((a) => a.card)
+      .map((a) => mapAuction(a, [], address ?? undefined));
+    const listingCards = listings.filter((l) => l.card).map((l) => mapListing(l));
+    return [...auctionCards, ...listingCards];
+  }, [listings, listingsPending, listingsError, auctions, address]);
 
   const { data: catalog = [] } = useCards(address);
   const ordersQuery = useOrders(address);
@@ -935,7 +991,9 @@ export function TopDeckProvider({ children }: { children: ReactNode }) {
     onSuccess: refreshOrders,
   });
 
-  if (!seed) return <Splash />;
+  if (seed === null) return <Splash />;
+  if (seed === 'error')
+    return <ErrorPanel onRetry={() => queryClient.invalidateQueries({ queryKey: queryKeys.listings() })} />;
 
   const wallet: WalletProps = {
     address,

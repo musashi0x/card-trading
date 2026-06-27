@@ -35,6 +35,7 @@ export function TopNav() {
     { label: 'Portfolio', active: pathname === '/portfolio', onClick: td.goPortfolio },
     { label: 'Orders', active: pathname === '/orders', onClick: td.openOrders },
     { label: 'Trade', active: pathname === '/trade', onClick: td.goTrade },
+    { label: 'History', active: pathname === '/trades', onClick: td.goTrades },
   ];
 
   return (

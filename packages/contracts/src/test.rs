@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::{Marketplace, MarketplaceClient};
-use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, token, Address, Env};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, token, vec, Address, Env};
 
 const ONE_CARD: i128 = 10_000_000;
 const USDC: i128 = 10_000_000; // 1 USDC in stroops
@@ -486,4 +486,415 @@ fn paused_blocks_new_trades_but_allows_exits() {
     // Exit path still works: buyer can confirm and drain the escrow.
     f.client.confirm_receipt(&f.buyer, &order_id);
     assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD);
+}
+
+// --- auctions: create / bid / outbid / anti-snipe / settle / cancel / refund ---
+
+// Auction status codes (mirror the contract's `AUCTION_*` constants).
+const AUCTION_OPEN: u32 = 0;
+const AUCTION_SETTLED: u32 = 1;
+const AUCTION_CANCELLED: u32 = 2;
+const AUCTION_NO_WINNER: u32 = 3;
+const ANTI_SNIPE_SECS: u64 = 300;
+
+/// Generate a second, funded bidder for outbid scenarios.
+fn funded_bidder(f: &Fixture) -> Address {
+    let bidder = Address::generate(&f.env);
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&bidder, &(1000 * USDC));
+    bidder
+}
+
+#[test]
+fn test_create_auction_success() {
+    let f = setup();
+    let before = f.card_token.balance(&f.seller);
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(20 * USDC), &3600);
+
+    // Card escrowed, auction recorded open with no bids.
+    assert_eq!(f.card_token.balance(&f.client.address), ONE_CARD, "card escrowed");
+    assert_eq!(f.card_token.balance(&f.seller), before - ONE_CARD);
+    let auction = f.client.get_auction_view(&id);
+    assert_eq!(auction.status, AUCTION_OPEN);
+    assert_eq!(auction.high_bid, 0);
+    assert_eq!(auction.start_price, 10 * USDC);
+    assert_eq!(auction.reserve_price, 20 * USDC);
+    assert_eq!(auction.high_bidder, None);
+}
+
+#[test]
+fn test_create_auction_no_card() {
+    let f = setup();
+    let stranger = Address::generate(&f.env);
+    let res = f
+        .client
+        .try_create_auction(&stranger, &f.card, &(10 * USDC), &(20 * USDC), &3600);
+    assert!(res.is_err(), "seller without the card cannot create an auction");
+}
+
+#[test]
+fn test_place_bid_first() {
+    let f = setup();
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+
+    let before = f.usdc_token.balance(&f.buyer);
+    f.client.place_bid(&f.buyer, &id, &(15 * USDC));
+
+    assert_eq!(f.usdc_token.balance(&f.buyer), before - 15 * USDC, "bid escrowed from bidder");
+    assert_eq!(f.usdc_token.balance(&f.client.address), 15 * USDC, "USDC in custody");
+    let auction = f.client.get_auction_view(&id);
+    assert_eq!(auction.high_bid, 15 * USDC);
+    assert_eq!(auction.high_bidder, Some(f.buyer.clone()));
+}
+
+#[test]
+fn test_place_bid_outbid() {
+    let f = setup();
+    let bidder2 = funded_bidder(&f);
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+
+    let b1_before = f.usdc_token.balance(&f.buyer);
+    f.client.place_bid(&f.buyer, &id, &(15 * USDC));
+    f.client.place_bid(&bidder2, &id, &(20 * USDC));
+
+    // Previous high bidder refunded in full; only the new bid sits in custody.
+    assert_eq!(f.usdc_token.balance(&f.buyer), b1_before, "previous bidder refunded");
+    assert_eq!(f.usdc_token.balance(&f.client.address), 20 * USDC, "only new bid escrowed");
+    let auction = f.client.get_auction_view(&id);
+    assert_eq!(auction.high_bid, 20 * USDC);
+    assert_eq!(auction.high_bidder, Some(bidder2));
+}
+
+#[test]
+fn test_place_bid_below_high() {
+    let f = setup();
+    let bidder2 = funded_bidder(&f);
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+    f.client.place_bid(&f.buyer, &id, &(15 * USDC));
+    // Equal to or below the current high bid is rejected.
+    assert!(f.client.try_place_bid(&bidder2, &id, &(15 * USDC)).is_err());
+    assert!(f.client.try_place_bid(&bidder2, &id, &(14 * USDC)).is_err());
+}
+
+#[test]
+fn test_place_bid_self_trade() {
+    let f = setup();
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&f.seller, &(100 * USDC));
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+    assert!(
+        f.client.try_place_bid(&f.seller, &id, &(15 * USDC)).is_err(),
+        "seller cannot bid on their own auction"
+    );
+}
+
+#[test]
+fn test_antisnipe_extension() {
+    let f = setup();
+    let bidder2 = funded_bidder(&f);
+
+    // Bid placed well before the final window leaves ends_at unchanged.
+    let early = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+    let ends_before = f.client.get_auction_view(&early).ends_at;
+    f.client.place_bid(&f.buyer, &early, &(15 * USDC));
+    assert_eq!(
+        f.client.get_auction_view(&early).ends_at,
+        ends_before,
+        "early bid does not extend"
+    );
+
+    // Bid inside the final ANTI_SNIPE_SECS pushes the deadline out by 300s.
+    let late = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &600);
+    let ends_late = f.client.get_auction_view(&late).ends_at;
+    f.env.ledger().set_timestamp(ends_late - 100);
+    f.client.place_bid(&bidder2, &late, &(15 * USDC));
+    assert_eq!(
+        f.client.get_auction_view(&late).ends_at,
+        ends_late + ANTI_SNIPE_SECS,
+        "late bid extends by 300s"
+    );
+}
+
+#[test]
+fn test_settle_auction_winner() {
+    let f = setup();
+    f.client.set_royalty(&f.card, &f.creator, &ROYALTY_BPS);
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(20 * USDC), &3600);
+    let bid = 30 * USDC;
+    f.client.place_bid(&f.buyer, &id, &bid);
+
+    // Advance past the deadline and settle (permissionless).
+    f.env
+        .ledger()
+        .set_timestamp(f.client.get_auction_view(&id).ends_at + 1);
+    f.client.settle_auction(&id);
+
+    let fee = bid * (FEE_BPS as i128) / 10_000;
+    let royalty = bid * (ROYALTY_BPS as i128) / 10_000;
+    assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD, "winner gets card");
+    assert_eq!(f.usdc_token.balance(&f.seller), bid - fee - royalty, "seller net");
+    assert_eq!(f.usdc_token.balance(&f.platform), fee, "platform fee");
+    assert_eq!(f.usdc_token.balance(&f.creator), royalty, "creator royalty");
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0, "escrow drained");
+    assert_eq!(f.client.get_auction_view(&id).status, AUCTION_SETTLED);
+}
+
+#[test]
+fn test_settle_auction_no_reserve() {
+    let f = setup();
+    let seller_card_before = f.card_token.balance(&f.seller);
+    let buyer_before = f.usdc_token.balance(&f.buyer);
+    // Reserve above the only bid -> reserve not met.
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(50 * USDC), &3600);
+    f.client.place_bid(&f.buyer, &id, &(20 * USDC));
+
+    f.env
+        .ledger()
+        .set_timestamp(f.client.get_auction_view(&id).ends_at + 1);
+    f.client.settle_auction(&id);
+
+    assert_eq!(f.card_token.balance(&f.seller), seller_card_before, "card returned to seller");
+    assert_eq!(f.usdc_token.balance(&f.buyer), buyer_before, "bid refunded");
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0, "escrow drained");
+    assert_eq!(f.client.get_auction_view(&id).status, AUCTION_NO_WINNER);
+}
+
+#[test]
+fn test_settle_before_end() {
+    let f = setup();
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+    f.client.place_bid(&f.buyer, &id, &(15 * USDC));
+    assert!(
+        f.client.try_settle_auction(&id).is_err(),
+        "settlement before ends_at is rejected"
+    );
+}
+
+#[test]
+fn test_cancel_auction_no_bids() {
+    let f = setup();
+    let before = f.card_token.balance(&f.seller);
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+    f.client.cancel_auction(&f.seller, &id);
+    assert_eq!(f.card_token.balance(&f.seller), before, "card returned");
+    assert_eq!(f.client.get_auction_view(&id).status, AUCTION_CANCELLED);
+}
+
+#[test]
+fn test_cancel_auction_with_bids() {
+    let f = setup();
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+    f.client.place_bid(&f.buyer, &id, &(15 * USDC));
+    assert!(
+        f.client.try_cancel_auction(&f.seller, &id).is_err(),
+        "auction with bids cannot be cancelled"
+    );
+}
+
+#[test]
+fn test_claim_refund() {
+    let f = setup();
+    let bidder2 = funded_bidder(&f);
+    let id = f
+        .client
+        .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
+
+    let b1_before = f.usdc_token.balance(&f.buyer);
+    f.client.place_bid(&f.buyer, &id, &(15 * USDC));
+    f.client.place_bid(&bidder2, &id, &(20 * USDC));
+    // Auto-refund already returned the funds, so a claim is a safe no-op.
+    f.client.claim_refund(&f.buyer, &id);
+    assert_eq!(f.usdc_token.balance(&f.buyer), b1_before, "balance whole, claim is a no-op");
+
+    // The current high bidder cannot claim while the auction is still open.
+    assert!(
+        f.client.try_claim_refund(&bidder2, &id).is_err(),
+        "high bidder cannot claim before settlement"
+    );
+}
+
+// --- barter swap: propose / execute / cancel / decline ---
+
+// Swap lifecycle codes (mirror the contract's `SWAP_*` constants).
+const SWAP_PROPOSED: u32 = 10;
+const SWAP_ACCEPTED: u32 = 11;
+const SWAP_CANCELLED: u32 = 12;
+const SWAP_DECLINED: u32 = 13;
+
+/// Register a fresh card asset and mint three copies to `owner`. Returns the
+/// SAC address — the get-side card a swap counterparty brings to the table.
+fn new_card(env: &Env, owner: &Address) -> Address {
+    let issuer = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(issuer);
+    let addr = sac.address();
+    token::StellarAssetClient::new(env, &addr).mint(owner, &(3 * ONE_CARD));
+    addr
+}
+
+#[test]
+fn test_propose_swap_locks_cards() {
+    let f = setup();
+    // Bob (buyer) holds the get-side card.
+    let card_b = new_card(&f.env, &f.buyer);
+    let give = vec![&f.env, f.card.clone()];
+    let get = vec![&f.env, card_b.clone()];
+
+    let seller_before = f.card_token.balance(&f.seller);
+    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &0);
+
+    // Alice's give-side card moved into contract custody.
+    assert_eq!(f.card_token.balance(&f.client.address), ONE_CARD, "card escrowed");
+    assert_eq!(f.card_token.balance(&f.seller), seller_before - ONE_CARD);
+
+    let view = f.client.get_swap_view(&id);
+    assert_eq!(view.proposer, f.seller);
+    assert_eq!(view.counterparty, f.buyer);
+    assert_eq!(view.give_tokens, give);
+    assert_eq!(view.get_tokens, get);
+    assert_eq!(view.usdc_amount, 0);
+    assert_eq!(view.status, SWAP_PROPOSED);
+}
+
+#[test]
+fn test_execute_swap_atomic() {
+    let f = setup();
+    // Alice funds the USDC sweetener; Bob holds the get-side card.
+    let sweetener = 100 * USDC;
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&f.seller, &sweetener);
+    let card_b = new_card(&f.env, &f.buyer);
+    let card_b_token = token::TokenClient::new(&f.env, &card_b);
+
+    let give = vec![&f.env, f.card.clone()];
+    let get = vec![&f.env, card_b.clone()];
+    let buyer_usdc_before = f.usdc_token.balance(&f.buyer);
+    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &sweetener);
+
+    // Custody holds Alice's card + her sweetener until Bob accepts.
+    assert_eq!(f.card_token.balance(&f.client.address), ONE_CARD);
+    assert_eq!(f.usdc_token.balance(&f.client.address), sweetener);
+
+    f.client.execute_swap(&f.buyer, &id);
+
+    let fee = sweetener * (FEE_BPS as i128) / 10_000; // 2 USDC
+    // Cards crossed: Bob gets card A, Alice gets card B.
+    assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD, "Bob receives card A");
+    assert_eq!(card_b_token.balance(&f.seller), ONE_CARD, "Alice receives card B");
+    // USDC sweetener split: platform fee + remainder to Bob.
+    assert_eq!(f.usdc_token.balance(&f.platform), fee, "platform fee");
+    assert_eq!(
+        f.usdc_token.balance(&f.buyer),
+        buyer_usdc_before + sweetener - fee,
+        "Bob gets sweetener minus fee"
+    );
+    // Custody fully drained.
+    assert_eq!(f.card_token.balance(&f.client.address), 0);
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0);
+    assert_eq!(f.client.get_swap_view(&id).status, SWAP_ACCEPTED);
+}
+
+#[test]
+fn test_execute_swap_no_usdc_no_fee() {
+    let f = setup();
+    let card_b = new_card(&f.env, &f.buyer);
+    let card_b_token = token::TokenClient::new(&f.env, &card_b);
+
+    let give = vec![&f.env, f.card.clone()];
+    let get = vec![&f.env, card_b.clone()];
+    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &0);
+    f.client.execute_swap(&f.buyer, &id);
+
+    // Pure card-for-card: cards cross, no USDC moves anywhere, no fee.
+    assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD, "Bob receives card A");
+    assert_eq!(card_b_token.balance(&f.seller), ONE_CARD, "Alice receives card B");
+    assert_eq!(f.usdc_token.balance(&f.platform), 0, "no fee on a pure card swap");
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0, "no USDC in custody");
+    assert_eq!(f.client.get_swap_view(&id).usdc_amount, 0);
+}
+
+#[test]
+fn test_cancel_swap_returns_cards() {
+    let f = setup();
+    let sweetener = 50 * USDC;
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&f.seller, &sweetener);
+    let card_b = new_card(&f.env, &f.buyer);
+
+    let card_before = f.card_token.balance(&f.seller);
+    let usdc_before = f.usdc_token.balance(&f.seller);
+    let give = vec![&f.env, f.card.clone()];
+    let get = vec![&f.env, card_b.clone()];
+    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &sweetener);
+
+    f.client.cancel_swap(&f.seller, &id);
+
+    // Both the escrowed card and the sweetener return to Alice.
+    assert_eq!(f.card_token.balance(&f.seller), card_before, "card returned");
+    assert_eq!(f.usdc_token.balance(&f.seller), usdc_before, "sweetener returned");
+    assert_eq!(f.card_token.balance(&f.client.address), 0, "custody drained");
+    assert_eq!(f.client.get_swap_view(&id).status, SWAP_CANCELLED);
+}
+
+#[test]
+fn test_decline_swap_returns_cards() {
+    let f = setup();
+    let card_b = new_card(&f.env, &f.buyer);
+
+    let card_before = f.card_token.balance(&f.seller);
+    let give = vec![&f.env, f.card.clone()];
+    let get = vec![&f.env, card_b.clone()];
+    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &0);
+
+    f.client.decline_swap(&f.buyer, &id);
+
+    assert_eq!(f.card_token.balance(&f.seller), card_before, "card returned to Alice");
+    assert_eq!(f.card_token.balance(&f.client.address), 0, "custody drained");
+    assert_eq!(f.client.get_swap_view(&id).status, SWAP_DECLINED);
+}
+
+#[test]
+fn test_propose_swap_self_trade_rejected() {
+    let f = setup();
+    let give = vec![&f.env, f.card.clone()];
+    let get = vec![&f.env, f.card.clone()];
+    // Proposer == counterparty must be rejected before anything is escrowed.
+    let res = f.client.try_propose_swap(&f.seller, &f.seller, &give, &get, &0);
+    assert!(res.is_err(), "self-trade must be rejected");
+}
+
+#[test]
+fn test_execute_swap_wrong_counterparty_rejected() {
+    let f = setup();
+    let card_b = new_card(&f.env, &f.buyer);
+    let give = vec![&f.env, f.card.clone()];
+    let get = vec![&f.env, card_b.clone()];
+    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &0);
+
+    // A third party — not the named counterparty — cannot execute the swap.
+    let stranger = Address::generate(&f.env);
+    let res = f.client.try_execute_swap(&stranger, &id);
+    assert!(res.is_err(), "only the named counterparty may execute");
+    // The proposal is untouched and the card is still escrowed.
+    assert_eq!(f.client.get_swap_view(&id).status, SWAP_PROPOSED);
+    assert_eq!(f.card_token.balance(&f.client.address), ONE_CARD);
 }

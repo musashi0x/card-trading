@@ -29,7 +29,7 @@ export default function BrowsePage() {
     if (fc.rarities.length && !fc.rarities.includes(c.rarity)) return false;
     if (fc.graded && !c.cats.includes('Graded')) return false;
     if (fc.buyNow && !(c.buyNow > 0)) return false;
-    if (fc.ending && c.endsAt - st.now >= 3600000) return false;
+    if (fc.ending && !(c.isAuction && c.endsAt - st.now < 3600000)) return false;
     if (fc.price !== 'any') {
       const p = c.currentBid;
       if (fc.price === 'lt100' && !(p < 100)) return false;
@@ -39,7 +39,9 @@ export default function BrowsePage() {
     return true;
   });
   const sortFns: Record<string, (a: TopCard, b: TopCard) => number> = {
-    ending: (a, b) => a.endsAt - st.now - (b.endsAt - st.now),
+    // Auctions sort by time-left; fixed-price lots (no countdown) sink to the end.
+    ending: (a, b) =>
+      (a.isAuction ? a.endsAt : Infinity) - (b.isAuction ? b.endsAt : Infinity),
     priceUp: (a, b) => a.currentBid - b.currentBid,
     priceDown: (a, b) => b.currentBid - a.currentBid,
     bids: (a, b) => b.bids.length - a.bids.length,
@@ -140,7 +142,16 @@ export default function BrowsePage() {
 
         {/* grid */}
         <div>
-          {list.length === 0 ? (
+          {list.length === 0 && activeCount === 0 ? (
+            /* No listings at all (and no filters active) — honest empty marketplace. */
+            <div style={{ textAlign: 'center', padding: '60px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'center' }}><SearchOffIcon sx={{ fontSize: 48, color: 'rgba(26,19,5,.4)' }} /></div>
+              <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 21, marginTop: 10 }}>No open listings yet</div>
+              <div style={{ fontSize: 13.5, color: 'rgba(26,19,5,.55)', fontWeight: 500, marginTop: 6 }}>Be the first — list a card and start the marketplace.</div>
+              <div onClick={td.goSell} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>List a card</div>
+            </div>
+          ) : list.length === 0 ? (
+            /* Listings exist, but none match the active search/filters. */
             <div style={{ textAlign: 'center', padding: '60px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16 }}>
               <div style={{ display: 'flex', justifyContent: 'center' }}><SearchOffIcon sx={{ fontSize: 48, color: 'rgba(26,19,5,.4)' }} /></div>
               <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 21, marginTop: 10 }}>{query ? `No lots match “${st.query.trim()}”` : 'No lots match those filters'}</div>
