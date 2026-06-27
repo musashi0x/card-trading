@@ -54,6 +54,7 @@ catalogRouter.get('/listings', async (req, res, next) => {
         seller: listings.seller,
         priceUsdc: listings.priceUsdc,
         status: listings.status,
+        fulfillment: listings.fulfillment,
         contractListingId: listings.contractListingId,
         escrowTxHash: listings.escrowTxHash,
         createdAt: listings.createdAt,

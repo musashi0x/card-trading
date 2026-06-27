@@ -34,6 +34,7 @@ function sh(args: string[]): string {
 
 interface Accounts {
   platform: { publicKey: string; secret: string };
+  arbiter?: { publicKey: string };
   creator?: { publicKey: string };
   usdc: { code: string; issuer: string };
   cards: { slug: string; assetCode: string; issuer: string }[];
@@ -74,11 +75,18 @@ function main() {
   console.log(`  CONTRACT_ID: ${contractId}`);
 
   console.log('[deploy] initializing contract...');
+  // Dispute arbiter for physical-escrow orders; falls back to the platform admin
+  // for account files created before arbitration (re-run setup for a separate key).
+  const arbiter = accounts.arbiter?.publicKey ?? accounts.platform.publicKey;
+  if (!accounts.arbiter) {
+    console.warn('[deploy] no arbiter account in stellar-accounts.json — using platform as arbiter');
+  }
   sh([
     'contract', 'invoke', '--id', contractId, '--source-account', source, '--network', NETWORK,
     '--', 'init',
     '--admin', accounts.platform.publicKey,
     '--platform', accounts.platform.publicKey,
+    '--arbiter', arbiter,
     '--usdc_token', usdcSac,
     '--fee_bps', FEE_BPS,
     '--max_royalty_bps', MAX_ROYALTY_BPS,

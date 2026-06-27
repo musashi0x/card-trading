@@ -8,6 +8,15 @@
 export type ListingStatus = 'open' | 'sold' | 'cancelled';
 export type OfferStatus = 'open' | 'withdrawn' | 'settled';
 
+/** How a sold card reaches the buyer. */
+export type Fulfillment = 'digital' | 'physical';
+
+/**
+ * Lifecycle of a physical-card escrow order. Mirrors the contract's `ORDER_*`
+ * codes by position: funded(0), shipped(1), disputed(2), released(3), refunded(4).
+ */
+export type OrderStatus = 'funded' | 'shipped' | 'disputed' | 'released' | 'refunded';
+
 export interface Card {
   id: string;
   /** Stellar asset code (issued by the platform issuer). */
@@ -37,10 +46,37 @@ export interface Listing {
   /** Price in test USDC, as a decimal string to avoid float drift. */
   priceUsdc: string;
   status: ListingStatus;
+  /** Digital cards settle atomically; physical cards route through escrow. */
+  fulfillment: Fulfillment;
   /** Listing id inside the settlement contract. */
   contractListingId: number | null;
   /** Tx hash of the on-chain `list` call. */
   escrowTxHash: string | null;
+  createdAt: string;
+}
+
+/**
+ * A physical-card escrow order: the buyer's USDC and the seller's card are both
+ * held by the contract until the buyer confirms receipt, the window times out,
+ * or an arbiter resolves a dispute.
+ */
+export interface Order {
+  id: string;
+  listingId: string;
+  buyer: string;
+  seller: string;
+  amountUsdc: string;
+  status: OrderStatus;
+  /** Order id inside the settlement contract. */
+  contractOrderId: number | null;
+  /** Unix seconds after which `claim_timeout` may release to the seller. */
+  confirmDeadline: number | null;
+  /** Optional shipment tracking reference the seller attaches on dispatch. */
+  trackingRef: string | null;
+  /** Tx hash of the on-chain `purchase_escrow` call. */
+  escrowTxHash: string | null;
+  /** Tx hash of the terminal settlement (release/refund). */
+  settleTxHash: string | null;
   createdAt: string;
 }
 
@@ -129,7 +165,12 @@ export type TradeAction =
   | 'make_offer'
   | 'withdraw_offer'
   | 'accept_offer'
-  | 'buy_now';
+  | 'buy_now'
+  | 'purchase_escrow'
+  | 'mark_shipped'
+  | 'confirm_receipt'
+  | 'claim_timeout'
+  | 'dispute';
 
 /** Response from the API's transaction-build endpoints. */
 export interface BuildTxResponse {

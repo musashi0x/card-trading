@@ -19,6 +19,17 @@ function required(name: string): string {
 
 export const env = {
   port: Number(process.env.PORT ?? 4000),
+  /** Minimum log severity emitted by the shared logger. */
+  logLevel: process.env.LOG_LEVEL ?? 'info',
+  /**
+   * Per-IP rate limiting. Protects shared upstreams (Stellar RPC, the sponsoring
+   * relay, Postgres) from a single client overwhelming the service. `windowMs`
+   * is the sliding window; `max` is the request budget per window per client.
+   */
+  rateLimit: {
+    windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000),
+    max: Number(process.env.RATE_LIMIT_MAX ?? 300),
+  },
   databaseUrl: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/cardmkt',
   stellar: stellarConfigFromEnv(),
   contractId: required('CONTRACT_ID'),
@@ -27,6 +38,13 @@ export const env = {
     issuer: required('USDC_ISSUER'),
   },
   platformIssuer: required('PLATFORM_ISSUER'),
+  /**
+   * Dispute arbiter secret. The arbiter is a separate key from the admin so
+   * refereeing is decoupled from contract administration. The API signs `resolve`
+   * server-side with this key (an arbitration-dashboard action). Empty when
+   * arbitration is not configured; the resolve route then returns 501.
+   */
+  arbiterSecret: process.env.ARBITER_SECRET ?? '',
   /**
    * Secret for the USDC issuer (== platform issuer here), used only by the
    * testnet-gated dev funding route to mint test USDC to a smart wallet. Empty

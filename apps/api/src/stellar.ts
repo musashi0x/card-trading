@@ -23,6 +23,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { MarketplaceContract } from '@cardmkt/shared';
 import { env } from './env.js';
+import { getLog } from './context.js';
 
 export const rpcServer = new rpc.Server(env.stellar.rpcUrl, {
   allowHttp: env.stellar.rpcUrl.startsWith('http://'),
@@ -462,6 +463,23 @@ export async function mintUsdcTo(
   });
 }
 
+/**
+ * Build, sign (with `secret`), and submit a contract-call sourced from that
+ * key's own account. Used for server-held keys that act in their own right — e.g.
+ * the arbiter resolving a disputed escrow order. Unlike {@link withIssuerLock}
+ * helpers, the source is the signer itself, not the platform issuer.
+ */
+export async function signAndSubmitAs(
+  secret: string,
+  operation: xdr.Operation,
+): Promise<SubmitResult> {
+  const kp = Keypair.fromSecret(secret);
+  const unsignedXdr = await buildContractTx(kp.publicKey(), operation);
+  const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+  tx.sign(kp);
+  return submitSignedTx(tx.toXDR());
+}
+
 // --- card minting (issue a new card asset at runtime) ---
 
 /** One card copy in stroops — assets carry 7 decimals, so 1 copy = 1.0 unit. */
@@ -624,8 +642,9 @@ export async function requireSmartWalletUsdc(
 ): Promise<void> {
   const have = await smartWalletUsdcStroops(walletContractId);
   if (have === null) {
-    console.warn(
-      `[preflight] could not read USDC balance for smart wallet ${walletContractId}; skipping funding check`,
+    getLog().warn(
+      { walletContractId },
+      'preflight: could not read USDC balance for smart wallet; skipping funding check',
     );
     return;
   }
@@ -652,8 +671,9 @@ export async function requireSmartWalletCard(
 ): Promise<void> {
   const have = await smartWalletTokenStroops(cardSacAddress, walletContractId);
   if (have === null) {
-    console.warn(
-      `[preflight] could not read card balance for smart wallet ${walletContractId}; skipping ownership check`,
+    getLog().warn(
+      { walletContractId },
+      'preflight: could not read card balance for smart wallet; skipping ownership check',
     );
     return;
   }

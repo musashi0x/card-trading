@@ -8,19 +8,22 @@
  * drift (e.g. actions taken outside the app).
  */
 
-import { and, eq, isNotNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import { TransactionBuilder, BASE_FEE, rpc, scValToNative, type xdr } from '@stellar/stellar-sdk';
 import { db, schema } from '@cardmkt/db';
 import { MarketplaceContract } from '@cardmkt/shared';
 import { env } from './env.js';
+import { logger } from './logger.js';
 import { rpcServer } from './stellar.js';
 
 const contract = new MarketplaceContract(env.contractId);
-const { listings, offers } = schema;
+const { listings, offers, orders } = schema;
 
 // Contract status codes -> DB enums.
 const LISTING_STATUS = ['open', 'sold', 'cancelled'] as const;
 const OFFER_STATUS = ['open', 'settled', 'withdrawn'] as const;
+// Mirrors the contract's `ORDER_*` codes by position.
+const ORDER_STATUS = ['funded', 'shipped', 'disputed', 'released', 'refunded'] as const;
 
 async function readView(op: xdr.Operation): Promise<Record<string, unknown> | null> {
   try {
@@ -72,12 +75,42 @@ async function reconcileOffers(): Promise<void> {
   }
 }
 
-export async function reconcileNow(): Promise<void> {
-  await Promise.all([reconcileListings(), reconcileOffers()]);
+async function reconcileOrders(): Promise<void> {
+  const rows = await db
+    .select()
+    .from(orders)
+    .where(
+      and(
+        inArray(orders.status, ['funded', 'shipped', 'disputed']),
+        isNotNull(orders.contractOrderId),
+      ),
+    );
+  for (const row of rows) {
+    const view = await readView(contract.getOrderView(row.contractOrderId!));
+    if (!view) continue;
+    const status = ORDER_STATUS[Number(view.status ?? 0)];
+    const deadline = view.confirm_deadline != null ? Number(view.confirm_deadline) : null;
+    if (status && status !== row.status) {
+      await db.update(orders).set({ status }).where(eq(orders.id, row.id));
+    }
+    if (deadline != null && deadline !== row.confirmDeadline) {
+      await db.update(orders).set({ confirmDeadline: deadline }).where(eq(orders.id, row.id));
+    }
+  }
 }
 
-export function startIndexer(intervalMs = 15_000): void {
-  const tick = () => reconcileNow().catch((err) => console.error('[indexer]', err.message));
-  setInterval(tick, intervalMs);
-  console.log(`[indexer] reconciling every ${intervalMs / 1000}s`);
+export async function reconcileNow(): Promise<void> {
+  await Promise.all([reconcileListings(), reconcileOffers(), reconcileOrders()]);
+}
+
+/**
+ * Start the periodic reconciler. Returns a stop handle that clears the interval
+ * so graceful shutdown can guarantee no reconciliation runs after exit begins.
+ */
+export function startIndexer(intervalMs = 15_000): () => void {
+  const log = logger.child({ component: 'indexer' });
+  const tick = () => reconcileNow().catch((err) => log.error({ err }, 'reconcile failed'));
+  const handle = setInterval(tick, intervalMs);
+  log.info({ intervalMs }, 'reconciling on interval');
+  return () => clearInterval(handle);
 }

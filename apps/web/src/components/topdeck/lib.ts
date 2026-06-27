@@ -8,7 +8,7 @@
  * the browse grid, and the Sell publish flow all use the real API.
  */
 
-import type { Card, Listing } from '@cardmkt/shared';
+import type { Card, Fulfillment, Listing } from '@cardmkt/shared';
 
 export type Rarity = 'common' | 'rare' | 'epic' | 'legendary';
 
@@ -54,6 +54,11 @@ export interface TopCard {
   mine?: boolean;
   /** Creator royalty in basis points, paid to the card's creator on resale. */
   royaltyBps?: number;
+  /**
+   * How a real listing settles: `digital` (instant atomic swap) or `physical`
+   * (delivery-confirmation escrow). Absent on mock/demo cards.
+   */
+  fulfillment?: Fulfillment;
 }
 
 const H = 3600000;
@@ -169,6 +174,7 @@ export function mapListing(l: Listing, base = Date.now()): TopCard {
     setLine: (card.set || 'LISTING').toUpperCase(),
     bids: [],
     royaltyBps: card.royaltyBps ?? 0,
+    fulfillment: l.fulfillment,
   };
 }
 

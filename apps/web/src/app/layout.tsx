@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { QueryProvider } from '@/components/QueryProvider';
 import { WalletProvider } from '@/components/WalletProvider';
 import { DevAnnotations } from '@/components/DevAnnotations';
 
@@ -21,7 +22,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <WalletProvider>{children}</WalletProvider>
+        <QueryProvider>
+          <WalletProvider>{children}</WalletProvider>
+        </QueryProvider>
         <DevAnnotations />
       </body>
     </html>

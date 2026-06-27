@@ -9,6 +9,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import type {
   Card,
+  FulfillmentMode,
   MintCardRequest,
   PathQuoteResponse,
   SmartWalletAccount,
@@ -21,9 +22,16 @@ import {
   disconnectPasskey,
   passkeyEnabled,
   signBuyNow,
+  signConfirmReceipt,
+  signDispute,
   signList,
+  signMarkShipped,
+  signPurchaseEscrow,
   takePendingDeploy,
 } from '@/lib/passkey';
+
+/** Order actions a participant can take on an in-flight escrow order. */
+export type OrderAction = 'confirm_receipt' | 'dispute' | 'mark_shipped' | 'claim_timeout';
 
 /** How the connected account authorizes: classic keypair/extension vs. passkey. */
 export type WalletKind = 'classic' | 'passkey';
@@ -51,7 +59,27 @@ interface WalletContextValue {
    * prompt, gasless relay. Deploys the wallet first when needed. Returns the
    * on-chain `list` tx hash.
    */
-  passkeyList: (cardId: string, cardToken: string, priceUsdc: string) => Promise<string>;
+  passkeyList: (
+    cardId: string,
+    cardToken: string,
+    priceUsdc: string,
+    fulfillment?: FulfillmentMode,
+  ) => Promise<string>;
+  /**
+   * Buy a physical listing through the delivery-confirmation escrow: funds are
+   * held by the contract until receipt is confirmed (or a timeout / dispute
+   * resolves). Works for both classic and passkey wallets. Returns the tx hash.
+   */
+  escrowPurchase: (listingId: string, contractListingId: number) => Promise<string>;
+  /**
+   * Take a participant action on an in-flight escrow order (confirm receipt,
+   * dispute, mark shipped, or claim a timed-out order). Returns the tx hash.
+   */
+  orderAction: (
+    action: OrderAction,
+    orderId: string,
+    contractOrderId: number,
+  ) => Promise<string>;
   establishTrustline: (cardId: string) => Promise<string>;
   /**
    * Mint (issue) a brand-new card asset owned by the connected wallet, returning
@@ -144,14 +172,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   );
 
   const passkeyList = useCallback(
-    async (cardId: string, cardToken: string, priceUsdc: string): Promise<string> => {
+    async (
+      cardId: string,
+      cardToken: string,
+      priceUsdc: string,
+      fulfillment: FulfillmentMode = 'digital',
+    ): Promise<string> => {
       const wallet = smartWallet.current;
       if (!wallet) throw new Error('Connect a passkey wallet first');
       // Deploy-on-first-use: relay the held deployment before the first call so
       // the wallet exists to authorize it.
       const deploy = takePendingDeploy();
       if (deploy) await api.passkeyDeploy(deploy);
-      const signedXdr = await signList(wallet, cardToken, priceUsdc);
+      const signedXdr = await signList(wallet, cardToken, priceUsdc, fulfillment);
       const { hash } = await api.passkeyList({
         cardId,
         seller: wallet.contractId,
@@ -161,6 +194,65 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       return hash;
     },
     [],
+  );
+
+  /** Buy a physical listing through the held escrow (classic or passkey). */
+  const escrowPurchase = useCallback(
+    async (listingId: string, contractListingId: number): Promise<string> => {
+      if (walletKind === 'passkey') {
+        const wallet = smartWallet.current;
+        if (!wallet) throw new Error('Connect a passkey wallet first');
+        const deploy = takePendingDeploy();
+        if (deploy) await api.passkeyDeploy(deploy);
+        const signedXdr = await signPurchaseEscrow(wallet, contractListingId);
+        const { hash } = await api.passkeyOrder({
+          action: 'purchase_escrow',
+          account: wallet.contractId,
+          listingId,
+          signedXdr,
+        });
+        return hash;
+      }
+      if (!address) throw new Error('Connect a wallet first');
+      const built = await api.build('purchase_escrow', { listingId, buyer: address });
+      const signed = await signXdr(built.xdr, address, built.networkPassphrase);
+      const { hash } = await api.submit(signed, 'purchase_escrow', built.refId);
+      return hash;
+    },
+    [address, walletKind],
+  );
+
+  /** A participant action on an existing escrow order (classic or passkey). */
+  const orderAction = useCallback(
+    async (action: OrderAction, orderId: string, contractOrderId: number): Promise<string> => {
+      if (walletKind === 'passkey') {
+        if (action === 'claim_timeout') {
+          throw new Error('Timeout release is available from a classic wallet only');
+        }
+        const wallet = smartWallet.current;
+        if (!wallet) throw new Error('Connect a passkey wallet first');
+        const sign =
+          action === 'confirm_receipt'
+            ? signConfirmReceipt
+            : action === 'dispute'
+              ? signDispute
+              : signMarkShipped;
+        const signedXdr = await sign(wallet, contractOrderId);
+        const { hash } = await api.passkeyOrder({
+          action,
+          account: wallet.contractId,
+          orderId,
+          signedXdr,
+        });
+        return hash;
+      }
+      if (!address) throw new Error('Connect a wallet first');
+      const built = await api.build(action, { orderId, account: address });
+      const signed = await signXdr(built.xdr, address, built.networkPassphrase);
+      const { hash } = await api.submit(signed, action, built.refId);
+      return hash;
+    },
+    [address, walletKind],
   );
 
   /** build -> sign -> submit, returning the settlement/escrow tx hash. */
@@ -258,6 +350,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       runAction,
       passkeyBuyNow,
       passkeyList,
+      escrowPurchase,
+      orderAction,
       establishTrustline,
       mintCard,
       payWithAsset,
@@ -272,6 +366,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       runAction,
       passkeyBuyNow,
       passkeyList,
+      escrowPurchase,
+      orderAction,
       establishTrustline,
       mintCard,
       payWithAsset,

@@ -73,6 +73,9 @@ async function main() {
   console.log(`[setup] network=testnet horizon=${HORIZON}`);
 
   const platform = Keypair.random();
+  // The dispute arbiter resolves physical-escrow disputes. A separate key from
+  // the platform/admin so refereeing is decoupled from contract administration.
+  const arbiter = Keypair.random();
   const merchant = Keypair.random();
   const consumer = Keypair.random();
   // The creator receives royalties on resale; it must trust USDC so atomic
@@ -87,6 +90,7 @@ async function main() {
   console.log('[setup] funding accounts via friendbot...');
   await Promise.all([
     friendbot(platform.publicKey()),
+    friendbot(arbiter.publicKey()),
     friendbot(merchant.publicKey()),
     friendbot(consumer.publicKey()),
     friendbot(creator.publicKey()),
@@ -142,6 +146,7 @@ async function main() {
   const out = {
     network: 'testnet',
     platform: { publicKey: platform.publicKey(), secret: platform.secret() },
+    arbiter: { publicKey: arbiter.publicKey(), secret: arbiter.secret() },
     merchant: { publicKey: merchant.publicKey(), secret: merchant.secret() },
     consumer: { publicKey: consumer.publicKey(), secret: consumer.secret() },
     creator: { publicKey: creator.publicKey(), secret: creator.secret() },
@@ -160,6 +165,7 @@ async function main() {
   console.log(`PLATFORM_ISSUER_SECRET=${platform.secret()}`);
   console.log(`USDC_ASSET_CODE=${USDC_CODE}`);
   console.log(`USDC_ISSUER=${platform.publicKey()}`);
+  console.log(`ARBITER_SECRET=${arbiter.secret()}`);
   console.log('\nDemo wallets (import secrets into Freighter):');
   console.log(`  merchant: ${merchant.publicKey()}`);
   console.log(`  consumer: ${consumer.publicKey()}`);
