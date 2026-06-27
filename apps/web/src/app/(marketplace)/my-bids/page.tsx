@@ -5,6 +5,12 @@ import { INK, DISPLAY } from '@/components/topdeck/theme';
 import { CardTile } from '@/components/topdeck/shared/CardTile';
 import { rarityMeta, money, fmtLeft } from '@/components/topdeck/lib';
 import type { TopCard } from '@/components/topdeck/lib';
+import type { ReactNode } from 'react';
+import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
+import BoltIcon from '@mui/icons-material/Bolt';
+import CelebrationIcon from '@mui/icons-material/Celebration';
+import FavoriteIcon from '@mui/icons-material/Favorite';
+import TimerIcon from '@mui/icons-material/Timer';
 
 export default function MyBidsPage() {
   const td = useTopDeck();
@@ -12,10 +18,10 @@ export default function MyBidsPage() {
 
   // ── derived values (mirrored from the old render()) ──────────────────────
   const statusMeta = (s: string) =>
-    s === 'winning' ? { label: 'Winning', icon: '🏆', bg: '#bff3d4', col: '#0a5e34' }
-      : s === 'outbid' ? { label: 'Outbid', icon: '⚡', bg: '#ffd1cc', col: '#a3160a' }
-        : s === 'won' ? { label: 'Won', icon: '🎉', bg: INK, col: '#ffd84d' }
-          : { label: 'Leading', icon: '•', bg: '#fff', col: INK };
+    s === 'winning' ? { label: 'Winning', icon: <EmojiEventsIcon sx={{ fontSize: 14 }} />, bg: '#bff3d4', col: '#0a5e34' }
+      : s === 'outbid' ? { label: 'Outbid', icon: <BoltIcon sx={{ fontSize: 14 }} />, bg: '#ffd1cc', col: '#a3160a' }
+        : s === 'won' ? { label: 'Won', icon: <CelebrationIcon sx={{ fontSize: 14 }} />, bg: INK, col: '#ffd84d' }
+          : { label: 'Leading', icon: <span style={{ fontSize: 10 }}>•</span>, bg: '#fff', col: INK };
 
   const involved = st.cards.filter((c) => st.myMax[c.id] != null || st.status[c.id] === 'won');
   const winningCount = involved.filter((c) => st.status[c.id] === 'winning').length;
@@ -30,21 +36,21 @@ export default function MyBidsPage() {
     watchList: TopCard[],
     winningCount: number,
     outbidCount: number,
-    statusMeta: (s: string) => { label: string; icon: string; bg: string; col: string },
+    statusMeta: (s: string) => { label: string; icon: ReactNode; bg: string; col: string },
   ) {
-    const chip = (n: number | string, label: string, bg: string, col: string) => (
+    const chip = (n: number | string, label: ReactNode, bg: string, col: string) => (
       <div style={{ flex: 1, minWidth: 150, background: bg, border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '16px 18px' }}>
         <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, lineHeight: 1, color: col }}>{n}</div>
-        <div style={{ fontSize: 12, fontWeight: 700, color: col === INK ? 'rgba(26,19,5,.55)' : col, marginTop: 4 }}>{label}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 700, color: col === INK ? 'rgba(26,19,5,.55)' : col, marginTop: 4 }}>{label}</div>
       </div>
     );
     return (
       <>
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '22px 0 28px' }}>
           {chip(involved.length, 'Active lots', '#fff', INK)}
-          {chip(winningCount, '🏆 Winning', '#bff3d4', '#0a5e34')}
-          {chip(outbidCount, '⚡ Outbid', '#ffd1cc', '#a3160a')}
-          {chip(watchList.length, '♥ Watching', '#ffd84d', INK)}
+          {chip(winningCount, <><EmojiEventsIcon sx={{ fontSize: 15 }} /> Winning</>, '#bff3d4', '#0a5e34')}
+          {chip(outbidCount, <><BoltIcon sx={{ fontSize: 15 }} /> Outbid</>, '#ffd1cc', '#a3160a')}
+          {chip(watchList.length, <><FavoriteIcon sx={{ fontSize: 15 }} /> Watching</>, '#ffd84d', INK)}
         </div>
 
         {involved.length > 0 ? (
@@ -64,7 +70,10 @@ export default function MyBidsPage() {
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div onClick={() => td.open(c.id)} style={{ fontWeight: 700, fontSize: 15, cursor: 'pointer' }}>{c.name}</div>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 7, border: `2px solid ${INK}`, marginTop: 7, background: sm.bg, color: sm.col }}>{sm.icon} {sm.label}</div>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 7, border: `2px solid ${INK}`, marginTop: 7, background: sm.bg, color: sm.col }}>
+                      {sm.icon}
+                      <span>{sm.label}</span>
+                    </div>
                   </div>
                   <div style={{ textAlign: 'right', minWidth: 80 }}>
                     <div style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>Your max</div>
@@ -76,7 +85,10 @@ export default function MyBidsPage() {
                   </div>
                   <div style={{ textAlign: 'right', minWidth: 78 }}>
                     <div style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>Ends in</div>
-                    <div style={{ fontWeight: 800, fontSize: 13, color: ending ? '#ff4d3d' : 'rgba(26,19,5,.55)' }}>⏱ {fmtLeft(left)}</div>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 800, fontSize: 13, color: ending ? '#ff4d3d' : 'rgba(26,19,5,.55)' }}>
+                      <TimerIcon sx={{ fontSize: 15 }} />
+                      <span>{fmtLeft(left)}</span>
+                    </div>
                   </div>
                   <div onClick={() => (isOutbid ? td.openBidFor(c.id) : td.open(c.id))} style={{ flex: 'none', textAlign: 'center', fontSize: 13, fontWeight: 800, padding: '11px 16px', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer', background: isOutbid ? '#ff4d3d' : '#fff', color: isOutbid ? '#fff' : INK }}>{isOutbid ? 'Bid again' : 'View lot'}</div>
                 </div>
@@ -148,7 +160,10 @@ export default function MyBidsPage() {
                   </div>
                   <div style={{ textAlign: 'right', minWidth: 78 }}>
                     <div style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>Ends in</div>
-                    <div style={{ fontWeight: 800, fontSize: 13 }}>⏱ {fmtLeft(left)}</div>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 800, fontSize: 13 }}>
+                      <TimerIcon sx={{ fontSize: 15 }} />
+                      <span>{fmtLeft(left)}</span>
+                    </div>
                   </div>
                   <div onClick={() => td.open(c.id)} style={{ flex: 'none', textAlign: 'center', fontSize: 13, fontWeight: 800, padding: '11px 16px', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer', background: '#fff' }}>View listing</div>
                 </div>

@@ -3,6 +3,7 @@
 import type { ReactNode } from 'react';
 import { useTopDeck } from '../TopDeckProvider';
 import { INK } from '../theme';
+import BoltIcon from '@mui/icons-material/Bolt';
 
 /** The connected-wallet management dropdown: view, copy, explorer, disconnect. */
 export function WalletMenu({ address }: { address: string }) {
@@ -25,7 +26,14 @@ export function WalletMenu({ address }: { address: string }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 13px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
           <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.6)' }}>CONNECTED WALLET</span>
           <span style={{ fontSize: 10.5, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: INK, color: '#fff' }}>
-            {walletKind === 'passkey' ? '⚡ Passkey' : 'Classic'}
+            {walletKind === 'passkey' ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                <BoltIcon sx={{ fontSize: 13, color: '#ffd84d' }} />
+                <span>Passkey</span>
+              </span>
+            ) : (
+              'Classic'
+            )}
           </span>
         </div>
         <div style={{ padding: 13, display: 'flex', flexDirection: 'column', gap: 11 }}>

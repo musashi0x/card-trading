@@ -8,6 +8,7 @@ import { NavMenu, type NavItem } from './NavMenu';
 import { WalletMenu } from './WalletMenu';
 import SearchIcon from '@mui/icons-material/Search';
 import CloseIcon from '@mui/icons-material/Close';
+import BoltIcon from '@mui/icons-material/Bolt';
 
 /** A top-nav text link with the design's underline active-state. */
 function NavLink({ label, active, onClick }: NavItem) {
@@ -61,12 +62,24 @@ export function TopNav() {
       <NavMenu items={navItems} />
       <div onClick={td.goSell} style={{ fontSize: 13, fontWeight: 700, flexShrink: 0, whiteSpace: 'nowrap', padding: '9px 16px', background: '#2d5bff', color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>Sell a card</div>
       {wallet.passkeyAvailable && !wallet.address && (
-        <div onClick={() => { if (!wallet.connecting) void wallet.connectViaPasskey(); }} title="Create or connect a passkey smart wallet — no seed phrase" style={{ fontSize: 12.5, fontWeight: 800, flexShrink: 0, whiteSpace: 'nowrap', padding: '8px 13px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>⚡ Face ID</div>
+        <div onClick={() => { if (!wallet.connecting) void wallet.connectViaPasskey(); }} title="Create or connect a passkey smart wallet — no seed phrase" style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12.5, fontWeight: 800, flexShrink: 0, whiteSpace: 'nowrap', padding: '8px 13px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
+          <BoltIcon sx={{ fontSize: 16 }} />
+          <span>Face ID</span>
+        </div>
       )}
       <div style={{ position: 'relative', flexShrink: 0 }}>
         <div onClick={td.onWalletClick} title={wallet.address ? 'Manage wallet' : 'Connect wallet'} style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
           <span style={{ width: 9, height: 9, borderRadius: '50%', background: wallet.address ? '#13c06a' : 'rgba(26,19,5,.3)' }} />
-          {wallet.connecting ? 'Connecting…' : wallet.address ? `${wallet.walletKind === 'passkey' ? '⚡ ' : ''}${shorten(wallet.address)}` : 'Connect'}
+          {wallet.connecting ? (
+            'Connecting…'
+          ) : wallet.address ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+              {wallet.walletKind === 'passkey' && <BoltIcon sx={{ fontSize: 14 }} />}
+              <span>{shorten(wallet.address)}</span>
+            </span>
+          ) : (
+            'Connect'
+          )}
           {wallet.address && <span style={{ fontSize: 9, marginLeft: -2, transform: st.walletMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>▾</span>}
         </div>
         {wallet.address && st.walletMenuOpen && <WalletMenu address={wallet.address} />}

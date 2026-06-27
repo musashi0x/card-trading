@@ -9,6 +9,9 @@ import { DISPLAY, INK, PAGE_SIZE } from '@/components/topdeck/theme';
 import TuneIcon from '@mui/icons-material/Tune';
 import CloseIcon from '@mui/icons-material/Close';
 import SearchOffIcon from '@mui/icons-material/SearchOff';
+import TimerIcon from '@mui/icons-material/Timer';
+import BoltIcon from '@mui/icons-material/Bolt';
+import ShieldIcon from '@mui/icons-material/Shield';
 
 export default function BrowsePage() {
   const td = useTopDeck();
@@ -52,14 +55,16 @@ export default function BrowsePage() {
   const catOpts = ['Pokémon', 'Sports', 'Other'].map((v) => ({ label: v, value: v, active: fc.cats.includes(v), onClick: () => td.toggleCat(v) }));
   const rarityOpts: Array<[Rarity, string, string]> = [['common', 'Common', '#13c06a'], ['rare', 'Rare', '#2d5bff'], ['epic', 'Epic', '#7c3aed'], ['legendary', 'Legendary', '#e0a92e']];
   const priceOpts: Array<[string, string]> = [['any', 'Any price'], ['lt100', 'Under $100'], ['100to1k', '$100 – $1,000'], ['gt1k', '$1,000+']];
-  const statusOpts: Array<{ key: 'ending' | 'buyNow' | 'graded'; label: string }> = [
-    { key: 'ending', label: '⏱ Ending soon' }, { key: 'buyNow', label: '⚡ Buy Now available' }, { key: 'graded', label: '🛡 Graded only' },
+  const statusOpts: Array<{ key: 'ending' | 'buyNow' | 'graded'; label: ReactNode }> = [
+    { key: 'ending', label: <><TimerIcon sx={{ fontSize: 15 }} /> Ending soon</> },
+    { key: 'buyNow', label: <><BoltIcon sx={{ fontSize: 15 }} /> Buy Now available</> },
+    { key: 'graded', label: <><ShieldIcon sx={{ fontSize: 15 }} /> Graded only</> },
   ];
   const sortOpts: Array<[string, string]> = [['ending', 'Ending soon'], ['priceUp', 'Price: low → high'], ['priceDown', 'Price: high → low'], ['bids', 'Most bids']];
   const activeCount = fc.cats.length + fc.rarities.length + (fc.graded ? 1 : 0) + (fc.buyNow ? 1 : 0) + (fc.ending ? 1 : 0) + (fc.price !== 'any' ? 1 : 0) + (query ? 1 : 0);
 
-  const filterChip = (key: string, label: string, active: boolean, onClick: () => void, extra?: ReactNode) => (
-    <div key={key} onClick={onClick} style={{ display: extra ? 'flex' : undefined, alignItems: 'center', gap: 9, fontSize: 12.5, fontWeight: 700, padding: '8px 12px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer', ...chipStyle(active) }}>
+  const filterChip = (key: string, label: ReactNode, active: boolean, onClick: () => void, extra?: ReactNode) => (
+    <div key={key} onClick={onClick} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12.5, fontWeight: 700, padding: '8px 12px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer', ...chipStyle(active) }}>
       {extra}{label}
     </div>
   );

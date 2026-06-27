@@ -1,9 +1,15 @@
 'use client';
 
 import { useRef } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { useTopDeck } from '@/components/topdeck/TopDeckProvider';
 import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
+import BoltIcon from '@mui/icons-material/Bolt';
+import ShieldIcon from '@mui/icons-material/Shield';
+import CelebrationIcon from '@mui/icons-material/Celebration';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import GavelIcon from '@mui/icons-material/Gavel';
+import TimerIcon from '@mui/icons-material/Timer';
 import { money, rarityMeta, rarityArt, mapRarity } from '@/components/topdeck/lib';
 import { chipStyle } from '@/components/topdeck/shared/CardTile';
 import type { Rarity } from '@/components/topdeck/lib';
@@ -22,8 +28,8 @@ export default function SellPage() {
   const step1Valid = st.sellMode === 'mint' ? f.title.trim().length > 0 && !!f.image : !!f.cardId;
   const step2Valid = startN > 0 && (!f.buyNowOn || buyN > startN) && (!f.graded || (f.grade || '').trim().length > 0);
   const previewArt = f.image ? `center/cover no-repeat url("${f.image}")` : rarityArt(f.rarity);
-  const chip = (active: boolean, label: string, onClick: () => void) => (
-    <div key={label} onClick={onClick} style={{ fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...chipStyle(active) }}>{label}</div>
+  const chip = (active: boolean, label: ReactNode, onClick: () => void, key?: string | number) => (
+    <div key={key} onClick={onClick} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...chipStyle(active) }}>{label}</div>
   );
   const inputStyle: CSSProperties = { width: '100%', fontFamily: SANS, fontSize: 15, fontWeight: 600, padding: '13px 15px', border: `3px solid ${INK}`, borderRadius: 11, outline: 'none', background: '#fff', color: INK };
 
@@ -31,7 +37,9 @@ export default function SellPage() {
     return (
       <div className="m-pad" style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
         <div style={{ maxWidth: 520, margin: '30px auto 0', textAlign: 'center' }}>
-          <div style={{ fontSize: 56 }}>🎉</div>
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
+            <CelebrationIcon sx={{ fontSize: 56, color: '#ff4d3d' }} />
+          </div>
           <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: '10px 0 0' }}>Your auction is live!</h1>
           <div style={{ fontSize: 14.5, color: 'rgba(26,19,5,.6)', fontWeight: 500, marginTop: 8 }}>Listed on-chain — the card is locked in escrow until it sells or you cancel.</div>
           {st.lastHash && (
@@ -227,14 +235,14 @@ export default function SellPage() {
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>AUCTION LENGTH</div>
                 <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
-                  {([[1, '1 day'], [3, '3 days'], [7, '7 days']] as Array<[number, string]>).map(([v, l]) => chip(f.duration === v, l, () => td.setForm('duration', v)))}
+                  {([[1, '1 day'], [3, '3 days'], [7, '7 days']] as Array<[number, string]>).map(([v, l]) => chip(f.duration === v, l, () => td.setForm('duration', v), v))}
                 </div>
               </div>
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>DELIVERY</div>
                 <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
-                  {chip(f.fulfillment === 'digital', '⚡ Digital · instant', () => td.setForm('fulfillment', 'digital'))}
-                  {chip(f.fulfillment === 'physical', '🛡 Physical · escrow', () => td.setForm('fulfillment', 'physical'))}
+                  {chip(f.fulfillment === 'digital', <><BoltIcon sx={{ fontSize: 16 }} /> Digital · instant</>, () => td.setForm('fulfillment', 'digital'), 'digital')}
+                  {chip(f.fulfillment === 'physical', <><ShieldIcon sx={{ fontSize: 16 }} /> Physical · escrow</>, () => td.setForm('fulfillment', 'physical'), 'physical')}
                 </div>
                 <div style={{ fontSize: 11.5, color: 'rgba(26,19,5,.55)', marginTop: 7, maxWidth: 460 }}>
                   {f.fulfillment === 'physical'
@@ -257,7 +265,10 @@ export default function SellPage() {
                   </div>
                 ))}
               </div>
-              <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', padding: '12px 18px', background: '#fff7ec', borderTop: `2.5px solid ${INK}` }}>🛡 Your card ships to the TopDeck Vault for authentication before payout. Listing locks one copy in the settlement contract.</div>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', padding: '12px 18px', background: '#fff7ec', borderTop: `2.5px solid ${INK}` }}>
+                <ShieldIcon sx={{ fontSize: 14, flexShrink: 0, marginTop: '2px' }} />
+                <span>Your card ships to the TopDeck Vault for authentication before payout. Listing locks one copy in the settlement contract.</span>
+              </div>
             </div>
           )}
 
@@ -284,7 +295,21 @@ export default function SellPage() {
             {st.sellStep === 3 && (
               <>
                 <div onClick={td.sellBack} style={{ fontWeight: 800, fontSize: 15, padding: '14px 22px', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer', background: '#fff' }}>← Back</div>
-                <div onClick={() => !st.publishing && td.publishListing()} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 30px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.publishing ? 'default' : 'pointer', background: '#13c06a', color: '#fff', opacity: st.publishing ? 0.7 : 1 }}>{st.publishing ? (st.sellMode === 'mint' && !st.mintedCard ? 'Minting…' : 'Publishing…') : st.sellMode === 'mint' ? '✨ Mint & publish' : '🔨 Publish auction'}</div>
+                <div onClick={() => !st.publishing && td.publishListing()} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 30px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.publishing ? 'default' : 'pointer', background: '#13c06a', color: '#fff', opacity: st.publishing ? 0.7 : 1 }}>
+                  {st.publishing ? (
+                    st.sellMode === 'mint' && !st.mintedCard ? 'Minting…' : 'Publishing…'
+                  ) : st.sellMode === 'mint' ? (
+                    <>
+                      <AutoAwesomeIcon sx={{ fontSize: 16 }} />
+                      <span>Mint & publish</span>
+                    </>
+                  ) : (
+                    <>
+                      <GavelIcon sx={{ fontSize: 16 }} />
+                      <span>Publish auction</span>
+                    </>
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -305,7 +330,10 @@ export default function SellPage() {
                   <div style={{ fontSize: 10.5, color: 'rgba(26,19,5,.5)', fontWeight: 600 }}>Starting bid</div>
                   <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 22 }}>{startN > 0 ? money(startN) : '$0'}</div>
                 </div>
-                <div style={{ fontSize: 11, fontWeight: 800, padding: '4px 9px', borderRadius: 7, background: INK, color: '#fff' }}>⏱ {durLabel}</div>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 800, padding: '4px 9px', borderRadius: 7, background: INK, color: '#fff' }}>
+                  <TimerIcon sx={{ fontSize: 13 }} />
+                  <span>{durLabel}</span>
+                </div>
               </div>
               {f.buyNowOn && buyN > 0 && (
                 <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: '#0a5e34' }}>Buy now · {money(buyN)}</div>

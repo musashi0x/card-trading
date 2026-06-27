@@ -5,6 +5,17 @@ import { useParams } from 'next/navigation';
 import { useTopDeck, PAY_ASSETS, type PayAssetId } from '@/components/topdeck/TopDeckProvider';
 import { type TopCard, money, fmtLeft, fmtAgo, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
 import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
+import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
+import BoltIcon from '@mui/icons-material/Bolt';
+import CelebrationIcon from '@mui/icons-material/Celebration';
+import FavoriteIcon from '@mui/icons-material/Favorite';
+import FavoriteBorderIcon from '@mui/icons-material/FavoriteBorder';
+import ZoomInIcon from '@mui/icons-material/ZoomIn';
+import AssignmentIcon from '@mui/icons-material/Assignment';
+import ShareIcon from '@mui/icons-material/Share';
+import TimerIcon from '@mui/icons-material/Timer';
+import ShieldIcon from '@mui/icons-material/Shield';
+import StarIcon from '@mui/icons-material/Star';
 
 function renderPayWith(c: TopCard, st: ReturnType<typeof useTopDeck>['state'], td: ReturnType<typeof useTopDeck>) {
   const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
@@ -110,15 +121,17 @@ function renderSettlement(c: TopCard) {
 
 export default function CardDetailPage() {
   const params = useParams<{ id: string }>();
-  const id = params.id;
+  const id = params?.id;
   const td = useTopDeck();
   const st = td.state;
 
   useEffect(() => {
-    td.viewCard(id);
+    if (id) {
+      td.viewCard(id);
+    }
   }, [id]);
 
-  const c = td.getCard(id);
+  const c = id ? td.getCard(id) : undefined;
 
   if (!c) {
     return (
@@ -142,9 +155,9 @@ export default function CardDetailPage() {
   const min = c.currentBid + increment(c.currentBid);
   const status = st.status[c.id];
   const banner =
-    status === 'winning' ? { t: "🏆 You're the top bidder — hold tight!", bg: '#bff3d4', col: '#0a5e34' }
-      : status === 'outbid' ? { t: "⚡ You've been outbid — raise your bid to win", bg: '#ffd1cc', col: '#a3160a' }
-        : status === 'won' ? { t: '🎉 Purchased — heading to the TopDeck Vault', bg: '#bff3d4', col: '#0a5e34' }
+    status === 'winning' ? { icon: <EmojiEventsIcon sx={{ fontSize: 18 }} />, t: "You're the top bidder — hold tight!", bg: '#bff3d4', col: '#0a5e34' }
+      : status === 'outbid' ? { icon: <BoltIcon sx={{ fontSize: 18 }} />, t: "You've been outbid — raise your bid to win", bg: '#ffd1cc', col: '#a3160a' }
+        : status === 'won' ? { icon: <CelebrationIcon sx={{ fontSize: 18 }} />, t: 'Purchased — heading to the TopDeck Vault', bg: '#bff3d4', col: '#0a5e34' }
           : null;
   const watched = st.watched[c.id];
   const bids = c.bids.map((b, i) => ({
@@ -163,12 +176,21 @@ export default function CardDetailPage() {
         <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
           <div style={{ position: 'relative', aspectRatio: '3 / 4', borderRadius: 18, border: `3px solid ${INK}`, boxShadow: `7px 7px 0 ${INK}`, background: c.art, overflow: 'hidden' }}>
             <div style={{ position: 'absolute', top: 14, left: 14, fontSize: 12, fontWeight: 800, letterSpacing: '.03em', padding: '5px 13px', borderRadius: 8, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
-            <div onClick={(e) => td.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, fontSize: 18, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>♥</div>
+            <div onClick={(e) => td.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>
+              {watched ? <FavoriteIcon sx={{ fontSize: 20 }} /> : <FavoriteBorderIcon sx={{ fontSize: 20 }} />}
+            </div>
             <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 16, background: 'linear-gradient(transparent,rgba(26,19,5,.55))', color: '#fff', fontWeight: 700, fontSize: 13 }}>{c.grade}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            {['🔍 Zoom', '📋 Card info', '↗ Share'].map((t) => (
-              <div key={t} style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: 700, padding: 9, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9 }}>{t}</div>
+            {[
+              { text: 'Zoom', icon: <ZoomInIcon sx={{ fontSize: 15 }} /> },
+              { text: 'Card info', icon: <AssignmentIcon sx={{ fontSize: 15 }} /> },
+              { text: 'Share', icon: <ShareIcon sx={{ fontSize: 15 }} /> }
+            ].map((item) => (
+              <div key={item.text} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, fontSize: 11, fontWeight: 700, padding: 9, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9 }}>
+                {item.icon}
+                <span>{item.text}</span>
+              </div>
             ))}
           </div>
         </div>
@@ -184,7 +206,10 @@ export default function CardDetailPage() {
           </div>
 
           {banner && (
-            <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 9, fontSize: 13, fontWeight: 700, padding: '11px 15px', borderRadius: 11, border: `2.5px solid ${INK}`, background: banner.bg, color: banner.col }}>{banner.t}</div>
+            <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 9, fontSize: 13, fontWeight: 700, padding: '11px 15px', borderRadius: 11, border: `2.5px solid ${INK}`, background: banner.bg, color: banner.col }}>
+              {banner.icon}
+              <span>{banner.t}</span>
+            </div>
           )}
 
           <div style={{ marginTop: 18, background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, padding: '20px 22px' }}>
@@ -196,7 +221,10 @@ export default function CardDetailPage() {
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>Auction ends in</div>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, padding: '6px 14px', borderRadius: 10, border: `2.5px solid ${INK}`, marginTop: 5, background: ending ? '#ff4d3d' : INK, color: '#fff' }}>⏱ {fmtLeft(left)}</div>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, padding: '6px 14px', borderRadius: 10, border: `2.5px solid ${INK}`, marginTop: 5, background: ending ? '#ff4d3d' : INK, color: '#fff' }}>
+                  <TimerIcon sx={{ fontSize: 22 }} />
+                  <span>{fmtLeft(left)}</span>
+                </div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 20 }}>
@@ -209,9 +237,14 @@ export default function CardDetailPage() {
               <>
                 <div
                   onClick={st.paying ? undefined : td.escrowBuy}
-                  style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: st.paying ? 'rgba(26,19,5,.35)' : '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 12, fontSize: 15, fontWeight: 800, padding: 15, background: st.paying ? 'rgba(26,19,5,.35)' : '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
                 >
-                  {st.paying ? 'Locking funds in escrow…' : `🛡 Buy with escrow · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                  {st.paying ? 'Locking funds in escrow…' : (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <ShieldIcon sx={{ fontSize: 18 }} />
+                      <span>Buy with escrow · {money(c.buyNow > 0 ? c.buyNow : c.currentBid)}</span>
+                    </span>
+                  )}
                 </div>
                 <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
                   {st.payErr ?? 'Funds held on-chain until you confirm the card arrives'}
@@ -225,19 +258,27 @@ export default function CardDetailPage() {
                 <>
                   <div
                     onClick={st.paying ? undefined : td.payWithPasskey}
-                    style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: st.paying ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 12, fontSize: 15, fontWeight: 800, padding: 15, background: st.paying ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
                   >
-                    {st.paying ? 'Confirming…' : `⚡ Pay with Face ID · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                    {st.paying ? 'Confirming…' : (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <BoltIcon sx={{ fontSize: 18 }} />
+                        <span>Pay with Face ID · {money(c.buyNow > 0 ? c.buyNow : c.currentBid)}</span>
+                      </span>
+                    )}
                   </div>
                   <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
                     {st.payErr ?? 'No seed phrase · no extension · fees sponsored'}
                   </div>
                 </>
               )}
-            <div style={{ textAlign: 'center', fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>
-              {c.fulfillment === 'physical'
-                ? '🛡 Escrow-protected · dispute resolution by the TopDeck arbiter'
-                : '🛡 Buyer protection · authenticated by TopDeck Vault before shipping'}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>
+              <ShieldIcon sx={{ fontSize: 14 }} />
+              <span>
+                {c.fulfillment === 'physical'
+                  ? 'Escrow-protected · dispute resolution by the TopDeck arbiter'
+                  : 'Buyer protection · authenticated by TopDeck Vault before shipping'}
+              </span>
             </div>
           </div>
 
@@ -248,7 +289,10 @@ export default function CardDetailPage() {
             <div style={{ width: 42, height: 42, borderRadius: 10, background: c.sellerArt, border: `2.5px solid ${INK}` }} />
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 14, fontWeight: 700 }}>{c.seller}</div>
-              <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>★ {c.sellerRating} · {c.sellerSales} sales</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>
+                <StarIcon sx={{ fontSize: 14, color: '#e0a92e' }} />
+                <span>{c.sellerRating} · {c.sellerSales} sales</span>
+              </div>
             </div>
             <div style={{ fontSize: 12, fontWeight: 700, padding: '8px 14px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>View store</div>
           </div>

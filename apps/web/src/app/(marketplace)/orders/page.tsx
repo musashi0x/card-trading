@@ -1,9 +1,16 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import { useTopDeck } from '@/components/topdeck/TopDeckProvider';
 import { INK, DISPLAY } from '@/components/topdeck/theme';
 import { money, fmtLeft, rarityArt, mapRarity } from '@/components/topdeck/lib';
 import type { OrderWithCard } from '@/lib/api';
+import CheckIcon from '@mui/icons-material/Check';
+import LocalShippingIcon from '@mui/icons-material/LocalShipping';
+import WarningIcon from '@mui/icons-material/Warning';
+import TimerIcon from '@mui/icons-material/Timer';
+import UndoIcon from '@mui/icons-material/Undo';
+import RefreshIcon from '@mui/icons-material/Refresh';
 
 function orderStatusStyle(status: OrderWithCard['status']): { bg: string; fg: string; label: string } {
   switch (status) {
@@ -30,10 +37,11 @@ function renderOrderCard(o: OrderWithCard, address: string | null, td: ReturnTyp
   const overdue = deadlineMs > 0 && deadlineMs <= st.now;
   const classic = td.wallet.walletKind === 'classic';
 
-  const btn = (label: string, onClick: () => void, bg: string, fg = '#fff') => (
+  const btn = (label: ReactNode, onClick: () => void, bg: string, fg = '#fff') => (
     <div
       onClick={() => { if (!busy) onClick(); }}
       style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
         fontFamily: DISPLAY, fontWeight: 800, fontSize: 13.5, padding: '10px 14px', textAlign: 'center',
         background: busy ? '#cfc8b8' : bg, color: fg, border: `2.5px solid ${INK}`, borderRadius: 10,
         boxShadow: `2px 2px 0 ${INK}`, cursor: busy ? 'default' : 'pointer',
@@ -62,19 +70,19 @@ function renderOrderCard(o: OrderWithCard, address: string | null, td: ReturnTyp
         {/* Role-based actions */}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {!st.ordersArbiter && role === 'buyer' && active &&
-            btn('✓ Confirm receipt', () => void td.doOrderAction('confirm_receipt', o), '#13c06a')}
+            btn(<><CheckIcon sx={{ fontSize: 16 }} /> Confirm receipt</>, () => void td.doOrderAction('confirm_receipt', o), '#13c06a')}
           {!st.ordersArbiter && role === 'seller' && o.status === 'funded' &&
-            btn('📦 Mark shipped', () => void td.doOrderAction('mark_shipped', o), '#2d5bff')}
+            btn(<><LocalShippingIcon sx={{ fontSize: 16 }} /> Mark shipped</>, () => void td.doOrderAction('mark_shipped', o), '#2d5bff')}
           {!st.ordersArbiter && active &&
-            btn('⚠ Open dispute', () => void td.doOrderAction('dispute', o), '#fff', INK)}
+            btn(<><WarningIcon sx={{ fontSize: 16 }} /> Open dispute</>, () => void td.doOrderAction('dispute', o), '#fff', INK)}
           {!st.ordersArbiter && active && overdue && classic &&
-            btn('⏱ Claim (timeout)', () => void td.doOrderAction('claim_timeout', o), '#e0a92e', INK)}
+            btn(<><TimerIcon sx={{ fontSize: 16 }} /> Claim (timeout)</>, () => void td.doOrderAction('claim_timeout', o), '#e0a92e', INK)}
 
           {/* Arbiter view */}
           {st.ordersArbiter && o.status === 'disputed' && (
             <>
-              {btn('↩ Refund buyer', () => void td.resolveDispute(o, true), '#ff4d3d')}
-              {btn('→ Release seller', () => void td.resolveDispute(o, false), '#13c06a')}
+              {btn(<><UndoIcon sx={{ fontSize: 16 }} /> Refund buyer</>, () => void td.resolveDispute(o, true), '#ff4d3d')}
+              {btn(<><CheckIcon sx={{ fontSize: 16 }} /> Release seller</>, () => void td.resolveDispute(o, false), '#13c06a')}
             </>
           )}
 
@@ -114,7 +122,10 @@ export default function OrdersPage() {
     <div style={{ maxWidth: 920, margin: '0 auto', padding: '28px 20px 80px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
         <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, flex: 1 }}>Escrow orders</div>
-        <div onClick={() => td.orders.refresh()} style={{ fontSize: 13, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>↻ Refresh</div>
+        <div onClick={() => td.orders.refresh()} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>
+          <RefreshIcon sx={{ fontSize: 16 }} />
+          <span>Refresh</span>
+        </div>
       </div>
       <p style={{ color: '#5c5443', fontSize: 14, margin: '0 0 18px', maxWidth: 620 }}>
         Physical cards settle through a blockchain escrow: your funds are held by the contract

@@ -3,6 +3,14 @@
 import { useTopDeck } from '@/components/topdeck/TopDeckProvider';
 import { PROFILE_STATS, PROFILE_ACHIEVEMENTS, PROFILE_ACTIVITY, PROFILE_REVIEWS } from '@/components/topdeck/panels';
 import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
+import ShieldIcon from '@mui/icons-material/Shield';
+import LocationOnIcon from '@mui/icons-material/LocationOn';
+import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
+import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
+import LinkIcon from '@mui/icons-material/Link';
+import ShareIcon from '@mui/icons-material/Share';
+import StarIcon from '@mui/icons-material/Star';
+import LockIcon from '@mui/icons-material/Lock';
 
 export default function ProfilePage() {
   const td = useTopDeck();
@@ -21,19 +29,39 @@ export default function ProfilePage() {
           <div style={{ flex: 1, minWidth: 200, paddingTop: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
               <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>{p.username}</h1>
-              <span style={{ fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 7, background: '#cfe0ff', border: `2.5px solid ${INK}`, whiteSpace: 'nowrap' }}>🛡 VERIFIED</span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 7, background: '#cfe0ff', border: `2.5px solid ${INK}`, whiteSpace: 'nowrap' }}>
+                <ShieldIcon sx={{ fontSize: 13 }} />
+                <span>VERIFIED</span>
+              </span>
             </div>
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.55)', marginTop: 9 }}>
-              <span>📍 {p.location}</span>
-              <span>🗓 Member since {p.memberSince}</span>
-              <span>🏅 #47 collector this season</span>
-              {hasWebsite && <span>🔗 {p.website}</span>}
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <LocationOnIcon sx={{ fontSize: 14 }} />
+                <span>{p.location}</span>
+              </span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <CalendarMonthIcon sx={{ fontSize: 14 }} />
+                <span>Member since {p.memberSince}</span>
+              </span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <EmojiEventsIcon sx={{ fontSize: 14 }} />
+                <span>#47 collector this season</span>
+              </span>
+              {hasWebsite && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <LinkIcon sx={{ fontSize: 14 }} />
+                  <span>{p.website}</span>
+                </span>
+              )}
             </div>
             <div style={{ fontSize: 13.5, fontWeight: 500, color: 'rgba(26,19,5,.7)', marginTop: 11, maxWidth: 540, lineHeight: 1.45 }}>{p.bio}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, paddingTop: 14 }}>
             <div onClick={td.startEditProfile} style={{ fontSize: 13, fontWeight: 800, padding: '11px 18px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: '2px 2px 0 #ff4d3d', cursor: 'pointer' }}>Edit profile</div>
-            <div style={{ fontSize: 13, fontWeight: 800, padding: '11px 16px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, cursor: 'pointer' }}>↗ Share</div>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13, fontWeight: 800, padding: '11px 16px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, cursor: 'pointer' }}>
+              <ShareIcon sx={{ fontSize: 15 }} />
+              <span>Share</span>
+            </div>
           </div>
         </div>
       </div>
@@ -60,7 +88,11 @@ export default function ProfilePage() {
               </div>
               <div style={{ fontWeight: 800, fontSize: 13.5, marginTop: 9, color: a.got ? INK : 'rgba(26,19,5,.5)' }}>{a.name}</div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 3, lineHeight: 1.3 }}>{a.desc}</div>
-              {!a.got && <div style={{ position: 'absolute', top: 9, right: 11, fontSize: 13 }}>🔒</div>}
+              {!a.got && (
+                <div style={{ position: 'absolute', top: 9, right: 11 }}>
+                  <LockIcon sx={{ fontSize: 15, color: 'rgba(26,19,5,.3)' }} />
+                </div>
+              )}
             </div>
           );
         })}
@@ -88,7 +120,13 @@ export default function ProfilePage() {
         </div>
 
         <div>
-          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, marginBottom: 14 }}>Reviews · ★ 4.7</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, marginBottom: 14 }}>
+            <span>Reviews · </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+              <StarIcon sx={{ fontSize: 18, color: '#e0a92e' }} />
+              <span>4.7</span>
+            </span>
+          </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {PROFILE_REVIEWS.map((r, i) => (
               <div key={i} style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '15px 16px' }}>
