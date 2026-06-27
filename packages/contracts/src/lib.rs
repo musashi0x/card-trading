@@ -36,6 +36,7 @@ pub enum Error {
     NotBuyer = 6,
     WrongListing = 7,
     BadAmount = 8,
+    RoyaltyTooHigh = 9,
 }
 
 #[contracttype]
@@ -45,6 +46,18 @@ pub struct Listing {
     pub card_token: Address,
     pub price: i128,
     pub status: u32,
+    /// Creator paid a royalty on resale; equals `seller` when the card has no
+    /// registered royalty (then `royalty_bps` is 0 and no royalty is taken).
+    pub creator: Address,
+    pub royalty_bps: u32,
+}
+
+/// Per-card royalty registration: who gets paid and how much, in basis points.
+#[contracttype]
+#[derive(Clone)]
+pub struct RoyaltyConfig {
+    pub creator: Address,
+    pub bps: u32,
 }
 
 #[contracttype]
@@ -63,10 +76,12 @@ enum DataKey {
     Platform,
     Usdc,
     FeeBps,
+    MaxRoyaltyBps,
     ListingCount,
     OfferCount,
     Listing(u32),
     Offer(u32),
+    Royalty(Address),
 }
 
 #[contract]
@@ -76,19 +91,61 @@ pub struct Marketplace;
 impl Marketplace {
     // --- 3.2 init ---
 
-    /// One-time setup: platform fee collector, USDC token, fee in basis points.
-    pub fn init(env: Env, admin: Address, platform: Address, usdc_token: Address, fee_bps: u32) {
+    /// One-time setup: platform fee collector, USDC token, fee and the royalty
+    /// ceiling, both in basis points. `fee_bps + max_royalty_bps` must stay below
+    /// 100% so every settlement leaves the seller a non-negative share.
+    pub fn init(
+        env: Env,
+        admin: Address,
+        platform: Address,
+        usdc_token: Address,
+        fee_bps: u32,
+        max_royalty_bps: u32,
+    ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with(&env, Error::AlreadyInitialized);
         }
         admin.require_auth();
+        if (fee_bps as i128) + (max_royalty_bps as i128) >= BPS_DENOM {
+            panic_with(&env, Error::BadAmount);
+        }
         let s = env.storage().instance();
         s.set(&DataKey::Admin, &admin);
         s.set(&DataKey::Platform, &platform);
         s.set(&DataKey::Usdc, &usdc_token);
         s.set(&DataKey::FeeBps, &fee_bps);
+        s.set(&DataKey::MaxRoyaltyBps, &max_royalty_bps);
         s.set(&DataKey::ListingCount, &0u32);
         s.set(&DataKey::OfferCount, &0u32);
+    }
+
+    // --- royalty registry ---
+
+    /// Admin registers (or updates) the creator royalty for a card. Rejected if
+    /// `royalty_bps` exceeds the ceiling fixed at `init`. Open listings keep the
+    /// royalty they snapshotted at `list` time, so this only affects future ones.
+    pub fn set_royalty(env: Env, card_token: Address, creator: Address, royalty_bps: u32) {
+        require_init(&env);
+        admin(&env).require_auth();
+        let max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxRoyaltyBps)
+            .unwrap_or(0);
+        if royalty_bps > max {
+            panic_with(&env, Error::RoyaltyTooHigh);
+        }
+        let cfg = RoyaltyConfig {
+            creator: creator.clone(),
+            bps: royalty_bps,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Royalty(card_token.clone()), &cfg);
+        env.events().publish(
+            (Symbol::new(&env, "royalty"), card_token),
+            (creator, royalty_bps),
+        );
     }
 
     // --- 3.3 list / cancel_listing ---
@@ -107,12 +164,26 @@ impl Marketplace {
             &ONE_CARD,
         );
 
+        // Snapshot the card's registered royalty onto the listing so later
+        // registry changes can't alter an already-open listing's economics. A
+        // card with no registration defaults to no royalty (creator = seller).
+        let (creator, royalty_bps) = match env
+            .storage()
+            .persistent()
+            .get::<_, RoyaltyConfig>(&DataKey::Royalty(card_token.clone()))
+        {
+            Some(cfg) => (cfg.creator, cfg.bps),
+            None => (seller.clone(), 0u32),
+        };
+
         let id = next_id(&env, &DataKey::ListingCount);
         let listing = Listing {
             seller: seller.clone(),
             card_token,
             price,
             status: STATUS_OPEN,
+            creator,
+            royalty_bps,
         };
         env.storage()
             .persistent()
@@ -217,19 +288,20 @@ impl Marketplace {
         }
 
         // Funds are already escrowed in the contract; distribute from custody.
+        let contract = env.current_contract_address();
         let fee = split_fee(&env, offer.amount);
-        let seller_amount = offer.amount - fee;
+        let royalty = royalty_for(&env, &listing, offer.amount);
+        let seller_amount = offer.amount - fee - royalty;
         let u = usdc(&env);
-        u.transfer(
-            &env.current_contract_address(),
-            &listing.seller,
-            &seller_amount,
-        );
+        u.transfer(&contract, &listing.seller, &seller_amount);
         if fee > 0 {
-            u.transfer(&env.current_contract_address(), &platform(&env), &fee);
+            u.transfer(&contract, &platform(&env), &fee);
+        }
+        if royalty > 0 {
+            u.transfer(&contract, &listing.creator, &royalty);
         }
         token::TokenClient::new(&env, &listing.card_token).transfer(
-            &env.current_contract_address(),
+            &contract,
             &offer.buyer,
             &ONE_CARD,
         );
@@ -245,7 +317,14 @@ impl Marketplace {
 
         env.events().publish(
             (Symbol::new(&env, "settle"), offer.listing_id),
-            (offer.buyer, listing.seller, offer.amount, fee),
+            (
+                offer.buyer,
+                listing.seller,
+                offer.amount,
+                fee,
+                royalty,
+                listing.creator,
+            ),
         );
     }
 
@@ -261,12 +340,16 @@ impl Marketplace {
         }
 
         let fee = split_fee(&env, listing.price);
-        let seller_amount = listing.price - fee;
+        let royalty = royalty_for(&env, &listing, listing.price);
+        let seller_amount = listing.price - fee - royalty;
         let u = usdc(&env);
         // Buyer pays directly; the trade is atomic so no intermediate escrow is needed.
         u.transfer(&buyer, &listing.seller, &seller_amount);
         if fee > 0 {
             u.transfer(&buyer, &platform(&env), &fee);
+        }
+        if royalty > 0 {
+            u.transfer(&buyer, &listing.creator, &royalty);
         }
         token::TokenClient::new(&env, &listing.card_token).transfer(
             &env.current_contract_address(),
@@ -280,7 +363,14 @@ impl Marketplace {
             .set(&DataKey::Listing(listing_id), &listing);
         env.events().publish(
             (Symbol::new(&env, "settle"), listing_id),
-            (buyer, listing.seller, listing.price, fee),
+            (
+                buyer,
+                listing.seller.clone(),
+                listing.price,
+                fee,
+                royalty,
+                listing.creator,
+            ),
         );
     }
 
@@ -296,6 +386,25 @@ impl Marketplace {
 
     pub fn fee_bps(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
+    }
+
+    pub fn max_royalty_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxRoyaltyBps)
+            .unwrap_or(0)
+    }
+
+    /// The registered royalty for a card. An unregistered card reports `bps = 0`
+    /// with `card_token` itself as a placeholder creator (no royalty is taken).
+    pub fn get_royalty_view(env: Env, card_token: Address) -> RoyaltyConfig {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Royalty(card_token.clone()))
+            .unwrap_or(RoyaltyConfig {
+                creator: card_token,
+                bps: 0,
+            })
     }
 }
 
@@ -316,9 +425,27 @@ fn platform(env: &Env) -> Address {
     env.storage().instance().get(&DataKey::Platform).unwrap()
 }
 
+fn admin(env: &Env) -> Address {
+    env.storage().instance().get(&DataKey::Admin).unwrap()
+}
+
 fn split_fee(env: &Env, amount: i128) -> i128 {
     let bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
     amount * (bps as i128) / BPS_DENOM
+}
+
+fn split_royalty(amount: i128, bps: u32) -> i128 {
+    amount * (bps as i128) / BPS_DENOM
+}
+
+/// Royalty owed on a settlement: nothing on a primary sale (seller is the
+/// creator), otherwise the listing's snapshotted rate applied to `amount`.
+fn royalty_for(_env: &Env, listing: &Listing, amount: i128) -> i128 {
+    if listing.royalty_bps == 0 || listing.seller == listing.creator {
+        0
+    } else {
+        split_royalty(amount, listing.royalty_bps)
+    }
 }
 
 fn next_id(env: &Env, key: &DataKey) -> u32 {

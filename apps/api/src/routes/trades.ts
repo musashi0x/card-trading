@@ -12,7 +12,12 @@ export const tradesRouter: Router = Router();
 tradesRouter.get('/', async (_req, res, next) => {
   try {
     const rows = await db.select().from(schema.trades).orderBy(desc(schema.trades.settledAt));
-    res.json(rows);
+    // Surface the full split: price = seller net + platform fee + creator royalty.
+    const withNet = rows.map((t) => ({
+      ...t,
+      sellerNetUsdc: (Number(t.priceUsdc) - Number(t.feeUsdc) - Number(t.royaltyUsdc)).toFixed(7),
+    }));
+    res.json(withNet);
   } catch (err) {
     next(err);
   }

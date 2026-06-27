@@ -8,15 +8,20 @@
  */
 
 import {
+  Address,
   Asset,
   BASE_FEE,
+  Contract,
   Horizon,
+  Keypair,
   Operation,
   TransactionBuilder,
+  nativeToScVal,
   rpc,
   scValToNative,
   type xdr,
 } from '@stellar/stellar-sdk';
+import { MarketplaceContract } from '@cardmkt/shared';
 import { env } from './env.js';
 
 export const rpcServer = new rpc.Server(env.stellar.rpcUrl, {
@@ -35,19 +40,45 @@ export class PreflightError extends Error {
   }
 }
 
+/**
+ * A contract call that depends on state written by a just-submitted classic tx
+ * can transiently fail because the soroban RPC's ledger view briefly lags
+ * Horizon. Two shapes show up right after minting + distributing a card, before
+ * its `list`:
+ *  - `Account not found` from `getAccount` — the freshly funded seller isn't
+ *    indexed by the RPC yet (Horizon already reports it).
+ *  - `Storage, MissingValue` from simulation — the seller's just-minted card
+ *    balance isn't visible yet when `list` simulates its transfer.
+ * Both clear within a ledger or two, so they're worth a short retry, not a 500.
+ */
+function isLaggingLedgerError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /MissingValue/.test(msg) || /Account not found/i.test(msg);
+}
+
 /** Build, simulate, and assemble a contract-call tx; return unsigned XDR. */
 export async function buildContractTx(source: string, operation: xdr.Operation): Promise<string> {
-  const account = await rpcServer.getAccount(source);
-  const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: env.stellar.networkPassphrase,
-  })
-    .addOperation(operation)
-    .setTimeout(180)
-    .build();
+  // Retry on a lagging-ledger error so the RPC can catch up to the state Horizon
+  // already reports (see isLaggingLedgerError). Each attempt refetches the
+  // account for a current sequence number.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const account = await rpcServer.getAccount(source);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: env.stellar.networkPassphrase,
+      })
+        .addOperation(operation)
+        .setTimeout(180)
+        .build();
 
-  const prepared = await rpcServer.prepareTransaction(tx);
-  return prepared.toXDR();
+      const prepared = await rpcServer.prepareTransaction(tx);
+      return prepared.toXDR();
+    } catch (err) {
+      if (attempt >= 5 || !isLaggingLedgerError(err)) throw err;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
 }
 
 export interface SubmitResult {
@@ -85,14 +116,157 @@ export async function submitSignedTx(signedXdr: string): Promise<SubmitResult> {
   return { hash: sent.hash, successful, returnValue };
 }
 
-/** Build an unsigned classic `changeTrust` tx so a user can trust a card asset. */
-export async function buildTrustlineTx(account: string, asset: Asset): Promise<string> {
+/** The platform issuer's current sequence number, as the soroban RPC sees it. */
+async function issuerSequence(): Promise<bigint> {
+  const account = await rpcServer.getAccount(env.platformIssuer);
+  return BigInt(account.sequenceNumber());
+}
+
+/** A bad-sequence rejection — duplicate/stale sequence; retryable once re-synced. */
+function isBadSeqError(err: unknown): boolean {
+  const name = (err as { details?: { errorResult?: { _attributes?: { result?: { _switch?: { name?: string } } } } } })
+    ?.details?.errorResult?._attributes?.result?._switch?.name;
+  if (name === 'txBadSeq') return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /txBadSeq|tx_bad_seq|bad sequence/i.test(msg);
+}
+
+/**
+ * Run an issuer-sourced operation with sequence safety. Every server-side issuer
+ * op (SAC deploy, royalty registration, card/USDC mint) sources from the same
+ * account, so without coordination overlapping ops fetch the same sequence and
+ * all but one fail on-chain with tx_bad_seq (surfaced as SUBMIT_FAILED /
+ * SAC_DEPLOY_FAILED / ROYALTY_FAILED / MINT_FAILED). Two safeguards:
+ *  1. After each op, poll until the RPC reflects the consumed sequence, so the
+ *     next op builds on a fresh one rather than a stale duplicate.
+ *  2. Retry on a bad-sequence rejection, since load-balanced RPC nodes can still
+ *     briefly disagree on the latest sequence; re-fetching clears it.
+ */
+async function runIssuerOp<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const before = await issuerSequence();
+    try {
+      const result = await fn();
+      for (let i = 0; i < 20 && (await issuerSequence()) <= before; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return result;
+    } catch (err) {
+      if (attempt >= 4 || !isBadSeqError(err)) throw err;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+}
+
+/** Serializes issuer-sourced operations so their sequence handling can't interleave. */
+let issuerTxQueue: Promise<unknown> = Promise.resolve();
+function withIssuerLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = issuerTxQueue.then(() => runIssuerOp(fn));
+  // Keep the chain alive regardless of any single op's outcome.
+  issuerTxQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * Fetch a settled transaction's parsed return value by hash. Used by the passkey
+ * relay path, where the relayer (not the API) submitted the tx, so we recover
+ * the contract's return value (e.g. a new offer id) from the on-chain result.
+ */
+export async function transactionReturnValue(hash: string): Promise<unknown> {
+  let result = await rpcServer.getTransaction(hash);
+  for (let i = 0; i < 30 && result.status === 'NOT_FOUND'; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    result = await rpcServer.getTransaction(hash);
+  }
+  if (result.status === 'SUCCESS' && 'returnValue' in result && result.returnValue) {
+    try {
+      return scValToNative(result.returnValue);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Build an unsigned classic `changeTrust` tx so `account` trusts `asset`. */
+export async function buildChangeTrustTx(account: string, asset: Asset): Promise<string> {
   const source = await horizon.loadAccount(account);
   const tx = new TransactionBuilder(source, {
     fee: BASE_FEE,
     networkPassphrase: env.stellar.networkPassphrase,
   })
     .addOperation(Operation.changeTrust({ asset }))
+    .setTimeout(180)
+    .build();
+  return tx.toXDR();
+}
+
+/** Build an unsigned `changeTrust` tx so a user can trust a card asset. */
+export const buildTrustlineTx = buildChangeTrustTx;
+
+/**
+ * The cheapest source-asset → USDC route Horizon can find for an exact USDC
+ * receive amount. Returns the estimated source spend and the intermediate path,
+ * or `null` when no route exists (the caller surfaces `NO_PATH`).
+ */
+export async function findStrictReceivePath(
+  sourceAsset: Asset,
+  destAsset: Asset,
+  destAmount: string,
+): Promise<{ sendAmount: string; path: Asset[] } | null> {
+  const { records } = await horizon
+    .strictReceivePaths([sourceAsset], destAsset, destAmount)
+    .call();
+  if (!records.length) return null;
+  // Records arrive cheapest-first, but sort defensively on the source spend.
+  const best = records.reduce((a, b) =>
+    Number(a.source_amount) <= Number(b.source_amount) ? a : b,
+  );
+  const path = best.path.map((p) =>
+    p.asset_type === 'native'
+      ? Asset.native()
+      : new Asset(p.asset_code as string, p.asset_issuer as string),
+  );
+  return { sendAmount: best.source_amount, path };
+}
+
+/** `sendMax` = `sourceAmount` padded by `slippageBps`, to stroop precision. */
+export function withSlippage(sourceAmount: string, slippageBps: number): string {
+  const padded = Number(sourceAmount) * (1 + slippageBps / 10_000);
+  return padded.toFixed(7);
+}
+
+/**
+ * Build an unsigned `PathPaymentStrictReceive` that converts `sourceAsset` into
+ * exactly `destAmount` of `destAsset` delivered to the buyer's own account,
+ * spending at most `sendMax`. The settlement step then spends that USDC.
+ */
+export async function buildPathPaymentTx(
+  buyer: string,
+  sourceAsset: Asset,
+  sendMax: string,
+  destAsset: Asset,
+  destAmount: string,
+  path: Asset[],
+): Promise<string> {
+  const source = await horizon.loadAccount(buyer);
+  const tx = new TransactionBuilder(source, {
+    fee: BASE_FEE,
+    networkPassphrase: env.stellar.networkPassphrase,
+  })
+    .addOperation(
+      Operation.pathPaymentStrictReceive({
+        sendAsset: sourceAsset,
+        sendMax,
+        destination: buyer,
+        destAsset,
+        destAmount,
+        path,
+      }),
+    )
     .setTimeout(180)
     .build();
   return tx.toXDR();
@@ -126,6 +300,17 @@ function findBalance(list: HorizonBalance[], asset: Asset): HorizonBalance | und
   return list.find((b) => b.asset_code === asset.getCode() && b.asset_issuer === asset.getIssuer());
 }
 
+/** The account's balance of `asset` as a decimal string (`"0"` if untrusted/absent). */
+export async function getAssetBalance(account: string, asset: Asset): Promise<string> {
+  const bal = findBalance(await balances(account), asset);
+  return bal?.balance ?? '0';
+}
+
+/** Whether `account` already trusts `asset` (no throw). */
+export async function hasTrustline(account: string, asset: Asset): Promise<boolean> {
+  return Boolean(findBalance(await balances(account), asset));
+}
+
 /** Ensure `account` trusts `asset`; throw an actionable error if not. */
 export async function requireTrustline(account: string, asset: Asset): Promise<void> {
   const list = await balances(account);
@@ -154,6 +339,261 @@ export async function requireBalance(account: string, asset: Asset, amount: stri
       `Insufficient ${asset.getCode()} balance: have ${bal.balance}, need ${amount}`,
       'INSUFFICIENT_BALANCE',
       { have: bal.balance, need: amount, assetCode: asset.getCode() },
+    );
+  }
+}
+
+/**
+ * Ensure the buyer holds at least `amount` of the asset they want to spend on a
+ * conversion. Unlike {@link requireBalance}, *not holding the asset at all* is
+ * reported as `INSUFFICIENT_BALANCE` (the buyer simply can't pay with it),
+ * never as a trustline prompt.
+ */
+export async function requireSourceBalance(
+  account: string,
+  asset: Asset,
+  amount: string,
+): Promise<void> {
+  const list = await balances(account);
+  const bal = findBalance(list, asset);
+  const have = bal?.balance ?? '0';
+  if (Number(have) < Number(amount)) {
+    throw new PreflightError(
+      `Insufficient ${asset.getCode()} balance: have ${have}, need ${amount}`,
+      'INSUFFICIENT_BALANCE',
+      { have, need: amount, assetCode: asset.getCode() },
+    );
+  }
+}
+
+// --- dev helper: mint test USDC to a smart wallet ---
+
+/**
+ * Mint test USDC straight into a contract account (`C…`) by calling the USDC
+ * Stellar Asset Contract's `mint` as the issuer (the SAC admin). Classic
+ * payments can't target a contract address, so the demo funds smart wallets
+ * this way. Testnet/dev only — gated by the caller.
+ */
+export async function mintUsdcTo(
+  recipient: string,
+  amountStroops: bigint,
+  issuerSecret: string,
+): Promise<SubmitResult> {
+  return withIssuerLock(async () => {
+    const usdc = new Asset(env.usdc.code, env.usdc.issuer);
+    const sac = new Contract(usdc.contractId(env.stellar.networkPassphrase));
+    const op = sac.call(
+      'mint',
+      new Address(recipient).toScVal(),
+      nativeToScVal(amountStroops, { type: 'i128' }),
+    );
+    const unsignedXdr = await buildContractTx(env.usdc.issuer, op);
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+    tx.sign(Keypair.fromSecret(issuerSecret));
+    return submitSignedTx(tx.toXDR());
+  });
+}
+
+// --- card minting (issue a new card asset at runtime) ---
+
+/** One card copy in stroops — assets carry 7 decimals, so 1 copy = 1.0 unit. */
+const ONE_CARD = 10_000_000n;
+
+/** Whether an address is a Soroban contract account (`C…`) vs. a classic `G…`. */
+export function isContractAddress(address: string): boolean {
+  return address.startsWith('C');
+}
+
+/**
+ * Deploy the Stellar Asset Contract for a freshly issued card asset, signed by
+ * the platform issuer. Returns the deterministic SAC address. Idempotent at the
+ * address level: the SAC id derives from the asset, so a re-deploy of the same
+ * asset would fail on-chain — callers mint with a fresh (random) asset code.
+ */
+export async function deployCardSac(asset: Asset, issuerSecret: string): Promise<string> {
+  return withIssuerLock(async () => {
+    const op = Operation.createStellarAssetContract({ asset });
+    const unsignedXdr = await buildContractTx(env.platformIssuer, op);
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+    tx.sign(Keypair.fromSecret(issuerSecret));
+    const result = await submitSignedTx(tx.toXDR());
+    if (!result.successful) {
+      throw new PreflightError('Card SAC deployment did not succeed on-chain', 'SAC_DEPLOY_FAILED', {
+        hash: result.hash,
+      });
+    }
+    return asset.contractId(env.stellar.networkPassphrase);
+  });
+}
+
+/**
+ * Distribute `copies` of a card to `owner`, signed by the platform issuer.
+ *  - Smart wallet (`C…`): SAC `mint(owner, amount)` — gasless, no trustline.
+ *  - Classic (`G…`): a classic issuer `payment` — requires `owner` to already
+ *    trust the asset (enforced by the caller before this runs).
+ * Returns the settlement tx hash.
+ */
+export async function mintCardCopies(
+  asset: Asset,
+  sacAddress: string,
+  owner: string,
+  copies: number,
+  issuerSecret: string,
+): Promise<string> {
+  return withIssuerLock(async () => {
+    if (isContractAddress(owner)) {
+      const sac = new Contract(sacAddress);
+      const op = sac.call(
+        'mint',
+        new Address(owner).toScVal(),
+        nativeToScVal(BigInt(copies) * ONE_CARD, { type: 'i128' }),
+      );
+      const unsignedXdr = await buildContractTx(env.platformIssuer, op);
+      const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+      tx.sign(Keypair.fromSecret(issuerSecret));
+      const result = await submitSignedTx(tx.toXDR());
+      if (!result.successful) {
+        throw new PreflightError('Card mint did not succeed on-chain', 'MINT_FAILED', {
+          hash: result.hash,
+        });
+      }
+      return result.hash;
+    }
+    // Classic owner: standard issuer payment over Horizon.
+    const issuer = await horizon.loadAccount(env.platformIssuer);
+    const tx = new TransactionBuilder(issuer, {
+      fee: BASE_FEE,
+      networkPassphrase: env.stellar.networkPassphrase,
+    })
+      .addOperation(Operation.payment({ destination: owner, asset, amount: String(copies) }))
+      .setTimeout(180)
+      .build();
+    tx.sign(Keypair.fromSecret(issuerSecret));
+    const res = await horizon.submitTransaction(tx);
+    return res.hash;
+  });
+}
+
+/**
+ * Register a creator royalty for a newly minted card on the settlement contract,
+ * signed by the contract admin (the platform). Mirrors the deploy script's
+ * `set_royalty`; rejected on-chain if `royaltyBps` exceeds the configured cap.
+ */
+export async function setCardRoyalty(
+  sacAddress: string,
+  creator: string,
+  royaltyBps: number,
+  adminSecret: string,
+): Promise<string> {
+  return withIssuerLock(async () => {
+    const op = new MarketplaceContract(env.contractId).setRoyalty(sacAddress, creator, royaltyBps);
+    const unsignedXdr = await buildContractTx(env.platformIssuer, op);
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+    tx.sign(Keypair.fromSecret(adminSecret));
+    const result = await submitSignedTx(tx.toXDR());
+    if (!result.successful) {
+      throw new PreflightError('Royalty registration did not succeed on-chain', 'ROYALTY_FAILED', {
+        hash: result.hash,
+      });
+    }
+    return result.hash;
+  });
+}
+
+// --- passkey smart-wallet (contract-account) pre-flight ---
+
+/**
+ * A smart wallet (`C…`) holds USDC inside the token's Stellar Asset Contract,
+ * not as a classic trustline, so its balance is read by simulating the USDC
+ * SAC's `balance(addr)` rather than via Horizon. Returns stroops, or `null` when
+ * the balance can't be determined (e.g. the wallet/SAC entry doesn't exist yet).
+ */
+export async function smartWalletUsdcStroops(walletContractId: string): Promise<bigint | null> {
+  const usdc = new Asset(env.usdc.code, env.usdc.issuer);
+  return smartWalletTokenStroops(usdc.contractId(env.stellar.networkPassphrase), walletContractId);
+}
+
+/**
+ * Read a smart wallet's (`C…`) balance of any token by simulating the token
+ * contract's `balance(addr)`. Returns stroops, or `null` when the balance can't
+ * be determined (e.g. the wallet/token entry doesn't exist yet).
+ */
+async function smartWalletTokenStroops(
+  tokenContractId: string,
+  walletContractId: string,
+): Promise<bigint | null> {
+  try {
+    const sac = new Contract(tokenContractId);
+    const op = sac.call('balance', new Address(walletContractId).toScVal());
+    const account = await rpcServer.getAccount(env.platformIssuer);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: env.stellar.networkPassphrase,
+    })
+      .addOperation(op)
+      .setTimeout(30)
+      .build();
+    const sim = await rpcServer.simulateTransaction(tx);
+    if (rpc.Api.isSimulationSuccess(sim) && sim.result?.retval) {
+      return BigInt(scValToNative(sim.result.retval) as bigint | number | string);
+    }
+  } catch {
+    // Best-effort: fall through to `null` so an undeployed/unseen wallet does
+    // not hard-fail pre-flight (deploy-on-first-use).
+  }
+  return null;
+}
+
+/**
+ * Ensure a smart-wallet buyer (`C…`) holds enough USDC for `amount`. Skips the
+ * classic `G…` trustline check entirely, and — per deploy-on-first-use — does
+ * not reject solely because the wallet is undeployed: if the balance can't be
+ * read it is treated as unverifiable rather than insufficient.
+ */
+export async function requireSmartWalletUsdc(
+  walletContractId: string,
+  amount: string,
+): Promise<void> {
+  const have = await smartWalletUsdcStroops(walletContractId);
+  if (have === null) {
+    console.warn(
+      `[preflight] could not read USDC balance for smart wallet ${walletContractId}; skipping funding check`,
+    );
+    return;
+  }
+  const need = BigInt(Math.round(Number(amount) * 1e7));
+  if (have < need) {
+    throw new PreflightError(
+      `Insufficient USDC in smart wallet: have ${have} stroops, need ${need}`,
+      'INSUFFICIENT_BALANCE',
+      { have: have.toString(), need: need.toString() },
+    );
+  }
+}
+
+/**
+ * Ensure a smart-wallet seller (`C…`) holds at least one copy of a card token
+ * before listing it. Mirrors {@link requireSmartWalletUsdc}: tolerant of an
+ * unreadable balance (treated as unverifiable, not a hard fail) so an undeployed
+ * wallet's deploy-on-first-use isn't blocked; the on-chain `list` still enforces
+ * ownership atomically.
+ */
+export async function requireSmartWalletCard(
+  walletContractId: string,
+  cardSacAddress: string,
+): Promise<void> {
+  const have = await smartWalletTokenStroops(cardSacAddress, walletContractId);
+  if (have === null) {
+    console.warn(
+      `[preflight] could not read card balance for smart wallet ${walletContractId}; skipping ownership check`,
+    );
+    return;
+  }
+  if (have <= 0n) {
+    throw new PreflightError(
+      'Smart wallet does not hold a copy of this card',
+      'INSUFFICIENT_BALANCE',
+      { have: have.toString(), need: '10000000' },
     );
   }
 }

@@ -27,8 +27,38 @@ export const env = {
     issuer: required('USDC_ISSUER'),
   },
   platformIssuer: required('PLATFORM_ISSUER'),
+  /**
+   * Secret for the USDC issuer (== platform issuer here), used only by the
+   * testnet-gated dev funding route to mint test USDC to a smart wallet. Empty
+   * in environments that don't enable dev funding.
+   */
+  usdcIssuerSecret: process.env.PLATFORM_ISSUER_SECRET ?? process.env.USDC_ISSUER_SECRET ?? '',
   feeBps: Number(process.env.FEE_BPS ?? 200),
+  /** Default slippage tolerance (bps) baked into a pay-with-any-asset `sendMax`. */
+  pathPaymentSlippageBps: Number(process.env.PATH_PAYMENT_SLIPPAGE_BPS ?? 50),
   webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
+  /**
+   * Passkey smart-wallet config. The relay (OpenZeppelin Channels by default,
+   * Launchtube as the legacy fallback) sponsors fees so consumers need no XLM.
+   * `relayProvider` selects the adapter; both are optional so the API still
+   * boots for the classic-wallet flow when passkey checkout is not configured.
+   */
+  passkey: {
+    /** 'channels' (default) or 'launchtube'. */
+    relayProvider: process.env.PASSKEY_RELAY_PROVIDER ?? 'channels',
+    /** OpenZeppelin Channels relayer base URL. */
+    channelsUrl: process.env.CHANNELS_URL ?? 'https://channels.openzeppelin.com/testnet',
+    /** OpenZeppelin Channels API key. */
+    channelsApiKey: process.env.CHANNELS_API_KEY ?? '',
+    /** Launchtube endpoint (legacy fallback relay). */
+    launchtubeUrl: process.env.LAUNCHTUBE_URL ?? '',
+    /** Launchtube JWT (legacy fallback relay). */
+    launchtubeJwt: process.env.LAUNCHTUBE_JWT ?? '',
+    /** Deployed smart-wallet WASM hash (passkey-kit factory). */
+    walletWasmHash: process.env.PASSKEY_WALLET_WASM_HASH ?? '',
+    /** WebAuthn Relying Party id (e.g. the demo host). */
+    rpId: process.env.PASSKEY_RP_ID ?? 'localhost',
+  },
 };
 
 export type Env = typeof env;

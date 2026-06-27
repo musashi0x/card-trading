@@ -38,6 +38,10 @@ export const cards = pgTable('cards', {
   rarity: text('rarity').notNull(),
   imageUrl: text('image_url').notNull(),
   supply: integer('supply').notNull().default(1),
+  /** Stellar account that receives the creator royalty on resale (null = none). */
+  creatorAccount: text('creator_account'),
+  /** Creator royalty in basis points, applied on secondary sales (0 = none). */
+  royaltyBps: integer('royalty_bps').notNull().default(0),
 });
 
 export const listings = pgTable('listings', {
@@ -76,6 +80,8 @@ export const trades = pgTable('trades', {
   seller: text('seller').notNull(),
   priceUsdc: numeric('price_usdc', { precision: 20, scale: 7 }).notNull(),
   feeUsdc: numeric('fee_usdc', { precision: 20, scale: 7 }).notNull(),
+  /** Creator royalty paid on this settlement (0 on a primary sale). */
+  royaltyUsdc: numeric('royalty_usdc', { precision: 20, scale: 7 }).notNull().default('0'),
   settleTxHash: text('settle_tx_hash').notNull(),
   settledAt: timestamp('settled_at', { withTimezone: true })
     .default(sql`now()`)

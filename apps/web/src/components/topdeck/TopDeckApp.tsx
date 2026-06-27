@@ -13,8 +13,10 @@
  *   - placing bids, buy-now, countdown timers, watchlist, bid history, toasts
  */
 
-import { Component, type CSSProperties } from 'react';
-import type { Card } from '@cardmkt/shared';
+import { Component, type ChangeEvent, type CSSProperties, type DragEvent } from 'react';
+import type { Card, MintCardRequest, PathQuoteResponse, StellarAsset } from '@cardmkt/shared';
+import { XLM_ASSET, formatAmount } from '@cardmkt/shared';
+import { ApiRequestError, api } from '@/lib/api';
 import {
   type Rarity,
   type TopCard,
@@ -36,16 +38,39 @@ const PAGE_SIZE = 12; // lots per browse page (multiple of 3 to fill the grid)
 interface WalletProps {
   address: string | null;
   connecting: boolean;
+  /** Whether the connected wallet is a passkey smart wallet vs. a classic one. */
+  walletKind: 'classic' | 'passkey' | null;
+  /** Whether passkey checkout can be offered on this device/build. */
+  passkeyAvailable: boolean;
   connect: () => void;
+  /** Connect (or create) a passkey smart wallet via Face ID / Touch ID. */
+  connectViaPasskey: () => Promise<void>;
   disconnect: () => void;
   runAction: (action: 'list', body: Record<string, unknown>) => Promise<string>;
+  /** Buy a real listing with the passkey smart wallet (gasless). Returns tx hash. */
+  passkeyBuyNow: (listingId: string, contractListingId: number) => Promise<string>;
+  /** List a card with the passkey smart wallet (gasless). Returns tx hash. */
+  passkeyList: (cardId: string, cardToken: string, priceUsdc: string) => Promise<string>;
+  /** Mint (issue) a brand-new card owned by the connected wallet. */
+  mintCard: (meta: Omit<MintCardRequest, 'owner'>) => Promise<Card>;
+  /** Convert a held asset into the settlement USDC (pay-with-any-asset). */
+  payWithAsset: (quote: PathQuoteResponse) => Promise<string | null>;
 }
+
+/** Source assets the buyer can pay with. USDC is the no-conversion default. */
+type PayAssetId = 'USDC' | 'XLM';
+const PAY_ASSETS: Array<{ id: PayAssetId; label: string; asset: StellarAsset | null }> = [
+  { id: 'USDC', label: 'USDC', asset: null },
+  { id: 'XLM', label: 'XLM', asset: XLM_ASSET },
+];
 
 interface Props {
   wallet: WalletProps;
   seedCards: TopCard[];
   catalog: Card[];
   explorerTx: (hash: string) => string;
+  /** Build an explorer URL for the connected wallet address. */
+  explorerAddress: (address: string) => string;
 }
 
 interface Form {
@@ -62,6 +87,10 @@ interface Form {
   buyNowOn: boolean;
   buyNow: string;
   duration: number;
+  /** Copies to issue when minting a brand-new card. */
+  supply: string;
+  /** Creator royalty percent (0–10) when minting a brand-new card. */
+  royaltyPct: string;
 }
 
 interface State {
@@ -78,24 +107,47 @@ interface State {
   status: Record<string, string>;
   myMax: Record<string, number>;
   sellStep: number;
+  /** Step-1 mode: list a card the wallet already holds, or mint a brand-new one. */
+  sellMode: 'hold' | 'mint';
+  /** The card minted this session (set after a successful mint), to avoid re-minting on retry. */
+  mintedCard: Card | null;
   myBidsTab: 'bidding' | 'selling';
   publishing: boolean;
   lastHash: string | null;
+  /** True while a card photo is being dragged over the upload dropzone. */
+  dragOver: boolean;
   form: Form;
   cards: TopCard[];
   now: number;
   page: number;
+  /** Source asset selected in the buy panel (USDC = no conversion). */
+  payAsset: PayAssetId;
+  /** Live conversion quote for the selected non-USDC asset. */
+  quote: PathQuoteResponse | null;
+  quoting: boolean;
+  /** User-facing quote/conversion error (NO_PATH, INSUFFICIENT_BALANCE, …). */
+  quoteErr: string | null;
+  /** A passkey "Pay with Face ID" checkout is in flight. */
+  paying: boolean;
+  /** User-facing passkey-checkout error (declined / relay failure). */
+  payErr: string | null;
+  /** Whether the connected-wallet management menu is open. */
+  walletMenuOpen: boolean;
+  /** True briefly after the address is copied, to flip the copy label. */
+  addressCopied: boolean;
 }
 
 const EMPTY_FORM: Form = {
   cardId: '', title: '', setLine: '', category: 'Other', rarity: 'rare', image: undefined,
   graded: false, grade: 'PSA 10', condition: 'Near Mint', startBid: '', buyNowOn: false, buyNow: '', duration: 3,
+  supply: '1', royaltyPct: '0',
 };
 
 export class TopDeckApp extends Component<Props, State> {
   private tick: ReturnType<typeof setInterval> | null = null;
   private toastT: ReturnType<typeof setTimeout> | null = null;
   private rivalT: ReturnType<typeof setTimeout> | null = null;
+  private copyT: ReturnType<typeof setTimeout> | null = null;
 
   constructor(props: Props) {
     super(props);
@@ -104,9 +156,12 @@ export class TopDeckApp extends Component<Props, State> {
       facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
       bidOpen: false, bidAmount: '', toast: null, toastKind: 'win',
       watched: {}, status: {}, myMax: {},
-      sellStep: 1, myBidsTab: 'bidding', publishing: false, lastHash: null,
+      sellStep: 1, sellMode: 'hold', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
       form: { ...EMPTY_FORM },
       cards: props.seedCards,
+      payAsset: 'USDC', quote: null, quoting: false, quoteErr: null,
+      paying: false, payErr: null,
+      walletMenuOpen: false, addressCopied: false,
     };
   }
 
@@ -120,16 +175,20 @@ export class TopDeckApp extends Component<Props, State> {
     if (this.tick) clearInterval(this.tick);
     if (this.toastT) clearTimeout(this.toastT);
     if (this.rivalT) clearTimeout(this.rivalT);
+    if (this.copyT) clearTimeout(this.copyT);
   }
 
   // ----- navigation -----
   private getCard(id: string | null) {
     return this.state.cards.find((c) => c.id === id);
   }
-  private open = (id: string) => { this.setState({ screen: 'detail', selectedId: id }); window.scrollTo(0, 0); };
+  private open = (id: string) => { this.setState({ screen: 'detail', selectedId: id, payAsset: 'USDC', quote: null, quoteErr: null }); window.scrollTo(0, 0); };
   private goHome = () => { this.setState({ screen: 'browse' }); window.scrollTo(0, 0); };
   private goMyBids = () => { this.setState({ screen: 'mybids' }); window.scrollTo(0, 0); };
-  private goSell = () => { this.setState({ screen: 'sell', sellStep: 1 }); window.scrollTo(0, 0); };
+  private goSell = () => { this.setState({ screen: 'sell', sellStep: 1, mintedCard: null }); window.scrollTo(0, 0); };
+  /** Switch step-1 mode; clears the held-card selection so validation re-evaluates. */
+  private setSellMode = (mode: 'hold' | 'mint') =>
+    this.setState((s) => ({ sellMode: mode, mintedCard: null, form: { ...s.form, cardId: '' } }));
   private setMyBidsTab = (t: 'bidding' | 'selling') => this.setState({ myBidsTab: t });
 
   // ----- pagination -----
@@ -220,22 +279,171 @@ export class TopDeckApp extends Component<Props, State> {
     }, 4200);
   }
 
-  private buyNow = () => {
+  /** Human-readable message for a pay-with-any-asset failure code. */
+  private quoteError(err: unknown): string {
+    if (err instanceof ApiRequestError) {
+      if (err.code === 'NO_PATH') return 'No swap route for this asset right now';
+      if (err.code === 'INSUFFICIENT_BALANCE') return 'Not enough of this asset to cover the price';
+      if (err.code === 'ACCOUNT_NOT_FOUND') return 'Fund your wallet to pay with this asset';
+      return err.message;
+    }
+    return 'Could not fetch a quote';
+  }
+
+  /** Switch the source asset and, for a non-USDC pick, fetch a live quote. */
+  private selectPayAsset = (id: PayAssetId) => {
+    this.setState({ payAsset: id, quote: null, quoteErr: null });
+    const def = PAY_ASSETS.find((a) => a.id === id);
+    if (!def?.asset) return; // USDC — no conversion needed
+    const c = this.getCard(this.state.selectedId);
+    const { address } = this.props.wallet;
+    if (!c || !address) {
+      if (!address) this.setState({ quoteErr: 'Connect your wallet to see a quote' });
+      return;
+    }
+    const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+    this.setState({ quoting: true });
+    api
+      .quotePath({ buyer: address, sourceAsset: def.asset, destUsdc: formatAmount(price) })
+      .then((quote) => {
+        // Ignore a stale response if the user switched assets meanwhile.
+        if (this.state.selectedId === c.id && this.state.payAsset === id) {
+          this.setState({ quote, quoting: false });
+        }
+      })
+      .catch((err) => {
+        if (this.state.selectedId === c.id && this.state.payAsset === id) {
+          this.setState({ quoting: false, quoteErr: this.quoteError(err) });
+        }
+      });
+  };
+
+  private buyNow = async () => {
     const c = this.getCard(this.state.selectedId);
     if (!c) return;
-    this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' } }));
-    this.showToast('Purchased! ' + c.name + ' is yours 🎉', 'win');
+    const { address, connect, payWithAsset } = this.props.wallet;
+    const def = PAY_ASSETS.find((a) => a.id === this.state.payAsset);
+
+    // Default USDC path stays simulated (no on-chain buy contract in this skin).
+    if (!def?.asset) {
+      this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' } }));
+      this.showToast('Purchased! ' + c.name + ' is yours 🎉', 'win');
+      return;
+    }
+
+    // Pay-with-any-asset: convert to USDC on-chain, then settle.
+    if (!address) {
+      this.showToast('Connect your wallet to pay', 'outbid');
+      connect();
+      return;
+    }
+    const quote = this.state.quote;
+    if (!quote) {
+      this.showToast('Fetching a quote — try again in a moment', 'outbid');
+      return;
+    }
+    this.setState({ quoting: true, quoteErr: null });
+    try {
+      await payWithAsset(quote);
+      this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, quoting: false }));
+      this.showToast(`Paid with ${def.label} — ${c.name} is yours 🎉`, 'win');
+    } catch (err) {
+      this.setState({ quoting: false, quoteErr: this.quoteError(err) });
+      this.showToast(this.quoteError(err), 'outbid');
+    }
+  };
+
+  // ----- passkey "Pay with Face ID" checkout -----
+  private payWithPasskey = async () => {
+    const c = this.getCard(this.state.selectedId);
+    if (!c?.real || c.contractListingId == null || !c.listingId) return;
+    const { passkeyBuyNow, walletKind, connectViaPasskey } = this.props.wallet;
+    this.setState({ paying: true, payErr: null });
+    try {
+      // One flow: connect/create the passkey wallet if needed, then one
+      // biometric prompt authorizes the gasless purchase.
+      if (walletKind !== 'passkey') await connectViaPasskey();
+      const hash = await passkeyBuyNow(c.listingId, c.contractListingId);
+      this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, paying: false, lastHash: hash }));
+      this.showToast(`Face ID confirmed — ${c.name} is yours 🎉`, 'win');
+    } catch (err) {
+      const msg = err instanceof ApiRequestError ? err.message : 'Purchase cancelled — try again';
+      this.setState({ paying: false, payErr: msg });
+      this.showToast(msg, 'outbid');
+    }
   };
 
   // ----- sell flow -----
+  private fileInput: HTMLInputElement | null = null;
   private setForm = (k: keyof Form, v: unknown) => this.setState((s) => ({ form: { ...s.form, [k]: v } }));
+
+  /**
+   * Downscale a data URL through a canvas so the stored image stays small. A raw
+   * photo's base64 data URL is ~1.37× its byte size, so an 8 MB upload would be
+   * ~11M chars — far past what mint accepts (or what belongs in a DB row). We cap
+   * the longest edge and re-encode as JPEG, which keeps a card photo well under a
+   * few hundred KB while staying sharp at card size.
+   */
+  private compressImage(dataUrl: string): Promise<string> {
+    const MAX_EDGE = 1280;
+    const QUALITY = 0.85;
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return reject(new Error('no 2d context'));
+        // White matte so transparent PNGs don't turn black under JPEG.
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', QUALITY));
+      };
+      img.onerror = () => reject(new Error('decode failed'));
+      img.src = dataUrl;
+    });
+  }
+
+  /** Read a user-chosen image file, downscale it, and store it for preview + mint. */
+  private readImageFile = (file: File | undefined) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) return this.showToast('Please choose an image file', 'outbid');
+    if (file.size > 8 * 1024 * 1024) return this.showToast('Image must be under 8 MB', 'outbid');
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        this.setForm('image', await this.compressImage(String(reader.result)));
+      } catch {
+        this.showToast('Could not process that image — try another', 'outbid');
+      }
+    };
+    reader.onerror = () => this.showToast('Could not read that file — try another', 'outbid');
+    reader.readAsDataURL(file);
+  };
+
+  private onPickImage = (e: ChangeEvent<HTMLInputElement>) => {
+    this.readImageFile(e.target.files?.[0]);
+    e.target.value = ''; // let the user re-pick the same file after removing it
+  };
+
+  private onDropImage = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    this.setState({ dragOver: false });
+    this.readImageFile(e.dataTransfer.files?.[0]);
+  };
+
   private selectCatalogCard = (c: Card) =>
     this.setState((s) => ({
       form: { ...s.form, cardId: c.id, title: c.name, setLine: c.set, rarity: mapRarity(c.rarity), image: c.imageUrl, category: 'Other' },
     }));
   private sellNext = () => { this.setState((s) => ({ sellStep: Math.min(3, s.sellStep + 1) })); window.scrollTo(0, 0); };
   private sellBack = () => { this.setState((s) => ({ sellStep: Math.max(1, s.sellStep - 1) })); window.scrollTo(0, 0); };
-  private listAnother = () => { this.setState({ sellStep: 1, form: { ...EMPTY_FORM }, lastHash: null }); window.scrollTo(0, 0); };
+  private listAnother = () => { this.setState({ sellStep: 1, form: { ...EMPTY_FORM }, lastHash: null, mintedCard: null }); window.scrollTo(0, 0); };
 
   private formToCard(f: Form, hash: string): TopCard {
     const start = Number(f.startBid) || 0;
@@ -255,10 +463,16 @@ export class TopDeckApp extends Component<Props, State> {
 
   private publishListing = async () => {
     const f = this.state.form;
+    const isMint = this.state.sellMode === 'mint';
     const start = Number(f.startBid) || 0;
-    if (!f.cardId) return this.showToast('Pick a card to list', 'outbid');
+    if (isMint) {
+      if (!f.title.trim()) return this.showToast('Name your new card', 'outbid');
+      if (!f.image) return this.showToast('Add a photo for your new card', 'outbid');
+    } else if (!f.cardId) {
+      return this.showToast('Pick a card to list', 'outbid');
+    }
     if (!(start > 0)) return this.showToast('Enter a starting bid', 'outbid');
-    const { address, connect, runAction } = this.props.wallet;
+    const { address, walletKind, connect, runAction, passkeyList, mintCard } = this.props.wallet;
     if (!address) {
       this.showToast('Connect your wallet to list', 'outbid');
       connect();
@@ -266,8 +480,37 @@ export class TopDeckApp extends Component<Props, State> {
     }
     this.setState({ publishing: true });
     try {
-      const hash = await runAction('list', { cardId: f.cardId, seller: address, priceUsdc: String(start) });
-      const card = this.formToCard(f, hash);
+      // Mint mode: issue the card first (reusing a prior mint on retry), then list
+      // the freshly minted token. `mintedCard.sacAddress` feeds the passkey path.
+      let cardId = f.cardId;
+      let sacAddress = this.state.mintedCard?.sacAddress ?? null;
+      if (isMint && !this.state.mintedCard) {
+        const minted = await mintCard({
+          name: f.title.trim(),
+          set: f.setLine.trim(),
+          rarity: f.rarity,
+          imageUrl: f.image as string,
+          supply: Math.max(1, Math.floor(Number(f.supply) || 1)),
+          royaltyBps: Math.round(Math.min(10, Math.max(0, Number(f.royaltyPct) || 0)) * 100),
+        });
+        cardId = minted.id;
+        sacAddress = minted.sacAddress;
+        this.setState((s) => ({ mintedCard: minted, form: { ...s.form, cardId: minted.id } }));
+      }
+
+      let hash: string;
+      if (walletKind === 'passkey') {
+        // A smart-wallet seller (`C…`) builds + passkey-signs the `list` call and
+        // relays it gaslessly; the classic `G…`-only build path can't sign for it.
+        if (!sacAddress) {
+          sacAddress = this.props.catalog.find((c) => c.id === cardId)?.sacAddress ?? null;
+        }
+        if (!sacAddress) throw new Error('Card asset contract not deployed');
+        hash = await passkeyList(cardId, sacAddress, formatAmount(start));
+      } else {
+        hash = await runAction('list', { cardId, seller: address, priceUsdc: formatAmount(start) });
+      }
+      const card = this.formToCard({ ...f, cardId }, hash);
       this.setState((s) => ({ cards: [card, ...s.cards], sellStep: 4, lastHash: hash, publishing: false }));
       window.scrollTo(0, 0);
     } catch (err) {
@@ -277,12 +520,77 @@ export class TopDeckApp extends Component<Props, State> {
   };
 
   // ----- wallet -----
+  // Connected: the chip toggles the management menu (view / copy / explorer /
+  // disconnect). Disconnected: it opens the wallet picker directly.
   private onWalletClick = () => {
-    const { address, connecting, connect, disconnect } = this.props.wallet;
+    const { address, connecting, connect } = this.props.wallet;
     if (connecting) return;
-    if (address) disconnect();
+    if (address) this.setState((s) => ({ walletMenuOpen: !s.walletMenuOpen, addressCopied: false }));
     else connect();
   };
+
+  private closeWalletMenu = () => this.setState({ walletMenuOpen: false });
+
+  private disconnectWallet = () => {
+    this.props.wallet.disconnect();
+    this.setState({ walletMenuOpen: false, addressCopied: false });
+  };
+
+  /** Copy the full connected address, flipping the menu label to "Copied" briefly. */
+  private copyAddress = async () => {
+    const { address } = this.props.wallet;
+    if (!address) return;
+    try {
+      await navigator.clipboard.writeText(address);
+      this.setState({ addressCopied: true });
+      if (this.copyT) clearTimeout(this.copyT);
+      this.copyT = setTimeout(() => this.setState({ addressCopied: false }), 1600);
+    } catch {
+      this.showToast('Could not copy — copy it manually', 'outbid');
+    }
+  };
+
+  /** The connected-wallet management dropdown: view, copy, explorer, disconnect. */
+  private renderWalletMenu(address: string) {
+    const { walletKind } = this.props.wallet;
+    const copied = this.state.addressCopied;
+    const action = (label: string, onClick: () => void, danger = false): React.ReactNode => (
+      <div
+        onClick={onClick}
+        style={{ fontSize: 12.5, fontWeight: 700, padding: '9px 12px', borderRadius: 8, border: `2px solid ${INK}`, background: danger ? '#ff4d3d' : '#fff', color: danger ? '#fff' : INK, cursor: 'pointer', textAlign: 'center' }}
+      >
+        {label}
+      </div>
+    );
+    return (
+      <>
+        {/* click-outside backdrop */}
+        <div onClick={this.closeWalletMenu} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+        <div style={{ position: 'absolute', top: 'calc(100% + 8px)', right: 0, zIndex: 41, width: 260, background: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 13px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.6)' }}>CONNECTED WALLET</span>
+            <span style={{ fontSize: 10.5, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: INK, color: '#fff' }}>
+              {walletKind === 'passkey' ? '⚡ Passkey' : 'Classic'}
+            </span>
+          </div>
+          <div style={{ padding: 13, display: 'flex', flexDirection: 'column', gap: 11 }}>
+            <div
+              onClick={this.copyAddress}
+              title="Click to copy"
+              style={{ fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: 12, fontWeight: 600, wordBreak: 'break-all', lineHeight: 1.5, padding: '9px 11px', background: '#fff7ec', border: `2px solid ${INK}`, borderRadius: 8, cursor: 'pointer' }}
+            >
+              {address}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {action(copied ? '✓ Copied' : 'Copy', this.copyAddress)}
+              {action('Explorer ↗', () => window.open(this.props.explorerAddress(address), '_blank', 'noopener,noreferrer'))}
+            </div>
+            {action('Disconnect', this.disconnectWallet, true)}
+          </div>
+        </div>
+      </>
+    );
+  }
 
   // ===== render helpers =====
   private cardTile(c: TopCard, height: number) {
@@ -445,8 +753,7 @@ export class TopDeckApp extends Component<Props, State> {
       <div style={{ minHeight: '100vh', background: '#fff7ec', fontFamily: SANS, color: INK }}>
         {/* ===== TOP NAV ===== */}
         <div style={{ position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: 18, padding: '14px 32px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
-          <div onClick={this.goHome} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>
-            <img src="/logo.png" alt="TopDeck Logo" style={{ width: 28, height: 28, borderRadius: '50%', border: `2.5px solid ${INK}` }} />
+          <div onClick={this.goHome} style={{ display: 'flex', alignItems: 'center', fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>
             <span>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></span>
           </div>
           <div style={{ flex: 1, maxWidth: 460, display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, padding: '9px 14px' }}>
@@ -470,9 +777,16 @@ export class TopDeckApp extends Component<Props, State> {
             <div style={{ fontSize: 13.5, fontWeight: 700, color: st.screen === 'mybids' ? INK : 'rgba(26,19,5,.55)', paddingBottom: 2, borderBottom: st.screen === 'mybids' ? `2.5px solid ${INK}` : '2.5px solid transparent' }}>My bids</div>
           </div>
           <div onClick={this.goSell} style={{ fontSize: 13, fontWeight: 700, padding: '9px 16px', background: '#2d5bff', color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>Sell a card</div>
-          <div onClick={this.onWalletClick} title={wallet.address ?? 'Connect wallet'} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
-            <span style={{ width: 9, height: 9, borderRadius: '50%', background: wallet.address ? '#13c06a' : 'rgba(26,19,5,.3)' }} />
-            {wallet.connecting ? 'Connecting…' : wallet.address ? shorten(wallet.address) : 'Connect'}
+          {wallet.passkeyAvailable && !wallet.address && (
+            <div onClick={() => { if (!wallet.connecting) void wallet.connectViaPasskey(); }} title="Create or connect a passkey smart wallet — no seed phrase" style={{ fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>⚡ Face ID</div>
+          )}
+          <div style={{ position: 'relative' }}>
+            <div onClick={this.onWalletClick} title={wallet.address ? 'Manage wallet' : 'Connect wallet'} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
+              <span style={{ width: 9, height: 9, borderRadius: '50%', background: wallet.address ? '#13c06a' : 'rgba(26,19,5,.3)' }} />
+              {wallet.connecting ? 'Connecting…' : wallet.address ? `${wallet.walletKind === 'passkey' ? '⚡ ' : ''}${shorten(wallet.address)}` : 'Connect'}
+              {wallet.address && <span style={{ fontSize: 9, marginLeft: -2, transform: st.walletMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>▾</span>}
+            </div>
+            {wallet.address && st.walletMenuOpen && this.renderWalletMenu(wallet.address)}
           </div>
         </div>
 
@@ -594,6 +908,121 @@ export class TopDeckApp extends Component<Props, State> {
   }
 
   // ===== DETAIL =====
+  /**
+   * Pay-with-any-asset picker: choose the source asset and, for a non-USDC
+   * choice, show a live Stellar path-payment quote — what the buyer spends, the
+   * slippage-capped maximum, and the USDC the seller still receives. Selecting
+   * USDC is the no-conversion default.
+   */
+  private renderPayWith(c: TopCard) {
+    const st = this.state;
+    const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+    const sel = st.payAsset;
+    const trim = (s: string) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+
+    return (
+      <div style={{ marginTop: 18, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13, padding: '14px 18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 14 }}>Pay with</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {PAY_ASSETS.map((a) => (
+              <div
+                key={a.id}
+                onClick={() => this.selectPayAsset(a.id)}
+                style={{
+                  fontSize: 12.5, fontWeight: 800, padding: '7px 14px', borderRadius: 9, cursor: 'pointer',
+                  border: `2.5px solid ${INK}`, fontFamily: DISPLAY,
+                  background: sel === a.id ? INK : '#fff', color: sel === a.id ? '#fff' : INK,
+                }}
+              >
+                {a.label}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {sel !== 'USDC' && (
+          <div style={{ marginTop: 12, fontSize: 12.5, fontWeight: 600 }}>
+            {st.quoting && !st.quote ? (
+              <div style={{ color: 'rgba(26,19,5,.55)' }}>Fetching best price…</div>
+            ) : st.quoteErr ? (
+              <div style={{ color: '#a3160a', fontWeight: 700 }}>⚠ {st.quoteErr}</div>
+            ) : st.quote && Number(st.quote.destUsdc) <= 0 ? (
+              <div style={{ color: '#0a5e34', fontWeight: 700 }}>
+                ✓ You already hold enough USDC — no swap needed
+              </div>
+            ) : st.quote ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <div>
+                  You pay ≈ <strong>{trim(st.quote.sendAmount)} {sel}</strong> → seller receives{' '}
+                  <strong>{trim(st.quote.destUsdc)} USDC</strong>
+                </div>
+                <div style={{ color: 'rgba(26,19,5,.55)' }}>
+                  Max {trim(st.quote.sendMax)} {sel} · {(st.quote.slippageBps / 100).toFixed(2)}% slippage cap
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: 'rgba(26,19,5,.55)' }}>
+                Converted on-chain to {money(price)} USDC via a Stellar path payment.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /**
+   * The on-chain settlement breakdown for this listing: the sale price splits
+   * atomically into seller proceeds, a 2% platform fee, and — on resale of a
+   * card with a registered royalty — a creator royalty. Surfaced here in the
+   * payment flow since the auction skin has no separate trade-history table.
+   */
+  private renderSettlement(c: TopCard) {
+    const PLATFORM_BPS = 200; // 2%, matches the contract's fee
+    const royaltyBps = c.royaltyBps ?? 0;
+    const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+    const fee = (price * PLATFORM_BPS) / 10_000;
+    const royalty = (price * royaltyBps) / 10_000;
+    const sellerNet = price - fee - royalty;
+    const usd = (n: number) => '$' + n.toFixed(2);
+
+    const rows: Array<{ label: string; value: string; color?: string }> = [
+      { label: 'Seller receives', value: usd(sellerNet) },
+      { label: 'Platform fee · 2%', value: usd(fee) },
+    ];
+    if (royaltyBps > 0) {
+      rows.push({
+        label: `Creator royalty · ${(royaltyBps / 100).toFixed(royaltyBps % 100 === 0 ? 0 : 2)}%`,
+        value: usd(royalty),
+        color: '#7c3aed',
+      });
+    }
+
+    return (
+      <div style={{ marginTop: 18, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13, padding: '16px 18px' }}>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, marginBottom: 4 }}>
+          Atomic settlement
+        </div>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginBottom: 12 }}>
+          {royaltyBps > 0
+            ? 'One transaction splits the sale three ways — the creator is paid on every resale, enforced by the contract.'
+            : 'One transaction splits the sale between the seller and the platform fee.'}
+        </div>
+        {rows.map((r, i) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderTop: i === 0 ? 'none' : '1.5px solid rgba(26,19,5,.08)' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: r.color ?? INK }}>{r.label}</div>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, color: r.color ?? INK }}>{r.value}</div>
+          </div>
+        ))}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0 0', marginTop: 5, borderTop: `2px solid ${INK}` }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>Buyer pays</div>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{usd(price)}</div>
+        </div>
+      </div>
+    );
+  }
+
   private renderDetail(c: TopCard) {
     const st = this.state;
     const rm = rarityMeta(c.rarity);
@@ -665,8 +1094,24 @@ export class TopDeckApp extends Component<Props, State> {
                   <div onClick={this.buyNow} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Buy now · {money(c.buyNow)}</div>
                 )}
               </div>
+              {this.props.wallet.passkeyAvailable && c.real && c.contractListingId != null && (
+                <>
+                  <div
+                    onClick={this.state.paying ? undefined : this.payWithPasskey}
+                    style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: this.state.paying ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: this.state.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                  >
+                    {this.state.paying ? 'Confirming…' : `⚡ Pay with Face ID · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                  </div>
+                  <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
+                    {this.state.payErr ?? 'No seed phrase · no extension · fees sponsored'}
+                  </div>
+                </>
+              )}
               <div style={{ textAlign: 'center', fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>🛡 Buyer protection · authenticated by TopDeck Vault before shipping</div>
             </div>
+
+            {c.buyNow > 0 && this.renderPayWith(c)}
+            {this.renderSettlement(c)}
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginTop: 18, padding: '14px 16px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13 }}>
               <div style={{ width: 42, height: 42, borderRadius: 10, background: c.sellerArt, border: `2.5px solid ${INK}` }} />
@@ -850,11 +1295,12 @@ export class TopDeckApp extends Component<Props, State> {
     const startN = Number(f.startBid) || 0;
     const buyN = Number(f.buyNow) || 0;
     const durLabel = f.duration === 1 ? '1 day' : f.duration + ' days';
-    const step1Valid = !!f.cardId;
+    // Hold mode needs a selected card; mint mode needs a name + photo to issue one.
+    const step1Valid = st.sellMode === 'mint' ? f.title.trim().length > 0 && !!f.image : !!f.cardId;
     const step2Valid = startN > 0 && (!f.buyNowOn || buyN > startN) && (!f.graded || (f.grade || '').trim().length > 0);
     const previewArt = f.image ? `center/cover no-repeat url("${f.image}")` : rarityArt(f.rarity);
     const chip = (active: boolean, label: string, onClick: () => void) => (
-      <div onClick={onClick} style={{ fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...this.chipStyle(active) }}>{label}</div>
+      <div key={label} onClick={onClick} style={{ fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...this.chipStyle(active) }}>{label}</div>
     );
     const inputStyle: CSSProperties = { width: '100%', fontFamily: SANS, fontSize: 15, fontWeight: 600, padding: '13px 15px', border: `3px solid ${INK}`, borderRadius: 11, outline: 'none', background: '#fff', color: INK };
 
@@ -917,27 +1363,66 @@ export class TopDeckApp extends Component<Props, State> {
             {/* STEP 1 — pick a real card */}
             {st.sellStep === 1 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CHOOSE A CARD YOU HOLD</div>
-                  {this.props.catalog.length === 0 ? (
-                    <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>No cards available from the marketplace API. Make sure the API is running, then reopen this page.</div>
-                  ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10 }}>
-                      {this.props.catalog.map((cat) => {
-                        const active = f.cardId === cat.id;
-                        return (
-                          <div key={cat.id} onClick={() => this.selectCatalogCard(cat)} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: 10, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 11, cursor: 'pointer', boxShadow: active ? `3px 3px 0 ${INK}` : 'none' }}>
-                            <div style={{ width: 44, height: 44, flex: 'none', borderRadius: 8, border: `2px solid ${INK}`, background: cat.imageUrl ? `center/cover no-repeat url("${cat.imageUrl}")` : rarityArt(mapRarity(cat.rarity)) }} />
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cat.name}</div>
-                              <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>{cat.set} · {cat.rarity}</div>
+                {/* mode: list a held card vs. mint a brand-new one */}
+                <div style={{ display: 'inline-flex', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', boxShadow: `3px 3px 0 ${INK}` }}>
+                  <div onClick={() => this.setSellMode('hold')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'hold' ? INK : '#fff', color: st.sellMode === 'hold' ? '#fff' : INK, borderRight: `3px solid ${INK}` }}>A card I hold</div>
+                  <div onClick={() => this.setSellMode('mint')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'mint' ? INK : '#fff', color: st.sellMode === 'mint' ? '#fff' : INK }}>✨ Mint a new card</div>
+                </div>
+                {st.sellMode === 'hold' ? (
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CHOOSE A CARD YOU HOLD</div>
+                    {this.props.catalog.length === 0 ? (
+                      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>No cards available from the marketplace API. Make sure the API is running, then reopen this page.</div>
+                    ) : (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10 }}>
+                        {this.props.catalog.map((cat) => {
+                          const active = f.cardId === cat.id;
+                          return (
+                            <div key={cat.id} onClick={() => this.selectCatalogCard(cat)} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: 10, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 11, cursor: 'pointer', boxShadow: active ? `3px 3px 0 ${INK}` : 'none' }}>
+                              <div style={{ width: 44, height: 44, flex: 'none', borderRadius: 8, border: `2px solid ${INK}`, background: cat.imageUrl ? `center/cover no-repeat url("${cat.imageUrl}")` : rarityArt(mapRarity(cat.rarity)) }} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cat.name}</div>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>{cat.set} · {cat.rarity}</div>
+                              </div>
+                              {active && <span style={{ fontSize: 15, color: '#13c06a', fontWeight: 800 }}>✓</span>}
                             </div>
-                            {active && <span style={{ fontSize: 15, color: '#13c06a', fontWeight: 800 }}>✓</span>}
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.62)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>
+                    You&apos;re issuing a brand-new card on-chain. Fill in its details below — it&apos;s minted to your wallet when you publish, then listed for sale.
+                  </div>
+                )}
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CARD NAME</div>
+                  <input value={f.title} onChange={(e) => this.setForm('title', e.target.value)} placeholder="e.g. Solar Drake · 1st Edition" style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>SET &amp; NUMBER</div>
+                  <input value={f.setLine} onChange={(e) => this.setForm('setLine', e.target.value)} placeholder="e.g. Base Set · #006 / 102" style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CARD PHOTO</div>
+                  <div
+                    onClick={() => this.fileInput?.click()}
+                    onDragOver={(e) => { e.preventDefault(); if (!st.dragOver) this.setState({ dragOver: true }); }}
+                    onDragLeave={() => this.setState({ dragOver: false })}
+                    onDrop={this.onDropImage}
+                    style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 12, background: st.dragOver ? '#fff7e6' : '#fff', border: `2.5px dashed ${INK}`, borderRadius: 11, cursor: 'pointer', boxShadow: st.dragOver ? `3px 3px 0 ${INK}` : 'none' }}
+                  >
+                    <div style={{ width: 46, height: 46, flex: 'none', borderRadius: 8, border: `2px solid ${INK}`, background: previewArt }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 700 }}>{f.image ? 'Photo added — click to replace' : 'Upload your own photo'}</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>Drag &amp; drop or <span style={{ color: '#2d5bff', textDecoration: 'underline' }}>browse files</span> · PNG/JPG up to 8&nbsp;MB</div>
                     </div>
-                  )}
+                    {f.image && (
+                      <span onClick={(e) => { e.stopPropagation(); this.setForm('image', undefined); }} style={{ fontSize: 12, fontWeight: 800, color: '#ff4d3d', flex: 'none' }}>Remove</span>
+                    )}
+                  </div>
+                  <input ref={(el) => { this.fileInput = el; }} type="file" accept="image/*" onChange={this.onPickImage} style={{ display: 'none' }} />
                 </div>
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CATEGORY</div>
@@ -951,6 +1436,22 @@ export class TopDeckApp extends Component<Props, State> {
                     {(['common', 'rare', 'epic', 'legendary'] as Rarity[]).map((v) => chip(f.rarity === v, v.charAt(0).toUpperCase() + v.slice(1), () => this.setForm('rarity', v)))}
                   </div>
                 </div>
+                {st.sellMode === 'mint' && (
+                  <>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>SUPPLY (COPIES TO ISSUE)</div>
+                      <input type="number" min={1} max={1000} value={f.supply} onChange={(e) => this.setForm('supply', e.target.value)} style={{ ...inputStyle, width: 140 }} />
+                    </div>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+                        <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em' }}>CREATOR ROYALTY</span>
+                        <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{(Number(f.royaltyPct) || 0).toFixed(1)}%</span>
+                      </div>
+                      <input type="range" min={0} max={10} step={0.5} value={Number(f.royaltyPct) || 0} onChange={(e) => this.setForm('royaltyPct', e.target.value)} style={{ width: '100%', accentColor: '#ff4d3d' }} />
+                      <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 6 }}>You earn this on every resale (max 10%). Paid to your wallet automatically at settlement.</div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -1024,7 +1525,16 @@ export class TopDeckApp extends Component<Props, State> {
             {/* nav buttons */}
             <div style={{ display: 'flex', gap: 12, marginTop: 26 }}>
               {st.sellStep === 1 && (
-                <div onClick={() => step1Valid && this.sellNext()} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 28px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: step1Valid ? 'pointer' : 'default', background: step1Valid ? '#ff4d3d' : '#e7ddc8', color: step1Valid ? '#fff' : 'rgba(26,19,5,.4)' }}>Continue to pricing →</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                  <div onClick={() => step1Valid && this.sellNext()} title={step1Valid ? undefined : st.sellMode === 'mint' ? 'Name your card and add a photo to continue' : 'Pick a card you hold above to continue'} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 28px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: step1Valid ? 'pointer' : 'not-allowed', background: step1Valid ? '#ff4d3d' : '#e7ddc8', color: step1Valid ? '#fff' : 'rgba(26,19,5,.4)' }}>Continue to pricing →</div>
+                  {!step1Valid && (
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: '#ff4d3d' }}>
+                      {st.sellMode === 'mint'
+                        ? '↑ Give your new card a name and a photo to continue.'
+                        : '↑ Pick a card you hold from the grid above to continue — or switch to “Mint a new card”.'}
+                    </div>
+                  )}
+                </div>
               )}
               {st.sellStep === 2 && (
                 <>
@@ -1035,7 +1545,7 @@ export class TopDeckApp extends Component<Props, State> {
               {st.sellStep === 3 && (
                 <>
                   <div onClick={this.sellBack} style={{ fontWeight: 800, fontSize: 15, padding: '14px 22px', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer', background: '#fff' }}>← Back</div>
-                  <div onClick={() => !st.publishing && this.publishListing()} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 30px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.publishing ? 'default' : 'pointer', background: '#13c06a', color: '#fff', opacity: st.publishing ? 0.7 : 1 }}>{st.publishing ? 'Publishing…' : '🔨 Publish auction'}</div>
+                  <div onClick={() => !st.publishing && this.publishListing()} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 30px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.publishing ? 'default' : 'pointer', background: '#13c06a', color: '#fff', opacity: st.publishing ? 0.7 : 1 }}>{st.publishing ? (st.sellMode === 'mint' && !st.mintedCard ? 'Minting…' : 'Publishing…') : st.sellMode === 'mint' ? '✨ Mint & publish' : '🔨 Publish auction'}</div>
                 </>
               )}
             </div>

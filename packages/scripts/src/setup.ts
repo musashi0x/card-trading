@@ -60,10 +60,13 @@ async function trustAndReceive(
 ): Promise<void> {
   // Holder establishes a trustline.
   await submit(holder, (b) => b.addOperation(Operation.changeTrust({ asset })));
-  // Issuer mints by paying the holder.
-  await submit(issuer, (b) =>
-    b.addOperation(Operation.payment({ destination: holder.publicKey(), asset, amount })),
-  );
+  // Issuer mints by paying the holder. Amount "0" means trustline-only (e.g. a
+  // royalty payee that just needs to be able to receive the asset).
+  if (Number(amount) > 0) {
+    await submit(issuer, (b) =>
+      b.addOperation(Operation.payment({ destination: holder.publicKey(), asset, amount })),
+    );
+  }
 }
 
 async function main() {
@@ -72,12 +75,23 @@ async function main() {
   const platform = Keypair.random();
   const merchant = Keypair.random();
   const consumer = Keypair.random();
+  // The creator receives royalties on resale; it must trust USDC so atomic
+  // settlement can deliver its cut.
+  const creator = Keypair.random();
+  // Provides XLM↔USDC liquidity on the DEX so a pay-with-any-asset path payment
+  // always has a route on testnet.
+  const marketMaker = Keypair.random();
+  // A buyer that holds only XLM (no USDC), to demo pay-with-any-asset checkout.
+  const xlmBuyer = Keypair.random();
 
   console.log('[setup] funding accounts via friendbot...');
   await Promise.all([
     friendbot(platform.publicKey()),
     friendbot(merchant.publicKey()),
     friendbot(consumer.publicKey()),
+    friendbot(creator.publicKey()),
+    friendbot(marketMaker.publicKey()),
+    friendbot(xlmBuyer.publicKey()),
   ]);
 
   const usdc = new Asset(USDC_CODE, platform.publicKey());
@@ -85,6 +99,27 @@ async function main() {
   console.log('[setup] distributing test USDC...');
   await trustAndReceive(consumer, platform, usdc, '10000');
   await trustAndReceive(merchant, platform, usdc, '1000');
+  // Creator only needs the trustline (0 balance) to be able to receive royalties.
+  await trustAndReceive(creator, platform, usdc, '0');
+  // Market maker holds USDC to sell into the XLM/USDC book.
+  await trustAndReceive(marketMaker, platform, usdc, '20000');
+  // The XLM-only buyer just needs a USDC trustline (0 balance) so a path payment
+  // can deliver converted USDC into it.
+  await trustAndReceive(xlmBuyer, platform, usdc, '0');
+
+  console.log('[setup] seeding XLM↔USDC liquidity (sell USDC for XLM)...');
+  // A sell offer of USDC for XLM gives strict-receive path finding a route from
+  // XLM to USDC. Price is XLM per 1 USDC.
+  await submit(marketMaker, (b) =>
+    b.addOperation(
+      Operation.manageSellOffer({
+        selling: usdc,
+        buying: Asset.native(),
+        amount: '15000',
+        price: '2',
+      }),
+    ),
+  );
 
   console.log('[setup] issuing sample cards to the merchant...');
   const cards: { slug: string; assetCode: string; issuer: string }[] = [];
@@ -98,11 +133,20 @@ async function main() {
     console.log(`  • ${assetCode} (${fixture.name}) x${copies} -> merchant`);
   }
 
+  // Give the creator a couple of copies of a royalty-bearing card so the e2e can
+  // exercise a primary sale (seller == creator -> no royalty taken).
+  const primaryCard = new Asset(assetCodeForSlug('VOID'), platform.publicKey());
+  await trustAndReceive(creator, platform, primaryCard, '2');
+  console.log('  • VOID x2 -> creator (for primary-sale demo)');
+
   const out = {
     network: 'testnet',
     platform: { publicKey: platform.publicKey(), secret: platform.secret() },
     merchant: { publicKey: merchant.publicKey(), secret: merchant.secret() },
     consumer: { publicKey: consumer.publicKey(), secret: consumer.secret() },
+    creator: { publicKey: creator.publicKey(), secret: creator.secret() },
+    marketMaker: { publicKey: marketMaker.publicKey(), secret: marketMaker.secret() },
+    xlmBuyer: { publicKey: xlmBuyer.publicKey(), secret: xlmBuyer.secret() },
     usdc: { code: USDC_CODE, issuer: platform.publicKey() },
     cards,
   };
@@ -119,6 +163,7 @@ async function main() {
   console.log('\nDemo wallets (import secrets into Freighter):');
   console.log(`  merchant: ${merchant.publicKey()}`);
   console.log(`  consumer: ${consumer.publicKey()}`);
+  console.log(`  creator:  ${creator.publicKey()} (royalty payee)`);
 }
 
 main().catch((err) => {

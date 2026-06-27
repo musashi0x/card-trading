@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'react';
 import type { Card } from '@cardmkt/shared';
 import { api } from '@/lib/api';
-import { explorerTx } from '@/lib/explorer';
+import { explorerAccount, explorerTx } from '@/lib/explorer';
 import { useWallet } from '@/components/WalletProvider';
 import { TopDeckApp } from './TopDeckApp';
 import { mapListing, mockCards, type TopCard } from './lib';
@@ -20,7 +20,6 @@ const INK = '#1a1305';
 function Splash() {
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, background: '#fff7ec', color: INK, fontFamily: "'DM Sans',system-ui" }}>
-      <img src="/logo.png" alt="TopDeck Logo" style={{ width: 80, height: 80, borderRadius: '50%', border: `3px solid ${INK}`, marginBottom: 8 }} />
       <div style={{ fontFamily: "'Bricolage Grotesque'", fontWeight: 800, fontSize: 40, letterSpacing: '-.03em' }}>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>
         <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4d3d', animation: 'pulseDot 1.3s infinite' }} />Loading live auctions…
@@ -30,7 +29,20 @@ function Splash() {
 }
 
 export function TopDeck() {
-  const { address, connecting, connect, disconnect, runAction } = useWallet();
+  const {
+    address,
+    connecting,
+    walletKind,
+    passkeyAvailable,
+    connect,
+    connectViaPasskey,
+    disconnect,
+    runAction,
+    passkeyBuyNow,
+    passkeyList,
+    mintCard,
+    payWithAsset,
+  } = useWallet();
   const [seed, setSeed] = useState<TopCard[] | null>(null);
   const [catalog, setCatalog] = useState<Card[]>([]);
 
@@ -56,10 +68,24 @@ export function TopDeck() {
 
   return (
     <TopDeckApp
-      wallet={{ address, connecting, connect, disconnect, runAction: (action, body) => runAction(action, body) }}
+      wallet={{
+        address,
+        connecting,
+        walletKind,
+        passkeyAvailable,
+        connect,
+        connectViaPasskey,
+        disconnect,
+        runAction: (action, body) => runAction(action, body),
+        passkeyBuyNow,
+        passkeyList,
+        mintCard,
+        payWithAsset,
+      }}
       seedCards={seed}
       catalog={catalog}
       explorerTx={explorerTx}
+      explorerAddress={explorerAccount}
     />
   );
 }

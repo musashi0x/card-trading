@@ -14,12 +14,18 @@ export interface Card {
   assetCode: string;
   /** Stellar account that issued the asset. */
   issuer: string;
+  /** Card token's Stellar Asset Contract address (`C…`), or null if not deployed. */
+  sacAddress: string | null;
   name: string;
   set: string;
   rarity: string;
   imageUrl: string;
   /** Total issued supply (copies in existence). */
   supply: number;
+  /** Stellar account that receives the creator royalty on resale (null = none). */
+  creatorAccount: string | null;
+  /** Creator royalty in basis points, applied on secondary sales (0 = none). */
+  royaltyBps: number;
 }
 
 export interface Listing {
@@ -60,8 +66,60 @@ export interface Trade {
   seller: string;
   priceUsdc: string;
   feeUsdc: string;
+  /** Creator royalty paid on this settlement (0 on a primary sale). */
+  royaltyUsdc: string;
   settleTxHash: string;
   settledAt: string;
+}
+
+/**
+ * A Stellar asset the buyer can pay with. `issuer` is `null` for the native
+ * asset (XLM); otherwise it's the issuing account of a classic credit asset.
+ */
+export interface StellarAsset {
+  code: string;
+  issuer: string | null;
+}
+
+/**
+ * Request to quote a source-asset → USDC conversion for a purchase. The API
+ * prices it against the Stellar DEX (Horizon strict-receive path finding).
+ */
+export interface PathQuoteRequest {
+  /** Buyer account paying with `sourceAsset`. */
+  buyer: string;
+  /** Asset the buyer wants to spend (XLM has `issuer: null`). */
+  sourceAsset: StellarAsset;
+  /** Exact USDC the settlement needs, as a decimal string. */
+  destUsdc: string;
+}
+
+/** A priced conversion route the buyer can accept and then submit. */
+export interface PathQuoteResponse {
+  sourceAsset: StellarAsset;
+  /** Exact USDC the path payment will deliver. */
+  destUsdc: string;
+  /** Estimated source-asset spend at the current quote, decimal string. */
+  sendAmount: string;
+  /** Hard cap on the source-asset spend = `sendAmount` + slippage, decimal string. */
+  sendMax: string;
+  /** Slippage tolerance baked into `sendMax`, in basis points. */
+  slippageBps: number;
+  /** Intermediate hops Horizon found (empty for a direct path). */
+  path: StellarAsset[];
+}
+
+/**
+ * Request to build the `PathPaymentStrictReceive` for an accepted quote. The
+ * `sendMax`/`path` echo a prior {@link PathQuoteResponse} so the buyer can never
+ * spend more than they were quoted plus slippage.
+ */
+export interface PathPaymentBuildRequest {
+  buyer: string;
+  sourceAsset: StellarAsset;
+  destUsdc: string;
+  sendMax: string;
+  path: StellarAsset[];
 }
 
 /** The contract action a build-transaction request targets. */
@@ -86,15 +144,102 @@ export interface SubmitTxRequest {
   signedXdr: string;
 }
 
+/**
+ * A passkey smart-wallet account: a Soroban contract account (a `C…` address)
+ * whose authorization is verified by a secp256r1 passkey, not a classic `G…`
+ * keypair. This is the buyer of record for passkey checkouts.
+ */
+export interface SmartWalletAccount {
+  /** Smart-wallet contract address (`C…`). */
+  contractId: string;
+  /** Base64url WebAuthn credential id that authorizes this wallet. */
+  keyId: string;
+}
+
+/**
+ * Submit a passkey-authorized Soroban invocation for gasless relay submission.
+ *
+ * The browser builds the marketplace call with the smart wallet as buyer,
+ * passkey-signs its authorization entry (and, on first use, bundles wallet
+ * deployment), and serializes the result to `signedXdr`. The API relays it
+ * through the sponsoring relay rather than a classic Horizon submit.
+ */
+export interface PasskeySubmitRequest {
+  /** Buyer-side action this settles. */
+  action: Extract<TradeAction, 'buy_now' | 'make_offer'>;
+  /** Listing the action targets (a buyer-side action always targets a listing). */
+  listingId: string;
+  /** Smart-wallet contract address (`C…`) acting as buyer of record. */
+  buyer: string;
+  /** Passkey-signed transaction envelope (XDR), ready for the relay. */
+  signedXdr: string;
+  /** Offer amount; required for `make_offer`, ignored for `buy_now`. */
+  amountUsdc?: string;
+}
+
+/**
+ * Submit a passkey-authorized `list` for gasless relay submission. The smart
+ * wallet is the seller of record; the browser builds the marketplace `list`
+ * call with the smart wallet as seller, passkey-signs its authorization entry
+ * (and, on first use, bundles wallet deployment), and serializes the result to
+ * `signedXdr`. The API relays it rather than using a classic Horizon submit.
+ */
+export interface PasskeyListRequest {
+  cardId: string;
+  /** Smart-wallet contract address (`C…`) acting as seller of record. */
+  seller: string;
+  /** Asking price in test USDC, as a decimal string. */
+  priceUsdc: string;
+  /** Passkey-signed transaction envelope (XDR), ready for the relay. */
+  signedXdr: string;
+}
+
 export interface SubmitTxResponse {
   hash: string;
   successful: boolean;
 }
 
+/**
+ * Mint (issue) a brand-new card asset. The platform issues the asset, deploys
+ * its Stellar Asset Contract, distributes `supply` copies to `owner`, and (when
+ * `royaltyBps > 0`) registers `owner` as the card's creator royalty payee.
+ */
+export interface MintCardRequest {
+  /** Wallet that will own the minted copies — classic `G…` or smart-wallet `C…`. */
+  owner: string;
+  name: string;
+  set: string;
+  rarity: string;
+  /** Card art: an http(s) URL or a `data:` URL from the upload picker. */
+  imageUrl: string;
+  /** How many copies to issue (>= 1). */
+  supply: number;
+  /** Creator royalty in basis points (0–maxRoyaltyBps); 0 = no royalty. */
+  royaltyBps: number;
+}
+
+/**
+ * Result of a mint. For a smart-wallet (`C…`) owner the copies are minted
+ * gaslessly server-side (`minted: true`). For a classic (`G…`) owner that does
+ * not yet trust the new asset, `minted` is false and `trustlineXdr` must be
+ * signed + submitted before calling `distribute` to receive the copies.
+ */
+export interface MintCardResponse {
+  card: Card;
+  /** Whether the owner already holds the issued copies. */
+  minted: boolean;
+  /** Set when a classic owner must establish a trustline before distribution. */
+  trustlineXdr?: string;
+  networkPassphrase?: string;
+}
+
 /** Structured, actionable error returned by pre-flight validation. */
 export interface ApiError {
   error: string;
-  /** Machine-readable code, e.g. `MISSING_TRUSTLINE`, `INSUFFICIENT_BALANCE`. */
+  /**
+   * Machine-readable code, e.g. `MISSING_TRUSTLINE`, `INSUFFICIENT_BALANCE`,
+   * or `NO_PATH` when no DEX route exists for a pay-with-any-asset conversion.
+   */
   code: string;
   /** Optional hint the UI can act on (e.g. the asset needing a trustline). */
   details?: Record<string, unknown>;

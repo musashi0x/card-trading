@@ -15,6 +15,7 @@ target/
 # Generated
 .stellar/
 deploy.json
+stellar-accounts.json
 
 .agent/
 .claude/

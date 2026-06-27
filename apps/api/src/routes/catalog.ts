@@ -52,6 +52,8 @@ catalogRouter.get('/listings', async (req, res, next) => {
           rarity: cards.rarity,
           imageUrl: cards.imageUrl,
           supply: cards.supply,
+          creatorAccount: cards.creatorAccount,
+          royaltyBps: cards.royaltyBps,
         },
       })
       .from(listings)
