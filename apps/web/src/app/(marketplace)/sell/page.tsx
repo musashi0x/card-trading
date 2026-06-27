@@ -1,0 +1,320 @@
+'use client';
+
+import { useRef } from 'react';
+import type { CSSProperties } from 'react';
+import { useTopDeck } from '@/components/topdeck/TopDeckProvider';
+import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
+import { money, rarityMeta, rarityArt, mapRarity } from '@/components/topdeck/lib';
+import { chipStyle } from '@/components/topdeck/shared/CardTile';
+import type { Rarity } from '@/components/topdeck/lib';
+
+export default function SellPage() {
+  const td = useTopDeck();
+  const st = td.state;
+  const f = st.form;
+  const fileInput = useRef<HTMLInputElement | null>(null);
+
+  const rm = rarityMeta(f.rarity);
+  const startN = Number(f.startBid) || 0;
+  const buyN = Number(f.buyNow) || 0;
+  const durLabel = f.duration === 1 ? '1 day' : f.duration + ' days';
+  // Hold mode needs a selected card; mint mode needs a name + photo to issue one.
+  const step1Valid = st.sellMode === 'mint' ? f.title.trim().length > 0 && !!f.image : !!f.cardId;
+  const step2Valid = startN > 0 && (!f.buyNowOn || buyN > startN) && (!f.graded || (f.grade || '').trim().length > 0);
+  const previewArt = f.image ? `center/cover no-repeat url("${f.image}")` : rarityArt(f.rarity);
+  const chip = (active: boolean, label: string, onClick: () => void) => (
+    <div key={label} onClick={onClick} style={{ fontSize: 13, fontWeight: 700, padding: '10px 18px', border: `2.5px solid ${INK}`, borderRadius: 999, cursor: 'pointer', ...chipStyle(active) }}>{label}</div>
+  );
+  const inputStyle: CSSProperties = { width: '100%', fontFamily: SANS, fontSize: 15, fontWeight: 600, padding: '13px 15px', border: `3px solid ${INK}`, borderRadius: 11, outline: 'none', background: '#fff', color: INK };
+
+  if (st.sellStep === 4) {
+    return (
+      <div className="m-pad" style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
+        <div style={{ maxWidth: 520, margin: '30px auto 0', textAlign: 'center' }}>
+          <div style={{ fontSize: 56 }}>🎉</div>
+          <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: '10px 0 0' }}>Your auction is live!</h1>
+          <div style={{ fontSize: 14.5, color: 'rgba(26,19,5,.6)', fontWeight: 500, marginTop: 8 }}>Listed on-chain — the card is locked in escrow until it sells or you cancel.</div>
+          {st.lastHash && (
+            <a href={td.explorerTx(st.lastHash)} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 10, fontSize: 13, fontWeight: 700, color: '#2d5bff' }}>View transaction ↗</a>
+          )}
+          <div style={{ maxWidth: 280, margin: '26px auto 0' }}>
+            <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, overflow: 'hidden', boxShadow: `5px 5px 0 ${INK}`, textAlign: 'left' }}>
+              <div style={{ position: 'relative', height: 190, background: previewArt }}>
+                <div style={{ position: 'absolute', top: 11, left: 11, fontSize: 10, fontWeight: 800, padding: '4px 11px', borderRadius: 7, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
+                <div style={{ position: 'absolute', top: 9, right: 9, fontSize: 10, fontWeight: 800, padding: '4px 9px', borderRadius: 7, background: '#13c06a', color: '#fff', border: `2px solid ${INK}` }}>● LIVE</div>
+              </div>
+              <div style={{ padding: '13px 14px 15px' }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{f.title || 'Your card'}</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 10 }}>
+                  <div><div style={{ fontSize: 10, color: 'rgba(26,19,5,.5)', fontWeight: 600 }}>Starting bid</div><div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 19 }}>{money(startN)}</div></div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>0 bids</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 28 }}>
+            <div onClick={td.goHome} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 26px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>View in marketplace</div>
+            <div onClick={td.listAnother} style={{ fontWeight: 800, fontSize: 15, padding: '14px 24px', background: '#fff', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer' }}>List another</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const stepDot = (n: number) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ width: 24, height: 24, borderRadius: '50%', border: `2.5px solid ${INK}`, background: st.sellStep >= n ? '#ff4d3d' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: st.sellStep >= n && n === 1 ? '#fff' : INK }}>{n}</div>
+      <span style={{ fontSize: 13, fontWeight: 700, color: st.sellStep >= n ? INK : 'rgba(26,19,5,.4)' }}>{['Details', 'Pricing', 'Review'][n - 1]}</span>
+    </div>
+  );
+
+  return (
+    <div className="m-pad" style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
+      <div onClick={td.goHome} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 18, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← Cancel</div>
+      <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: 0 }}>List a card for auction</h1>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0 26px' }}>
+        {stepDot(1)}
+        <div style={{ flex: 'none', width: 30, height: 2.5, background: INK }} />
+        {stepDot(2)}
+        <div style={{ flex: 'none', width: 30, height: 2.5, background: INK }} />
+        {stepDot(3)}
+      </div>
+
+      <div className="stack" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 40, alignItems: 'start' }}>
+        <div>
+          {/* STEP 1 — pick a real card */}
+          {st.sellStep === 1 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+              {/* mode: list a held card vs. mint a brand-new one */}
+              <div style={{ display: 'inline-flex', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', boxShadow: `3px 3px 0 ${INK}` }}>
+                <div onClick={() => td.setSellMode('hold')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'hold' ? INK : '#fff', color: st.sellMode === 'hold' ? '#fff' : INK, borderRight: `3px solid ${INK}` }}>A card I hold</div>
+                <div onClick={() => td.setSellMode('mint')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'mint' ? INK : '#fff', color: st.sellMode === 'mint' ? '#fff' : INK }}>✨ Mint a new card</div>
+              </div>
+              {st.sellMode === 'hold' ? (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CHOOSE A CARD YOU HOLD</div>
+                  {td.catalog.length === 0 ? (
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>
+                      {!td.wallet.address
+                        ? 'Connect your wallet to see the cards you hold.'
+                        : 'You don’t hold any cards yet. Switch to “Mint a new card” to issue one.'}
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10 }}>
+                      {td.catalog.map((cat) => {
+                        const active = f.cardId === cat.id;
+                        return (
+                          <div key={cat.id} onClick={() => td.selectCatalogCard(cat)} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: 10, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 11, cursor: 'pointer', boxShadow: active ? `3px 3px 0 ${INK}` : 'none' }}>
+                            <div style={{ width: 44, height: 44, flex: 'none', borderRadius: 8, border: `2px solid ${INK}`, background: cat.imageUrl ? `center/cover no-repeat url("${cat.imageUrl}")` : rarityArt(mapRarity(cat.rarity)) }} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cat.name}</div>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>{cat.set} · {cat.rarity}</div>
+                            </div>
+                            {active && <span style={{ fontSize: 15, color: '#13c06a', fontWeight: 800 }}>✓</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.62)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>
+                  You&apos;re issuing a brand-new card on-chain. Fill in its details below — it&apos;s minted to your wallet when you publish, then listed for sale.
+                </div>
+              )}
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CARD NAME</div>
+                <input value={f.title} onChange={(e) => td.setForm('title', e.target.value)} placeholder="e.g. Solar Drake · 1st Edition" style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>SET &amp; NUMBER</div>
+                <input value={f.setLine} onChange={(e) => td.setForm('setLine', e.target.value)} placeholder="e.g. Base Set · #006 / 102" style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CARD PHOTO</div>
+                <div
+                  onClick={() => fileInput.current?.click()}
+                  onDragOver={(e) => { e.preventDefault(); if (!st.dragOver) td.setDragOver(true); }}
+                  onDragLeave={() => td.setDragOver(false)}
+                  onDrop={td.onDropImage}
+                  style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 12, background: st.dragOver ? '#fff7e6' : '#fff', border: `2.5px dashed ${INK}`, borderRadius: 11, cursor: 'pointer', boxShadow: st.dragOver ? `3px 3px 0 ${INK}` : 'none' }}
+                >
+                  <div style={{ width: 46, height: 46, flex: 'none', borderRadius: 8, border: `2px solid ${INK}`, background: previewArt }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 700 }}>{f.image ? 'Photo added — click to replace' : 'Upload your own photo'}</div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>Drag &amp; drop or <span style={{ color: '#2d5bff', textDecoration: 'underline' }}>browse files</span> · PNG/JPG up to 8&nbsp;MB</div>
+                  </div>
+                  {f.image && (
+                    <span onClick={(e) => { e.stopPropagation(); td.setForm('image', undefined); }} style={{ fontSize: 12, fontWeight: 800, color: '#ff4d3d', flex: 'none' }}>Remove</span>
+                  )}
+                </div>
+                <input ref={(el) => { fileInput.current = el; }} type="file" accept="image/*" onChange={td.onPickImage} style={{ display: 'none' }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CATEGORY</div>
+                <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                  {['Pokémon', 'Sports', 'Other'].map((v) => chip(f.category === v, v, () => td.setForm('category', v)))}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>RARITY</div>
+                <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                  {(['common', 'rare', 'epic', 'legendary'] as Rarity[]).map((v) => chip(f.rarity === v, v.charAt(0).toUpperCase() + v.slice(1), () => td.setForm('rarity', v)))}
+                </div>
+              </div>
+              {st.sellMode === 'mint' && (
+                <>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>SUPPLY (COPIES TO ISSUE)</div>
+                    <input type="number" min={1} max={1000} value={f.supply} onChange={(e) => td.setForm('supply', e.target.value)} style={{ ...inputStyle, width: 140 }} />
+                  </div>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em' }}>CREATOR ROYALTY</span>
+                      <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{(Number(f.royaltyPct) || 0).toFixed(1)}%</span>
+                    </div>
+                    <input type="range" min={0} max={10} step={0.5} value={Number(f.royaltyPct) || 0} onChange={(e) => td.setForm('royaltyPct', e.target.value)} style={{ width: '100%', accentColor: '#ff4d3d' }} />
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 6 }}>You earn this on every resale (max 10%). Paid to your wallet automatically at settlement.</div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* STEP 2 — pricing */}
+          {st.sellStep === 2 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CONDITION</div>
+                <div style={{ display: 'flex', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', width: 'fit-content' }}>
+                  <div onClick={() => td.setForm('graded', true)} style={{ fontSize: 13, fontWeight: 800, padding: '11px 22px', cursor: 'pointer', background: f.graded ? '#ffd84d' : '#fff', borderRight: `2.5px solid ${INK}` }}>Graded slab</div>
+                  <div onClick={() => td.setForm('graded', false)} style={{ fontSize: 13, fontWeight: 800, padding: '11px 22px', cursor: 'pointer', background: !f.graded ? '#ffd84d' : '#fff' }}>Raw card</div>
+                </div>
+                {f.graded ? (
+                  <input value={f.grade} onChange={(e) => td.setForm('grade', e.target.value)} placeholder="e.g. PSA 10, BGS 9.5" style={{ ...inputStyle, marginTop: 12, width: 240 }} />
+                ) : (
+                  <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', marginTop: 12 }}>
+                    {['Mint', 'Near Mint', 'Lightly Played', 'Played'].map((v) => chip(f.condition === v, v, () => td.setForm('condition', v)))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>STARTING BID (USDC)</div>
+                <div style={{ display: 'flex', alignItems: 'center', background: '#fff', border: `3px solid ${INK}`, borderRadius: 11, padding: '2px 15px', width: 240 }}>
+                  <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20 }}>$</span>
+                  <input type="number" value={f.startBid} onChange={(e) => td.setForm('startBid', e.target.value)} placeholder="0" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, padding: '11px 6px', width: '100%', color: INK }} />
+                </div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 6 }}>This is the listing price locked into the settlement contract.</div>
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: 300 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em' }}>BUY IT NOW</div>
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>Cosmetic preview — fixed-price sale settles at the listed price</div>
+                  </div>
+                  <div onClick={() => td.setForm('buyNowOn', !f.buyNowOn)} style={{ width: 46, height: 28, borderRadius: 999, border: `2.5px solid ${INK}`, background: f.buyNowOn ? '#13c06a' : '#fff', position: 'relative', cursor: 'pointer', flex: 'none' }}>
+                    <div style={{ position: 'absolute', top: 1, left: f.buyNowOn ? 18 : 2, width: 20, height: 20, borderRadius: '50%', background: '#fff', border: `2px solid ${INK}`, transition: 'left .15s' }} />
+                  </div>
+                </div>
+                {f.buyNowOn && (
+                  <div style={{ display: 'flex', alignItems: 'center', background: '#fff', border: `3px solid ${INK}`, borderRadius: 11, padding: '2px 15px', width: 240, marginTop: 12 }}>
+                    <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20 }}>$</span>
+                    <input type="number" value={f.buyNow} onChange={(e) => td.setForm('buyNow', e.target.value)} placeholder="0" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, padding: '11px 6px', width: '100%', color: INK }} />
+                  </div>
+                )}
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>AUCTION LENGTH</div>
+                <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                  {([[1, '1 day'], [3, '3 days'], [7, '7 days']] as Array<[number, string]>).map(([v, l]) => chip(f.duration === v, l, () => td.setForm('duration', v)))}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>DELIVERY</div>
+                <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                  {chip(f.fulfillment === 'digital', '⚡ Digital · instant', () => td.setForm('fulfillment', 'digital'))}
+                  {chip(f.fulfillment === 'physical', '🛡 Physical · escrow', () => td.setForm('fulfillment', 'physical'))}
+                </div>
+                <div style={{ fontSize: 11.5, color: 'rgba(26,19,5,.55)', marginTop: 7, maxWidth: 460 }}>
+                  {f.fulfillment === 'physical'
+                    ? 'Buyer’s funds are held in escrow until they confirm the card arrived. Disputes go to the arbiter.'
+                    : 'The card token transfers to the buyer the instant they pay — best for digital-only cards.'}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3 — review */}
+          {st.sellStep === 3 && (
+            <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
+              <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 17, padding: '15px 18px', borderBottom: `2.5px solid ${INK}`, background: '#ffd84d' }}>Review your listing</div>
+              <div style={{ padding: '6px 18px 12px' }}>
+                {([['Card', f.title || 'Untitled card'], ['Set', f.setLine || '—'], ['Condition', f.graded ? `${f.grade} · Graded` : f.condition], ['Starting bid', money(startN)], ['Buy it now', f.buyNowOn && buyN > 0 ? money(buyN) : 'None'], ['Delivery', f.fulfillment === 'physical' ? 'Physical · escrow' : 'Digital · instant'], ['Runs for', durLabel]] as Array<[string, string]>).map(([k, v], i, arr) => (
+                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 0', borderBottom: i === arr.length - 1 ? 'none' : '1.5px solid rgba(26,19,5,.1)' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>{k}</span>
+                    <span style={{ fontSize: 13.5, fontWeight: 700 }}>{v}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', padding: '12px 18px', background: '#fff7ec', borderTop: `2.5px solid ${INK}` }}>🛡 Your card ships to the TopDeck Vault for authentication before payout. Listing locks one copy in the settlement contract.</div>
+            </div>
+          )}
+
+          {/* nav buttons */}
+          <div style={{ display: 'flex', gap: 12, marginTop: 26 }}>
+            {st.sellStep === 1 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                <div onClick={() => step1Valid && td.sellNext()} title={step1Valid ? undefined : st.sellMode === 'mint' ? 'Name your card and add a photo to continue' : 'Pick a card you hold above to continue'} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 28px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: step1Valid ? 'pointer' : 'not-allowed', background: step1Valid ? '#ff4d3d' : '#e7ddc8', color: step1Valid ? '#fff' : 'rgba(26,19,5,.4)' }}>Continue to pricing →</div>
+                {!step1Valid && (
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: '#ff4d3d' }}>
+                    {st.sellMode === 'mint'
+                      ? '↑ Give your new card a name and a photo to continue.'
+                      : '↑ Pick a card you hold from the grid above to continue — or switch to “Mint a new card”.'}
+                  </div>
+                )}
+              </div>
+            )}
+            {st.sellStep === 2 && (
+              <>
+                <div onClick={td.sellBack} style={{ fontWeight: 800, fontSize: 15, padding: '14px 22px', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer', background: '#fff' }}>← Back</div>
+                <div onClick={() => step2Valid && td.sellNext()} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 28px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: step2Valid ? 'pointer' : 'default', background: step2Valid ? '#ff4d3d' : '#e7ddc8', color: step2Valid ? '#fff' : 'rgba(26,19,5,.4)' }}>Review listing →</div>
+              </>
+            )}
+            {st.sellStep === 3 && (
+              <>
+                <div onClick={td.sellBack} style={{ fontWeight: 800, fontSize: 15, padding: '14px 22px', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer', background: '#fff' }}>← Back</div>
+                <div onClick={() => !st.publishing && td.publishListing()} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 30px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.publishing ? 'default' : 'pointer', background: '#13c06a', color: '#fff', opacity: st.publishing ? 0.7 : 1 }}>{st.publishing ? (st.sellMode === 'mint' && !st.mintedCard ? 'Minting…' : 'Publishing…') : st.sellMode === 'mint' ? '✨ Mint & publish' : '🔨 Publish auction'}</div>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* live preview */}
+        <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 10 }}>LIVE PREVIEW</div>
+          <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, overflow: 'hidden', boxShadow: `5px 5px 0 ${INK}` }}>
+            <div style={{ position: 'relative', height: 230, background: previewArt }}>
+              <div style={{ position: 'absolute', top: 11, left: 11, fontSize: 10, fontWeight: 800, letterSpacing: '.03em', padding: '4px 11px', borderRadius: 7, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
+            </div>
+            <div style={{ padding: '14px 15px 16px' }}>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: 1.2 }}>{f.title || 'Your card name'}</div>
+              <div style={{ fontSize: 11.5, color: 'rgba(26,19,5,.5)', marginTop: 3, fontWeight: 600 }}>{f.graded ? `${f.grade} · Graded` : f.condition}</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 14 }}>
+                <div>
+                  <div style={{ fontSize: 10.5, color: 'rgba(26,19,5,.5)', fontWeight: 600 }}>Starting bid</div>
+                  <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 22 }}>{startN > 0 ? money(startN) : '$0'}</div>
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 800, padding: '4px 9px', borderRadius: 7, background: INK, color: '#fff' }}>⏱ {durLabel}</div>
+              </div>
+              {f.buyNowOn && buyN > 0 && (
+                <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: '#0a5e34' }}>Buy now · {money(buyN)}</div>
+              )}
+            </div>
+          </div>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 12, textAlign: 'center' }}>This is exactly how buyers will see your card.</div>
+        </div>
+      </div>
+    </div>
+  );
+}

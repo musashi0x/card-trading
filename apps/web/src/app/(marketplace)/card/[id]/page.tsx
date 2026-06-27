@@ -1,0 +1,274 @@
+'use client';
+
+import { useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import { useTopDeck, PAY_ASSETS, type PayAssetId } from '@/components/topdeck/TopDeckProvider';
+import { type TopCard, money, fmtLeft, fmtAgo, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
+import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
+
+function renderPayWith(c: TopCard, st: ReturnType<typeof useTopDeck>['state'], td: ReturnType<typeof useTopDeck>) {
+  const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+  const sel = st.payAsset;
+  const trim = (s: string) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+
+  return (
+    <div style={{ marginTop: 18, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13, padding: '14px 18px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 14 }}>Pay with</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {PAY_ASSETS.map((a) => (
+            <div
+              key={a.id}
+              onClick={() => td.selectPayAsset(a.id)}
+              style={{
+                fontSize: 12.5, fontWeight: 800, padding: '7px 14px', borderRadius: 9, cursor: 'pointer',
+                border: `2.5px solid ${INK}`, fontFamily: DISPLAY,
+                background: sel === a.id ? INK : '#fff', color: sel === a.id ? '#fff' : INK,
+              }}
+            >
+              {a.label}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {sel !== 'USDC' && (
+        <div style={{ marginTop: 12, fontSize: 12.5, fontWeight: 600 }}>
+          {st.quoting && !st.quote ? (
+            <div style={{ color: 'rgba(26,19,5,.55)' }}>Fetching best price…</div>
+          ) : st.quoteErr ? (
+            <div style={{ color: '#a3160a', fontWeight: 700 }}>⚠ {st.quoteErr}</div>
+          ) : st.quote && Number(st.quote.destUsdc) <= 0 ? (
+            <div style={{ color: '#0a5e34', fontWeight: 700 }}>
+              ✓ You already hold enough USDC — no swap needed
+            </div>
+          ) : st.quote ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <div>
+                You pay ≈ <strong>{trim(st.quote.sendAmount)} {sel}</strong> → seller receives{' '}
+                <strong>{trim(st.quote.destUsdc)} USDC</strong>
+              </div>
+              <div style={{ color: 'rgba(26,19,5,.55)' }}>
+                Max {trim(st.quote.sendMax)} {sel} · {(st.quote.slippageBps / 100).toFixed(2)}% slippage cap
+              </div>
+            </div>
+          ) : (
+            <div style={{ color: 'rgba(26,19,5,.55)' }}>
+              Converted on-chain to {money(price)} USDC via a Stellar path payment.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderSettlement(c: TopCard) {
+  const PLATFORM_BPS = 200; // 2%, matches the contract's fee
+  const royaltyBps = c.royaltyBps ?? 0;
+  const price = c.buyNow > 0 ? c.buyNow : c.currentBid;
+  const fee = (price * PLATFORM_BPS) / 10_000;
+  const royalty = (price * royaltyBps) / 10_000;
+  const sellerNet = price - fee - royalty;
+  const usd = (n: number) => '$' + n.toFixed(2);
+
+  const rows: Array<{ label: string; value: string; color?: string }> = [
+    { label: 'Seller receives', value: usd(sellerNet) },
+    { label: 'Platform fee · 2%', value: usd(fee) },
+  ];
+  if (royaltyBps > 0) {
+    rows.push({
+      label: `Creator royalty · ${(royaltyBps / 100).toFixed(royaltyBps % 100 === 0 ? 0 : 2)}%`,
+      value: usd(royalty),
+      color: '#7c3aed',
+    });
+  }
+
+  return (
+    <div style={{ marginTop: 18, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13, padding: '16px 18px' }}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, marginBottom: 4 }}>
+        Atomic settlement
+      </div>
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginBottom: 12 }}>
+        {royaltyBps > 0
+          ? 'One transaction splits the sale three ways — the creator is paid on every resale, enforced by the contract.'
+          : 'One transaction splits the sale between the seller and the platform fee.'}
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderTop: i === 0 ? 'none' : '1.5px solid rgba(26,19,5,.08)' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: r.color ?? INK }}>{r.label}</div>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, color: r.color ?? INK }}>{r.value}</div>
+        </div>
+      ))}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0 0', marginTop: 5, borderTop: `2px solid ${INK}` }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>Buyer pays</div>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{usd(price)}</div>
+      </div>
+    </div>
+  );
+}
+
+export default function CardDetailPage() {
+  const params = useParams<{ id: string }>();
+  const id = params.id;
+  const td = useTopDeck();
+  const st = td.state;
+
+  useEffect(() => {
+    td.viewCard(id);
+  }, [id]);
+
+  const c = td.getCard(id);
+
+  if (!c) {
+    return (
+      <div className="m-pad" style={{ maxWidth: 1180, margin: '0 auto', padding: '30px 32px 80px' }}>
+        <div style={{ background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16, padding: '60px 40px', textAlign: 'center' }}>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, marginBottom: 16 }}>Listing not found or ended</div>
+          <div
+            onClick={td.goHome}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 14, fontWeight: 800, cursor: 'pointer', padding: '10px 20px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: `2px 2px 0 ${INK}`, fontFamily: DISPLAY }}
+          >
+            Back to auctions
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const rm = rarityMeta(c.rarity);
+  const left = c.endsAt - st.now;
+  const ending = left < 3600000;
+  const min = c.currentBid + increment(c.currentBid);
+  const status = st.status[c.id];
+  const banner =
+    status === 'winning' ? { t: "🏆 You're the top bidder — hold tight!", bg: '#bff3d4', col: '#0a5e34' }
+      : status === 'outbid' ? { t: "⚡ You've been outbid — raise your bid to win", bg: '#ffd1cc', col: '#a3160a' }
+        : status === 'won' ? { t: '🎉 Purchased — heading to the TopDeck Vault', bg: '#bff3d4', col: '#0a5e34' }
+          : null;
+  const watched = st.watched[c.id];
+  const bids = c.bids.map((b, i) => ({
+    ...b,
+    when: b.at ? fmtAgo(st.now - b.at) : fmtAgo(b.ago ?? 0),
+    dot: b.you ? '#13c06a' : i === 0 ? '#ff4d3d' : 'rgba(26,19,5,.25)',
+    nameColor: b.you ? '#13c06a' : INK,
+    rowBg: b.you ? '#f0fff6' : i === 0 ? '#fff7ec' : '#fff',
+  }));
+
+  return (
+    <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '24px 32px 90px' }}>
+      <div onClick={td.goHome} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 20, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← All auctions</div>
+
+      <div className="stack" style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: 40, alignItems: 'start' }}>
+        <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
+          <div style={{ position: 'relative', aspectRatio: '3 / 4', borderRadius: 18, border: `3px solid ${INK}`, boxShadow: `7px 7px 0 ${INK}`, background: c.art, overflow: 'hidden' }}>
+            <div style={{ position: 'absolute', top: 14, left: 14, fontSize: 12, fontWeight: 800, letterSpacing: '.03em', padding: '5px 13px', borderRadius: 8, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
+            <div onClick={(e) => td.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, fontSize: 18, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>♥</div>
+            <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 16, background: 'linear-gradient(transparent,rgba(26,19,5,.55))', color: '#fff', fontWeight: 700, fontSize: 13 }}>{c.grade}</div>
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            {['🔍 Zoom', '📋 Card info', '↗ Share'].map((t) => (
+              <div key={t} style={{ flex: 1, textAlign: 'center', fontSize: 11, fontWeight: 700, padding: 9, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9 }}>{t}</div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: 'rgba(26,19,5,.5)', letterSpacing: '.02em' }}>{c.setLine}</div>
+          <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: '6px 0 0', lineHeight: 1.05 }}>{c.name}</h1>
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
+            {[c.condition, c.grade, c.cats[0]].map((t, i) => (
+              <div key={i} style={{ fontSize: 11.5, fontWeight: 700, padding: '6px 12px', borderRadius: 8, background: '#fff', border: `2px solid ${INK}` }}>{t}</div>
+            ))}
+          </div>
+
+          {banner && (
+            <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 9, fontSize: 13, fontWeight: 700, padding: '11px 15px', borderRadius: 11, border: `2.5px solid ${INK}`, background: banner.bg, color: banner.col }}>{banner.t}</div>
+          )}
+
+          <div style={{ marginTop: 18, background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, padding: '20px 22px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>Current bid · {c.bids.length} bids</div>
+                <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 42, lineHeight: 1, marginTop: 3 }}>{money(c.currentBid)}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 5 }}>Next bid: {money(min)} or more</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>Auction ends in</div>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, padding: '6px 14px', borderRadius: 10, border: `2.5px solid ${INK}`, marginTop: 5, background: ending ? '#ff4d3d' : INK, color: '#fff' }}>⏱ {fmtLeft(left)}</div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginTop: 20 }}>
+              <div onClick={td.openBid} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Place bid</div>
+              {c.buyNow > 0 && (
+                <div onClick={td.buyNow} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Buy now · {money(c.buyNow)}</div>
+              )}
+            </div>
+            {c.real && c.contractListingId != null && c.fulfillment === 'physical' && (
+              <>
+                <div
+                  onClick={st.paying ? undefined : td.escrowBuy}
+                  style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: st.paying ? 'rgba(26,19,5,.35)' : '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                >
+                  {st.paying ? 'Locking funds in escrow…' : `🛡 Buy with escrow · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                </div>
+                <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
+                  {st.payErr ?? 'Funds held on-chain until you confirm the card arrives'}
+                </div>
+              </>
+            )}
+            {td.wallet.passkeyAvailable &&
+              c.real &&
+              c.contractListingId != null &&
+              c.fulfillment !== 'physical' && (
+                <>
+                  <div
+                    onClick={st.paying ? undefined : td.payWithPasskey}
+                    style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: st.paying ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                  >
+                    {st.paying ? 'Confirming…' : `⚡ Pay with Face ID · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                  </div>
+                  <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
+                    {st.payErr ?? 'No seed phrase · no extension · fees sponsored'}
+                  </div>
+                </>
+              )}
+            <div style={{ textAlign: 'center', fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>
+              {c.fulfillment === 'physical'
+                ? '🛡 Escrow-protected · dispute resolution by the TopDeck arbiter'
+                : '🛡 Buyer protection · authenticated by TopDeck Vault before shipping'}
+            </div>
+          </div>
+
+          {c.buyNow > 0 && renderPayWith(c, st, td)}
+          {renderSettlement(c)}
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginTop: 18, padding: '14px 16px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13 }}>
+            <div style={{ width: 42, height: 42, borderRadius: 10, background: c.sellerArt, border: `2.5px solid ${INK}` }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{c.seller}</div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>★ {c.sellerRating} · {c.sellerSales} sales</div>
+            </div>
+            <div style={{ fontSize: 12, fontWeight: 700, padding: '8px 14px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>View store</div>
+          </div>
+
+          <div style={{ marginTop: 24 }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 18, marginBottom: 12 }}>Bid history</div>
+            <div style={{ background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 13, overflow: 'hidden' }}>
+              {bids.length === 0 && <div style={{ padding: '16px', fontSize: 13, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>No bids yet — be the first.</div>}
+              {bids.map((b, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1.5px solid rgba(26,19,5,.1)', background: b.rowBg }}>
+                  <div style={{ width: 9, height: 9, borderRadius: '50%', background: b.dot }} />
+                  <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: b.nameColor }}>{b.bidder}</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(26,19,5,.45)' }}>{b.when}</div>
+                  <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, minWidth: 80, textAlign: 'right' }}>{money(b.amount)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

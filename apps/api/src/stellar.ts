@@ -23,6 +23,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { MarketplaceContract } from '@cardmkt/shared';
 import { env } from './env.js';
+import { getLog } from './context.js';
 
 export const rpcServer = new rpc.Server(env.stellar.rpcUrl, {
   allowHttp: env.stellar.rpcUrl.startsWith('http://'),
@@ -641,8 +642,9 @@ export async function requireSmartWalletUsdc(
 ): Promise<void> {
   const have = await smartWalletUsdcStroops(walletContractId);
   if (have === null) {
-    console.warn(
-      `[preflight] could not read USDC balance for smart wallet ${walletContractId}; skipping funding check`,
+    getLog().warn(
+      { walletContractId },
+      'preflight: could not read USDC balance for smart wallet; skipping funding check',
     );
     return;
   }
@@ -669,8 +671,9 @@ export async function requireSmartWalletCard(
 ): Promise<void> {
   const have = await smartWalletTokenStroops(cardSacAddress, walletContractId);
   if (have === null) {
-    console.warn(
-      `[preflight] could not read card balance for smart wallet ${walletContractId}; skipping ownership check`,
+    getLog().warn(
+      { walletContractId },
+      'preflight: could not read card balance for smart wallet; skipping ownership check',
     );
     return;
   }

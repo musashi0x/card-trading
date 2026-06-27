@@ -13,6 +13,7 @@ import { TransactionBuilder, BASE_FEE, rpc, scValToNative, type xdr } from '@ste
 import { db, schema } from '@cardmkt/db';
 import { MarketplaceContract } from '@cardmkt/shared';
 import { env } from './env.js';
+import { logger } from './logger.js';
 import { rpcServer } from './stellar.js';
 
 const contract = new MarketplaceContract(env.contractId);
@@ -102,8 +103,14 @@ export async function reconcileNow(): Promise<void> {
   await Promise.all([reconcileListings(), reconcileOffers(), reconcileOrders()]);
 }
 
-export function startIndexer(intervalMs = 15_000): void {
-  const tick = () => reconcileNow().catch((err) => console.error('[indexer]', err.message));
-  setInterval(tick, intervalMs);
-  console.log(`[indexer] reconciling every ${intervalMs / 1000}s`);
+/**
+ * Start the periodic reconciler. Returns a stop handle that clears the interval
+ * so graceful shutdown can guarantee no reconciliation runs after exit begins.
+ */
+export function startIndexer(intervalMs = 15_000): () => void {
+  const log = logger.child({ component: 'indexer' });
+  const tick = () => reconcileNow().catch((err) => log.error({ err }, 'reconcile failed'));
+  const handle = setInterval(tick, intervalMs);
+  log.info({ intervalMs }, 'reconciling on interval');
+  return () => clearInterval(handle);
 }

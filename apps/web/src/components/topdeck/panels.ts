@@ -6,7 +6,21 @@
  * "you give" side draws from MY_CARDS; the "you get" side draws from live cards.
  */
 
+import { ComponentType } from 'react';
 import type { Rarity } from './lib';
+import EmojiEvents from '@mui/icons-material/EmojiEvents';
+import MilitaryTech from '@mui/icons-material/MilitaryTech';
+import Shield from '@mui/icons-material/Shield';
+import Star from '@mui/icons-material/Star';
+import Whatshot from '@mui/icons-material/Whatshot';
+import Diamond from '@mui/icons-material/Diamond';
+import MonetizationOn from '@mui/icons-material/MonetizationOn';
+import WorkspacePremium from '@mui/icons-material/WorkspacePremium';
+import Bolt from '@mui/icons-material/Bolt';
+import Gavel from '@mui/icons-material/Gavel';
+import LocalAtm from '@mui/icons-material/LocalAtm';
+import Favorite from '@mui/icons-material/Favorite';
+import Layers from '@mui/icons-material/Layers';
 
 /** Gradient avatars reused across leaderboard rows, reviews, and podium. */
 export const G = {
@@ -137,7 +151,7 @@ export const PROFILE_STATS: Array<{ v: string; l: string }> = [
 ];
 
 export interface Achievement {
-  icon: string;
+  icon: ComponentType<any>;
   name: string;
   desc: string;
   got: boolean;
@@ -145,23 +159,23 @@ export interface Achievement {
 }
 
 export const PROFILE_ACHIEVEMENTS: Achievement[] = [
-  { icon: '🏆', name: 'First win', desc: 'Won your first auction', got: true, bg: '#ffd84d' },
-  { icon: '💯', name: 'Century club', desc: '100+ cards collected', got: true, bg: '#bff3d4' },
-  { icon: '🛡', name: 'Vault verified', desc: 'Identity authenticated', got: true, bg: '#cfe0ff' },
-  { icon: '⭐', name: '5-star seller', desc: '50 reviews at 4.5+', got: true, bg: '#ffe0d6' },
-  { icon: '🔥', name: '30-day streak', desc: 'Active a month straight', got: true, bg: '#ffd1cc' },
-  { icon: '💎', name: 'Top 50 collector', desc: 'Reach the season top 50', got: true, bg: '#e7ddff' },
-  { icon: '🐋', name: 'Big spender', desc: '$10k in a single bid', got: false, bg: '#fff' },
-  { icon: '👑', name: 'Season champion', desc: 'Finish #1 in a season', got: false, bg: '#fff' },
+  { icon: EmojiEvents, name: 'First win', desc: 'Won your first auction', got: true, bg: '#ffd84d' },
+  { icon: MilitaryTech, name: 'Century club', desc: '100+ cards collected', got: true, bg: '#bff3d4' },
+  { icon: Shield, name: 'Vault verified', desc: 'Identity authenticated', got: true, bg: '#cfe0ff' },
+  { icon: Star, name: '5-star seller', desc: '50 reviews at 4.5+', got: true, bg: '#ffe0d6' },
+  { icon: Whatshot, name: '30-day streak', desc: 'Active a month straight', got: true, bg: '#ffd1cc' },
+  { icon: Diamond, name: 'Top 50 collector', desc: 'Reach the season top 50', got: true, bg: '#e7ddff' },
+  { icon: MonetizationOn, name: 'Big spender', desc: '$10k in a single bid', got: false, bg: '#fff' },
+  { icon: WorkspacePremium, name: 'Season champion', desc: 'Finish #1 in a season', got: false, bg: '#fff' },
 ];
 
-export const PROFILE_ACTIVITY: Array<{ icon: string; iconBg: string; text: string; amt: string; when: string }> = [
-  { icon: '🏆', iconBg: '#bff3d4', text: 'Won Aurora Phoenix Holo', amt: '$3,120', when: '2h ago' },
-  { icon: '⚡', iconBg: '#ffd1cc', text: 'Outbid on Galaxy Mage Prism', amt: '$940', when: '5h ago' },
-  { icon: '🔨', iconBg: '#ffd84d', text: 'Listed Chrome Rookie for auction', amt: '$410', when: '1d ago' },
-  { icon: '💸', iconBg: '#bff3d4', text: 'Sold Pixel Familiar', amt: '$40', when: '2d ago' },
-  { icon: '♥', iconBg: '#ffe0d6', text: 'Added Retro Slugger Gold to watchlist', amt: '$7,300', when: '3d ago' },
-  { icon: '🎴', iconBg: '#cfe0ff', text: 'Bid on Solar Drake · 1st Ed', amt: '$2,450', when: '4d ago' },
+export const PROFILE_ACTIVITY: Array<{ icon: ComponentType<any>; iconBg: string; text: string; amt: string; when: string }> = [
+  { icon: EmojiEvents, iconBg: '#bff3d4', text: 'Won Aurora Phoenix Holo', amt: '$3,120', when: '2h ago' },
+  { icon: Bolt, iconBg: '#ffd1cc', text: 'Outbid on Galaxy Mage Prism', amt: '$940', when: '5h ago' },
+  { icon: Gavel, iconBg: '#ffd84d', text: 'Listed Chrome Rookie for auction', amt: '$410', when: '1d ago' },
+  { icon: LocalAtm, iconBg: '#bff3d4', text: 'Sold Pixel Familiar', amt: '$40', when: '2d ago' },
+  { icon: Favorite, iconBg: '#ffe0d6', text: 'Added Retro Slugger Gold to watchlist', amt: '$7,300', when: '3d ago' },
+  { icon: Layers, iconBg: '#cfe0ff', text: 'Bid on Solar Drake · 1st Ed', amt: '$2,450', when: '4d ago' },
 ];
 
 export const PROFILE_REVIEWS: Array<{ name: string; art: string; stars: string; text: string; when: string }> = [
