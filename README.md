@@ -125,3 +125,19 @@ Deployed addresses live in `deploy.json`; demo accounts in `stellar-accounts.jso
 Test USDC and cards are testnet assets (clearly labeled). Out of scope for the
 hackathon: physical shipping, fiat anchors (SEP-24), multi-asset path payments,
 production indexer streaming.
+
+## Troubleshooting
+
+- **Minting fails when connected as the platform issuer.** An issuer cannot hold
+  a trustline to an asset it issues, so minting/distributing copies *to the
+  issuer account itself* is impossible (the classic flow would build a
+  self-trustline `changeTrust` that Stellar rejects). Connect a **different**
+  wallet — any funded `G…` account that isn't `PLATFORM_ISSUER`, or a passkey
+  `C…` smart wallet — as the card owner. The API now rejects this up front with
+  `OWNER_IS_ISSUER`.
+- **Listing right after minting briefly errors, then succeeds.** The API
+  pre-flights the seller's balance against **Horizon** but simulates the contract
+  call against the **Soroban RPC**, which ingests new state a ledger or two
+  later. Right after a mint+distribute the SAC `transfer` simulation can revert
+  with "trustline entry is missing"; `buildContractTx` retries this lag and a
+  persistent miss surfaces as a `MISSING_TRUSTLINE` 400 rather than a 500.

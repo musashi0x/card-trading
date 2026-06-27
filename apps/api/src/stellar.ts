@@ -41,19 +41,38 @@ export class PreflightError extends Error {
 }
 
 /**
+ * A just-minted card's `list` simulates a SAC `transfer` from the seller, which
+ * reverts while the Soroban RPC's ledger view still lags Horizon — its
+ * diagnostic reads "trustline entry is missing for account". We match that
+ * human-readable phrase rather than the accompanying `Error(Contract, #13)`
+ * code, because that code is overloaded: the marketplace contract re-raises the
+ * same `#13` as it escalates the trap, and any contract may define its own
+ * `#13`, so keying on the code would over-match unrelated failures.
+ */
+function isTrustlineMissingError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /trustline entry is missing/i.test(msg);
+}
+
+/**
  * A contract call that depends on state written by a just-submitted classic tx
  * can transiently fail because the soroban RPC's ledger view briefly lags
- * Horizon. Two shapes show up right after minting + distributing a card, before
- * its `list`:
+ * Horizon. Three shapes show up right after minting + distributing a card,
+ * before its `list`:
  *  - `Account not found` from `getAccount` — the freshly funded seller isn't
  *    indexed by the RPC yet (Horizon already reports it).
  *  - `Storage, MissingValue` from simulation — the seller's just-minted card
  *    balance isn't visible yet when `list` simulates its transfer.
- * Both clear within a ledger or two, so they're worth a short retry, not a 500.
+ *  - "trustline entry is missing" from the SAC `transfer` — the seller's
+ *    just-distributed card trustline isn't ingested by the RPC yet, even though
+ *    `requireBalance` already sees it on Horizon.
+ * All clear within a ledger or two, so they're worth a short retry, not a 500.
  */
 function isLaggingLedgerError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /MissingValue/.test(msg) || /Account not found/i.test(msg);
+  return (
+    /MissingValue/.test(msg) || /Account not found/i.test(msg) || isTrustlineMissingError(err)
+  );
 }
 
 /** Build, simulate, and assemble a contract-call tx; return unsigned XDR. */
@@ -75,8 +94,21 @@ export async function buildContractTx(source: string, operation: xdr.Operation):
       const prepared = await rpcServer.prepareTransaction(tx);
       return prepared.toXDR();
     } catch (err) {
-      if (attempt >= 5 || !isLaggingLedgerError(err)) throw err;
-      await new Promise((r) => setTimeout(r, 2000));
+      if (attempt < 5 && isLaggingLedgerError(err)) {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      // A trustline-missing revert that outlives the retry window is no longer a
+      // transient lag — the source genuinely can't move the asset. Surface it as
+      // an actionable 400 rather than letting the raw HostError become a 500.
+      if (isTrustlineMissingError(err)) {
+        throw new PreflightError(
+          'Account must establish a trustline to the card asset before this action',
+          'MISSING_TRUSTLINE',
+          { account: source },
+        );
+      }
+      throw err;
     }
   }
 }
@@ -304,6 +336,42 @@ function findBalance(list: HorizonBalance[], asset: Asset): HorizonBalance | und
 export async function getAssetBalance(account: string, asset: Asset): Promise<string> {
   const bal = findBalance(await balances(account), asset);
   return bal?.balance ?? '0';
+}
+
+/**
+ * Filter `cards` down to those `account` actually holds on-chain. "Holding" a
+ * card means a positive token balance, read differently per account kind:
+ *  - classic (`G…`): a single Horizon lookup lists every trustline; we keep
+ *    cards whose asset (code + issuer) shows a balance > 0.
+ *  - smart wallet (`C…`): card tokens live inside the SAC, invisible to Horizon,
+ *    so each deployed card's `balance(addr)` is simulated via the RPC.
+ * An unfunded / unknown account holds nothing.
+ */
+export async function filterHeldCards<
+  T extends { assetCode: string; issuer: string; sacAddress: string | null },
+>(account: string, cards: T[]): Promise<T[]> {
+  if (isContractAddress(account)) {
+    const held = await Promise.all(
+      cards.map(async (c) => {
+        if (!c.sacAddress) return false;
+        const stroops = await smartWalletTokenStroops(c.sacAddress, account);
+        return stroops != null && stroops > 0n;
+      }),
+    );
+    return cards.filter((_, i) => held[i]);
+  }
+  let list: HorizonBalance[];
+  try {
+    list = await balances(account);
+  } catch {
+    return []; // unfunded / unknown account holds nothing
+  }
+  const held = new Set(
+    list
+      .filter((b) => b.asset_code && b.asset_issuer && Number(b.balance) > 0)
+      .map((b) => `${b.asset_code}:${b.asset_issuer}`),
+  );
+  return cards.filter((c) => held.has(`${c.assetCode}:${c.issuer}`));
 }
 
 /** Whether `account` already trusts `asset` (no throw). */
