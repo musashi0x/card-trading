@@ -17,7 +17,7 @@ import { logger } from './logger.js';
 import { rpcServer } from './stellar.js';
 
 const contract = new MarketplaceContract(env.contractId);
-const { listings, offers, orders } = schema;
+const { listings, offers, orders, watchlist } = schema;
 
 // Contract status codes -> DB enums.
 const LISTING_STATUS = ['open', 'sold', 'cancelled'] as const;
@@ -55,7 +55,12 @@ async function reconcileListings(): Promise<void> {
     const code = Number(view?.status ?? 0);
     const status = LISTING_STATUS[code];
     if (status && status !== 'open') {
-      await db.update(listings).set({ status }).where(eq(listings.id, row.id));
+      // Close the listing and drop any watchlist rows for it in one transaction,
+      // so the My-bids Watchlist never shows phantom entries for closed lots.
+      await db.transaction(async (tx) => {
+        await tx.update(listings).set({ status }).where(eq(listings.id, row.id));
+        await tx.delete(watchlist).where(eq(watchlist.listingId, row.id));
+      });
     }
   }
 }

@@ -5,7 +5,8 @@
  * mutation to refetch the affected lists.
  */
 
-import { useQuery, type QueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import type { LeaderboardBoard, WatchlistEntry } from '@cardmkt/shared';
 import { api, type OrderWithCard } from '@/lib/api';
 
 type ListingFilters = { q?: string; set?: string; rarity?: string };
@@ -14,9 +15,16 @@ export const queryKeys = {
   cards: (owner?: string) => ['cards', owner ?? 'all'] as const,
   listings: (filters?: ListingFilters) => ['listings', filters ?? {}] as const,
   offers: (listingId: string) => ['offers', listingId] as const,
-  trades: () => ['trades'] as const,
+  trades: (account?: string) => ['trades', account ?? 'all'] as const,
   orders: (account: string) => ['orders', account] as const,
   disputedOrders: () => ['orders', 'disputed'] as const,
+  watchlist: (account: string) => ['watchlist', account] as const,
+  profile: (address: string) => ['profile', address] as const,
+  profileStats: (address: string) => ['profile', address, 'stats'] as const,
+  profileReviews: (address: string) => ['profile', address, 'reviews'] as const,
+  portfolio: (account: string) => ['portfolio', account] as const,
+  leaderboard: (board: LeaderboardBoard, account?: string) =>
+    ['leaderboard', board, account ?? 'anon'] as const,
 };
 
 /**
@@ -59,11 +67,11 @@ export function useOffers(listingId: string | null) {
   });
 }
 
-/** Recent settled trades. */
-export function useTrades() {
+/** Recent settled trades; with `account`, only trades where the wallet took part. */
+export function useTrades(account?: string | null) {
   return useQuery({
-    queryKey: queryKeys.trades(),
-    queryFn: () => api.trades(),
+    queryKey: queryKeys.trades(account ?? undefined),
+    queryFn: () => api.trades(account ?? undefined),
   });
 }
 
@@ -82,5 +90,109 @@ export function useDisputedOrders(enabled = true) {
     queryKey: queryKeys.disputedOrders(),
     queryFn: () => api.disputedOrders().catch(() => [] as OrderWithCard[]),
     enabled,
+  });
+}
+
+/** A wallet's profile. Disabled until an address is available. */
+export function useProfile(address: string | null) {
+  return useQuery({
+    queryKey: queryKeys.profile(address ?? ''),
+    queryFn: () => api.profile(address as string),
+    enabled: !!address,
+  });
+}
+
+/** Derived profile stats + achievements for a wallet. */
+export function useProfileStats(address: string | null) {
+  return useQuery({
+    queryKey: queryKeys.profileStats(address ?? ''),
+    queryFn: () => api.profileStats(address as string),
+    enabled: !!address,
+  });
+}
+
+/** Reviews written about a wallet. */
+export function useProfileReviews(address: string | null) {
+  return useQuery({
+    queryKey: queryKeys.profileReviews(address ?? ''),
+    queryFn: () => api.profileReviews(address as string),
+    enabled: !!address,
+  });
+}
+
+/**
+ * A ranked leaderboard board with the connected wallet's own standing. Refetches
+ * automatically when `board` or `account` changes. `staleTime` matches the
+ * server-side 5-minute cache so the UI doesn't re-request rows the API would
+ * just serve from cache anyway.
+ */
+export function useLeaderboard(board: LeaderboardBoard, account: string | null) {
+  return useQuery({
+    queryKey: queryKeys.leaderboard(board, account ?? undefined),
+    queryFn: () => api.leaderboard({ board, account: account ?? undefined }),
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+/**
+ * The connected wallet's live portfolio (holdings, valuation, history). Disabled
+ * until a wallet is connected, so passing `null`/`undefined` is safe.
+ */
+export function usePortfolio(account: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.portfolio(account ?? ''),
+    queryFn: () => api.portfolio(account as string),
+    enabled: !!account,
+  });
+}
+
+/** Update the connected wallet's profile, refreshing the profile query on success. */
+export function useUpdateProfile(address: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: import('@cardmkt/shared').ProfileUpdateBody) => api.updateProfile(address!, body),
+    onSuccess: (updated) => {
+      if (address) queryClient.setQueryData(queryKeys.profile(address), updated);
+    },
+  });
+}
+
+/** The connected wallet's watched open listings. Disabled until a wallet connects. */
+export function useWatchlist(account: string | null) {
+  return useQuery({
+    queryKey: queryKeys.watchlist(account ?? ''),
+    queryFn: () => api.watchlist(account as string),
+    enabled: !!account,
+  });
+}
+
+/**
+ * Toggle a listing on the connected wallet's watchlist with an optimistic flip.
+ * On error the previous cache is restored; on settle the list is refetched so it
+ * reconciles with the server (and gains full listing detail for added rows).
+ */
+export function useToggleWatch(account: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listingId, watching }: { listingId: string; watching: boolean }) =>
+      watching ? api.watchlistRemove(account!, listingId) : api.watchlistAdd(account!, listingId),
+    onMutate: async ({ listingId, watching }) => {
+      if (!account) return;
+      const key = queryKeys.watchlist(account);
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<WatchlistEntry[]>(key);
+      queryClient.setQueryData<WatchlistEntry[]>(key, (old = []) =>
+        watching
+          ? old.filter((e) => e.id !== listingId)
+          : [{ id: listingId } as WatchlistEntry, ...old],
+      );
+      return { prev, key };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev && ctx.key) queryClient.setQueryData(ctx.key, ctx.prev);
+    },
+    onSettled: () => {
+      if (account) queryClient.invalidateQueries({ queryKey: queryKeys.watchlist(account) });
+    },
   });
 }

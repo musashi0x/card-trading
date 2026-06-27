@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useTopDeck, PAY_ASSETS, type PayAssetId } from '@/components/topdeck/TopDeckProvider';
 import { type TopCard, money, fmtLeft, fmtAgo, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
+import { useToggleWatch, useWatchlist } from '@/lib/queries';
 import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
 import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
 import BoltIcon from '@mui/icons-material/Bolt';
@@ -124,6 +125,10 @@ export default function CardDetailPage() {
   const id = params?.id;
   const td = useTopDeck();
   const st = td.state;
+  const { address, connect } = td.wallet;
+  const { data: watchEntries } = useWatchlist(address);
+  const toggleWatch = useToggleWatch(address);
+  const watchedSet = useMemo(() => new Set((watchEntries ?? []).map((e) => e.id)), [watchEntries]);
 
   useEffect(() => {
     if (id) {
@@ -159,7 +164,13 @@ export default function CardDetailPage() {
       : status === 'outbid' ? { icon: <BoltIcon sx={{ fontSize: 18 }} />, t: "You've been outbid — raise your bid to win", bg: '#ffd1cc', col: '#a3160a' }
         : status === 'won' ? { icon: <CelebrationIcon sx={{ fontSize: 18 }} />, t: 'Purchased — heading to the TopDeck Vault', bg: '#bff3d4', col: '#0a5e34' }
           : null;
-  const watched = st.watched[c.id];
+  const watched = !!c.listingId && watchedSet.has(c.listingId);
+  const onToggleWatch = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!address) return connect();
+    if (!c.listingId) return;
+    toggleWatch.mutate({ listingId: c.listingId, watching: watched });
+  };
   const bids = c.bids.map((b, i) => ({
     ...b,
     when: b.at ? fmtAgo(st.now - b.at) : fmtAgo(b.ago ?? 0),
@@ -176,7 +187,7 @@ export default function CardDetailPage() {
         <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
           <div style={{ position: 'relative', aspectRatio: '3 / 4', borderRadius: 18, border: `3px solid ${INK}`, boxShadow: `7px 7px 0 ${INK}`, background: c.art, overflow: 'hidden' }}>
             <div style={{ position: 'absolute', top: 14, left: 14, fontSize: 12, fontWeight: 800, letterSpacing: '.03em', padding: '5px 13px', borderRadius: 8, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
-            <div onClick={(e) => td.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>
+            <div onClick={onToggleWatch} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>
               {watched ? <FavoriteIcon sx={{ fontSize: 20 }} /> : <FavoriteBorderIcon sx={{ fontSize: 20 }} />}
             </div>
             <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 16, background: 'linear-gradient(transparent,rgba(26,19,5,.55))', color: '#fff', fontWeight: 700, fontSize: 13 }}>{c.grade}</div>

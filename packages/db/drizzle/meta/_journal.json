@@ -22,6 +22,27 @@
       "when": 1782537185658,
       "tag": "0002_nebulous_steve_rogers",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782575495659,
+      "tag": "0003_lethal_havok",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1782576332007,
+      "tag": "0004_daffy_forgotten_one",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1782576871641,
+      "tag": "0005_thin_jocasta",
+      "breakpoints": true
     }
   ]
 }

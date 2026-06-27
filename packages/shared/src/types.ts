@@ -108,6 +108,158 @@ export interface Trade {
   settledAt: string;
 }
 
+/** A user's editable profile, keyed by wallet address. */
+export interface ProfileResponse {
+  address: string;
+  displayName: string | null;
+  bio: string | null;
+  location: string | null;
+  website: string | null;
+  avatarUrl: string | null;
+  /** ISO timestamp the user row was first created (used for "member since"). */
+  memberSince: string;
+}
+
+/** Editable profile fields. All optional — only provided fields are updated. */
+export interface ProfileUpdateBody {
+  displayName?: string | null;
+  bio?: string | null;
+  location?: string | null;
+  website?: string | null;
+  avatarUrl?: string | null;
+}
+
+/** A single earned/locked achievement badge. */
+export interface Achievement {
+  key: string;
+  name: string;
+  description: string;
+  earned: boolean;
+}
+
+/** Profile stats derived from on-chain trade/listing/review data. */
+export interface ProfileStatsResponse {
+  address: string;
+  /** USDC value of cards the wallet has bought (sum of purchase prices). */
+  collectionValueUsdc: string;
+  cardsOwned: number;
+  cardsSold: number;
+  /** Average review rating (1–5), or null when the wallet has no reviews. */
+  sellerRating: number | null;
+  reviewCount: number;
+  /** Purchases ÷ offers made, as a 0–100 percentage; null when no offers. */
+  winRate: number | null;
+  achievements: Achievement[];
+}
+
+/** A counterparty review as returned by the reviews endpoint. */
+export interface ReviewResponse {
+  id: string;
+  reviewerAddress: string;
+  revieweeAddress: string;
+  tradeId: string | null;
+  rating: number;
+  text: string | null;
+  createdAt: string;
+}
+
+/** Body for posting a review of a counterparty. */
+export interface ReviewCreateBody {
+  reviewerAddress: string;
+  tradeId: string;
+  rating: number;
+  text?: string | null;
+}
+
+/**
+ * One watched open listing for a wallet. Extends the listing shape (with its
+ * joined card) so the web can render it exactly like a browse-grid lot, plus the
+ * watchlist row's own id and timestamp.
+ */
+export interface WatchlistEntry extends Listing {
+  /** The watchlist row id. */
+  watchId: string;
+  /** When the wallet added this listing to its watchlist. */
+  watchedAt: string;
+}
+
+/**
+ * How a holding's current value was derived by the valuation waterfall:
+ * `"trade"` = most recent settled trade price; `"listing"` = lowest open listing
+ * price; `null` = no market signal (value is `"0"`, render as "—").
+ */
+export type ValuedAt = 'trade' | 'listing' | null;
+
+/** One card a wallet holds, valued live against the market. */
+export interface PortfolioHolding {
+  cardId: string;
+  name: string;
+  rarity: string;
+  assetCode: string;
+  imageUrl: string;
+  /** Current value in USDC, decimal string; `"0"` when `valuedAt` is null. */
+  value: string;
+  /** Which waterfall tier produced `value`. */
+  valuedAt: ValuedAt;
+  /** What the account paid for the card (most recent purchase), decimal string. */
+  costBasis: string;
+  /** False when no purchase trade exists (minted/transferred in) — cost is `"0"`. */
+  costBasisKnown: boolean;
+  /** True when the account currently has this card open-listed (still owns it). */
+  listed: boolean;
+}
+
+/** Value-share of one rarity group across the portfolio. */
+export interface PortfolioAllocation {
+  rarity: string;
+  /** Summed value of holdings of this rarity, decimal string. */
+  value: string;
+  /** Share of `totalValue`, 0–100. */
+  pct: number;
+}
+
+/** The best- or worst-returning holding by unrealized return percentage. */
+export interface PortfolioPerformer {
+  cardId: string;
+  name: string;
+  /** Unrealized return: `(value - costBasis) / costBasis * 100`. */
+  returnPct: number;
+}
+
+/** One month of synthesized portfolio value in the 12-month history series. */
+export interface PortfolioHistoryEntry {
+  /** Calendar month, `YYYY-MM`. */
+  month: string;
+  /** Portfolio value at that month-end, decimal string. */
+  value: string;
+}
+
+/**
+ * A connected wallet's portfolio: real on-chain holdings with per-card valuation
+ * and cost basis, aggregate totals and unrealized P&L, rarity allocation,
+ * best/worst performer, and a 12-month value-history series. All derived on the
+ * fly from the `cards`, `listings`, and `trades` tables — no snapshot store.
+ */
+export interface PortfolioResponse {
+  /** The wallet this portfolio is for (`G…` or `C…`). */
+  account: string;
+  holdings: PortfolioHolding[];
+  /** Sum of every holding's value, decimal string. */
+  totalValue: string;
+  /** Sum of cost basis over holdings with `costBasisKnown: true`, decimal string. */
+  totalCost: string;
+  /** `knownValue - totalCost` (unrealized gain on holdings with a known cost). */
+  unrealizedGain: string;
+  /** `unrealizedGain / totalCost * 100`, or null when `totalCost` is 0. */
+  unrealizedGainPct: number | null;
+  /** Allocation entries, ordered legendary → epic → rare → common. */
+  rarity: PortfolioAllocation[];
+  bestPerformer: PortfolioPerformer | null;
+  worstPerformer: PortfolioPerformer | null;
+  /** 12 monthly snapshots, oldest-first, ending at the current month. */
+  history: PortfolioHistoryEntry[];
+}
+
 /**
  * A Stellar asset the buyer can pay with. `issuer` is `null` for the native
  * asset (XLM); otherwise it's the issuing account of a classic credit asset.
@@ -272,6 +424,66 @@ export interface MintCardResponse {
   /** Set when a classic owner must establish a trustline before distribution. */
   trustlineXdr?: string;
   networkPassphrase?: string;
+}
+
+/** The three ranked leaderboard boards. */
+export type LeaderboardBoard = 'collectors' | 'sellers' | 'traders';
+
+/**
+ * One ranked entry on a leaderboard. Every board returns the same row shape; the
+ * fields relevant to the requested board are populated and the rest carry their
+ * zero value (`"0"` / `0` / `null`). Monetary fields are decimal strings (USDC)
+ * to avoid float drift; counts are numbers.
+ */
+export interface LeaderboardRow {
+  /** 1-based position on the board (descending by the board's primary metric). */
+  rank: number;
+  stellarAddress: string;
+  // Collectors metrics
+  /** Season collection value (sum of last buy prices of held cards), decimal string. */
+  collectionValue: string;
+  /** Net cards currently held (buys − sells). */
+  cardsHeld: number;
+  /** Buy-side win rate as a 0–100 percentage, or null when no offers were made. */
+  winRate: number | null;
+  // Sellers metrics
+  /** Gross sales volume over the trailing 90 days, decimal string. */
+  salesVolume90d: string;
+  /** Number of sell-side trades in the 90-day window. */
+  salesCount: number;
+  /** Average counterparty rating (1–5), or null when unavailable. */
+  avgRating: number | null;
+  // Traders metrics
+  /** All-time realized profit (sell net − buy cost), decimal string. */
+  realizedProfit: string;
+  /** ROI as a formatted percentage (e.g. `"+31.0%"`, `"−12.3%"`), or null with no buys. */
+  roi: string | null;
+  /** Completed buy→sell card pairs. */
+  flipCount: number;
+}
+
+/**
+ * The requesting account's own standing on a board. Mirrors {@link LeaderboardRow}
+ * but `rank` is `null` when the account has no qualifying activity on the board.
+ */
+export interface LeaderboardOwnStanding extends Omit<LeaderboardRow, 'rank'> {
+  rank: number | null;
+}
+
+/** Response from `GET /api/leaderboard`. */
+export interface LeaderboardResponse {
+  board: LeaderboardBoard;
+  /** Top-N ranked rows for the board. */
+  rows: LeaderboardRow[];
+  /** The requesting account's standing, or null when `account` was omitted. */
+  ownStanding: LeaderboardOwnStanding | null;
+  /**
+   * Whether seller ratings are available (the `reviews` table exists). `true`/
+   * `false` on the sellers board; `null` on boards where rating is not a metric.
+   */
+  ratingAvailable: boolean | null;
+  /** ISO timestamp the cached board rows were computed. */
+  cachedAt: string;
 }
 
 /** Structured, actionable error returned by pre-flight validation. */

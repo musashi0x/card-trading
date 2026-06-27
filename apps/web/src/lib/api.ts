@@ -16,15 +16,27 @@ import type {
   PathPaymentBuildRequest,
   PathQuoteRequest,
   PathQuoteResponse,
+  PortfolioResponse,
+  LeaderboardBoard,
+  LeaderboardResponse,
+  ProfileResponse,
+  ProfileStatsResponse,
+  ProfileUpdateBody,
+  ReviewCreateBody,
+  ReviewResponse,
   SubmitTxResponse,
   Trade,
   TradeAction,
+  WatchlistEntry,
 } from '@cardmkt/shared';
 
 /** An order joined with a thumbnail of its card, as the orders API returns it. */
 export type OrderWithCard = Order & {
   card: { id: string; name: string; set: string; rarity: string; imageUrl: string };
 };
+
+/** A settled trade with the derived seller-net the trades API computes per row. */
+export type TradeWithNet = Trade & { sellerNetUsdc: string };
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
@@ -59,7 +71,17 @@ export const api = {
     return request<Listing[]>(`/api/listings${qs ? `?${qs}` : ''}`);
   },
   offers: (listingId: string) => request<Offer[]>(`/api/listings/${listingId}/offers`),
-  trades: () => request<Trade[]>('/api/trades'),
+  /** Settled trades, or — with `account` — only those where the wallet is buyer or seller. */
+  trades: (account?: string) =>
+    request<TradeWithNet[]>(`/api/trades${account ? `?account=${encodeURIComponent(account)}` : ''}`),
+
+  /** A ranked leaderboard board, with the requesting account's own standing. */
+  leaderboard: (params: { board: LeaderboardBoard; account?: string; limit?: number }) => {
+    const qs = new URLSearchParams({ board: params.board });
+    if (params.account) qs.set('account', params.account);
+    if (params.limit != null) qs.set('limit', String(params.limit));
+    return request<LeaderboardResponse>(`/api/leaderboard?${qs.toString()}`);
+  },
 
   /** Physical-escrow orders where `account` is buyer or seller. */
   orders: (account: string) =>
@@ -91,6 +113,47 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ signedXdr, action, refId }),
     }),
+
+  /** A wallet's profile (lazily created on first fetch). */
+  profile: (address: string) => request<ProfileResponse>(`/api/profiles/${address}`),
+  /** Update the editable profile fields for a wallet. */
+  updateProfile: (address: string, body: ProfileUpdateBody) =>
+    request<ProfileResponse>(`/api/profiles/${address}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  /** Derived profile stats + achievements for a wallet. */
+  profileStats: (address: string) =>
+    request<ProfileStatsResponse>(`/api/profiles/${address}/stats`),
+  /** Reviews written about a wallet (newest first). */
+  profileReviews: (address: string) =>
+    request<ReviewResponse[]>(`/api/profiles/${address}/reviews`),
+  /** Post a review of the wallet at `address` (the trade counterparty). */
+  postReview: (address: string, body: ReviewCreateBody) =>
+    request<ReviewResponse>(`/api/profiles/${address}/reviews`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** The connected wallet's live portfolio: holdings, valuation, history. */
+  portfolio: (account: string) =>
+    request<PortfolioResponse>(`/api/portfolio?account=${encodeURIComponent(account)}`),
+
+  /** The wallet's watched open listings (newest first). */
+  watchlist: (account: string) =>
+    request<WatchlistEntry[]>(`/api/watchlist?account=${encodeURIComponent(account)}`),
+  /** Add a listing to the wallet's watchlist (idempotent). */
+  watchlistAdd: (account: string, listingId: string) =>
+    request<{ ok: true; watching: boolean }>('/api/watchlist', {
+      method: 'POST',
+      body: JSON.stringify({ account, listingId }),
+    }),
+  /** Remove a listing from the wallet's watchlist (idempotent). */
+  watchlistRemove: (account: string, listingId: string) =>
+    request<{ ok: true; watching: boolean }>(
+      `/api/watchlist/${listingId}?account=${encodeURIComponent(account)}`,
+      { method: 'DELETE' },
+    ),
 
   /** Quote a source-asset → USDC conversion (pay-with-any-asset). */
   quotePath: (body: PathQuoteRequest) =>

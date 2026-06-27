@@ -140,7 +140,16 @@ export default function BrowsePage() {
 
         {/* grid */}
         <div>
-          {list.length === 0 ? (
+          {list.length === 0 && activeCount === 0 ? (
+            /* No listings at all (and no filters active) — honest empty marketplace. */
+            <div style={{ textAlign: 'center', padding: '60px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'center' }}><SearchOffIcon sx={{ fontSize: 48, color: 'rgba(26,19,5,.4)' }} /></div>
+              <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 21, marginTop: 10 }}>No open listings yet</div>
+              <div style={{ fontSize: 13.5, color: 'rgba(26,19,5,.55)', fontWeight: 500, marginTop: 6 }}>Be the first — list a card and start the marketplace.</div>
+              <div onClick={td.goSell} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>List a card</div>
+            </div>
+          ) : list.length === 0 ? (
+            /* Listings exist, but none match the active search/filters. */
             <div style={{ textAlign: 'center', padding: '60px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16 }}>
               <div style={{ display: 'flex', justifyContent: 'center' }}><SearchOffIcon sx={{ fontSize: 48, color: 'rgba(26,19,5,.4)' }} /></div>
               <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 21, marginTop: 10 }}>{query ? `No lots match “${st.query.trim()}”` : 'No lots match those filters'}</div>

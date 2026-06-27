@@ -9,12 +9,14 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  index,
   integer,
   numeric,
   pgEnum,
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -38,6 +40,10 @@ export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
   stellarAddress: text('stellar_address').notNull().unique(),
   displayName: text('display_name'),
+  bio: text('bio'),
+  location: text('location'),
+  website: text('website'),
+  avatarUrl: text('avatar_url'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -113,25 +119,73 @@ export const offers = pgTable('offers', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const trades = pgTable('trades', {
+export const trades = pgTable(
+  'trades',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => listings.id),
+    buyer: text('buyer').notNull(),
+    seller: text('seller').notNull(),
+    priceUsdc: numeric('price_usdc', { precision: 20, scale: 7 }).notNull(),
+    feeUsdc: numeric('fee_usdc', { precision: 20, scale: 7 }).notNull(),
+    /** Creator royalty paid on this settlement (0 on a primary sale). */
+    royaltyUsdc: numeric('royalty_usdc', { precision: 20, scale: 7 }).notNull().default('0'),
+    settleTxHash: text('settle_tx_hash').notNull(),
+    settledAt: timestamp('settled_at', { withTimezone: true })
+      .default(sql`now()`)
+      .notNull(),
+  },
+  // Composite indexes for the leaderboard aggregations: sellers group by seller
+  // over a 90-day window, collectors/traders group by buyer, both ordered by
+  // settlement time.
+  (t) => ({
+    sellerSettledIdx: index('trades_seller_settled_at_idx').on(t.seller, t.settledAt),
+    buyerSettledIdx: index('trades_buyer_settled_at_idx').on(t.buyer, t.settledAt),
+  }),
+);
+
+/**
+ * Counterparty reviews. Addresses are stored as plain text (not FKs) so a review
+ * never requires a `users` row for either party. One review per (reviewer, trade)
+ * is enforced in the API layer.
+ */
+export const reviews = pgTable('reviews', {
   id: uuid('id').defaultRandom().primaryKey(),
-  listingId: uuid('listing_id')
-    .notNull()
-    .references(() => listings.id),
-  buyer: text('buyer').notNull(),
-  seller: text('seller').notNull(),
-  priceUsdc: numeric('price_usdc', { precision: 20, scale: 7 }).notNull(),
-  feeUsdc: numeric('fee_usdc', { precision: 20, scale: 7 }).notNull(),
-  /** Creator royalty paid on this settlement (0 on a primary sale). */
-  royaltyUsdc: numeric('royalty_usdc', { precision: 20, scale: 7 }).notNull().default('0'),
-  settleTxHash: text('settle_tx_hash').notNull(),
-  settledAt: timestamp('settled_at', { withTimezone: true })
-    .default(sql`now()`)
-    .notNull(),
+  reviewerAddress: text('reviewer_address').notNull(),
+  revieweeAddress: text('reviewee_address').notNull(),
+  tradeId: uuid('trade_id').references(() => trades.id),
+  rating: integer('rating').notNull(),
+  text: text('text'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+/**
+ * Per-wallet watchlist. A row means `account` is watching a specific open
+ * listing. Keyed by listing (not card) so it captures the price the user cared
+ * about; rows are removed by the indexer when the listing closes.
+ */
+export const watchlist = pgTable(
+  'watchlist',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    account: text('account').notNull(),
+    listingId: uuid('listing_id')
+      .notNull()
+      .references(() => listings.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    accountListingUnique: uniqueIndex('watchlist_account_listing_unique').on(t.account, t.listingId),
+  }),
+);
 
 export type CardRow = typeof cards.$inferSelect;
 export type ListingRow = typeof listings.$inferSelect;
 export type OfferRow = typeof offers.$inferSelect;
 export type OrderRow = typeof orders.$inferSelect;
 export type TradeRow = typeof trades.$inferSelect;
+export type WatchlistRow = typeof watchlist.$inferSelect;
+export type ReviewRow = typeof reviews.$inferSelect;
+export type UserRow = typeof users.$inferSelect;

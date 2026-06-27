@@ -17,6 +17,10 @@ import { cardsRouter } from './routes/cards.js';
 import { txRouter } from './routes/tx.js';
 import { ordersRouter } from './routes/orders.js';
 import { tradesRouter } from './routes/trades.js';
+import { leaderboardRouter } from './routes/leaderboard.js';
+import { watchlistRouter } from './routes/watchlist.js';
+import { profilesRouter } from './routes/profiles.js';
+import { portfolioRouter } from './routes/portfolio.js';
 import { devRouter } from './routes/dev.js';
 import { startIndexer } from './indexer.js';
 
@@ -88,6 +92,10 @@ app.use('/api', catalogRouter);
 app.use('/api/tx', txRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/trades', tradesRouter);
+app.use('/api/leaderboard', leaderboardRouter);
+app.use('/api/watchlist', watchlistRouter);
+app.use('/api/profiles', profilesRouter);
+app.use('/api/portfolio', portfolioRouter);
 // Dev-only conveniences (e.g. funding a smart wallet with test USDC).
 if (env.stellar.network !== 'mainnet') app.use('/api/dev', devRouter);
 // Card minting issues assets with the platform issuer key — never on mainnet.
@@ -116,8 +124,11 @@ app.use(
     }
     const status = err.status ?? 500;
     // Log before responding so handled errors are never silently swallowed.
+    // Fall back to the module logger if the request-scoped logger is unavailable
+    // (e.g. an error thrown before pino-http attached `req.log`), so the error
+    // handler itself never throws and mask the original failure.
     const level = status >= 500 ? 'error' : 'warn';
-    req.log[level]({ err, code: err.code ?? 'INTERNAL', status }, 'request failed');
+    (req.log ?? logger)[level]({ err, code: err.code ?? 'INTERNAL', status }, 'request failed');
     res.status(status).json({ error: err.message, code: err.code ?? 'INTERNAL', details: err.details });
   },
 );

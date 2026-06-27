@@ -1,0 +1,2 @@
+CREATE INDEX IF NOT EXISTS "trades_seller_settled_at_idx" ON "trades" USING btree ("seller","settled_at");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "trades_buyer_settled_at_idx" ON "trades" USING btree ("buyer","settled_at");

@@ -9,6 +9,7 @@ The web app SHALL let a user connect a Stellar wallet (Freighter) and display th
 - **WHEN** a user clicks connect and approves in the wallet
 - **THEN** the app SHALL display the connected Stellar address
 - **AND** subsequent trade actions SHALL be signed through that wallet
+- **AND** the watchlist SHALL load from the server for the connected address
 
 #### Scenario: Wallet not installed
 - **WHEN** a user attempts to connect without the wallet available
@@ -16,14 +17,30 @@ The web app SHALL let a user connect a Stellar wallet (Freighter) and display th
 
 ### Requirement: Browse and search cards
 The web app SHALL let users browse open listings and search cards by name, set, or rarity.
+The app SHALL NEVER display fabricated or demo listings as a fallback — all displayed listings MUST originate from the live API.
+
+**Reason for modification:** The previous requirement implied that the grid would always show listings, but the implementation silently filled an empty or errored response with 8 hardcoded demo cards (`mockCards()`). The requirement is extended to explicitly forbid fabricated data and to mandate distinct loading, error, and empty states.
+
+**Migration:** Remove `mockCards()` from `lib.ts` and its call sites in `TopDeckProvider.tsx`. Ensure the grid renders the empty and error states described in the scenarios below.
 
 #### Scenario: Browse the marketplace
-- **WHEN** a user opens the marketplace
-- **THEN** the app SHALL display open listings with card image, name, rarity, and price in test USDC
+- **WHEN** a user opens the marketplace and the API returns open listings
+- **THEN** the app SHALL display those listings with card image, name, rarity, and price in test USDC
 
 #### Scenario: Search for a card
 - **WHEN** a user enters a search term
 - **THEN** the app SHALL display matching cards and their open listings
+
+#### Scenario: No open listings
+- **WHEN** a user opens the marketplace and the API returns successfully with zero open listings and no active filters
+- **THEN** the app SHALL display an honest empty state (e.g. "No open listings yet") with a call-to-action to list a card
+- **AND** SHALL NOT display any fabricated or demo card data
+
+#### Scenario: API unreachable
+- **WHEN** a user opens the marketplace and the listings API call fails
+- **THEN** the app SHALL display a distinct error state informing the user that listings could not be loaded
+- **AND** SHALL provide a Retry action that re-fetches the listings
+- **AND** SHALL NOT display any fabricated or demo card data
 
 ### Requirement: List a card for sale
 The web app SHALL let a connected seller list a card they own at a stated price, signing the listing transaction in their wallet.
@@ -143,4 +160,148 @@ The web app SHALL provide a single-confirm checkout for `buy_now` and `make_offe
 - **WHEN** authorization is declined or submission fails
 - **THEN** the checkout returns to a cancellable, retryable state
 - **AND** the listing is not shown as purchased
+
+### Requirement: Trade history view
+
+The web app SHALL provide a dedicated trade-history page at `/trades` that renders settled trades returned by `useTrades()`, displaying the full settlement split and a block-explorer link for each trade.
+
+#### Scenario: View the global trade feed
+
+- **WHEN** any user (connected or not) navigates to the History page
+- **THEN** the app SHALL display all settled trades ordered newest-first, each showing buyer, seller, gross price, platform fee, creator royalty, seller net, settle time, and a link to the settlement transaction on the block explorer
+
+#### Scenario: Filter to my trades
+
+- **WHEN** a connected wallet holder activates the "My trades" toggle
+- **THEN** the app SHALL refetch trades filtered to that wallet address as buyer or seller
+- **AND** SHALL hide trades that do not involve the connected wallet
+
+#### Scenario: Empty state
+
+- **WHEN** no settled trades exist (or none match the active filter)
+- **THEN** the app SHALL display a clear empty-state message rather than a blank or errored page
+
+#### Scenario: History nav entry
+
+- **WHEN** any page in the marketplace is active
+- **THEN** the top nav SHALL include a "History" link that navigates to `/trades`
+- **AND** the link SHALL be visually marked active when the current pathname is `/trades`
+
+### Requirement: Heart toggle reflects persisted watchlist state
+
+The heart icon on each `CardTile` SHALL reflect the server-backed watchlist state
+for the connected wallet. The toggle SHALL feel instant via optimistic UI and roll
+back on error. When no wallet is connected, tapping the heart SHALL invoke the
+wallet connect flow rather than silently no-op.
+
+#### Scenario: Connected wallet watches a listing
+- **WHEN** a connected wallet taps the heart on an open listing
+- **THEN** the heart flips to active immediately (optimistic)
+- **AND** `POST /api/watchlist` is called in the background
+- **AND** on success the server-backed watchlist reflects the new entry
+
+#### Scenario: Connected wallet un-watches a listing
+- **WHEN** a connected wallet taps an active heart
+- **THEN** the heart reverts to inactive immediately (optimistic)
+- **AND** `DELETE /api/watchlist/:listingId` is called in the background
+- **AND** on API error the heart is restored to its prior state
+
+#### Scenario: No wallet connected — tap prompts to connect
+- **WHEN** a visitor without a connected wallet taps the heart
+- **THEN** the app SHALL invoke the wallet connect flow
+- **AND** the heart SHALL NOT flip to watched
+
+#### Scenario: Watchlist reloads correctly after page refresh
+- **WHEN** a connected wallet reloads the page
+- **THEN** the heart icons on watched listings SHALL reflect the persisted state
+  fetched from `GET /api/watchlist?account=<address>`
+
+### Requirement: My-bids Watchlist section uses persisted data
+
+The "Watchlist" grid in the My-bids Bidding tab SHALL be populated from the
+server-backed `useWatchlist` query rather than from local React state. When no
+wallet is connected, the section SHALL show a prompt to connect instead of an
+empty grid.
+
+#### Scenario: Watchlist grid shows persisted entries
+- **WHEN** a connected wallet opens the My-bids / Bidding tab
+- **THEN** the Watchlist section SHALL display all listings the wallet is watching
+  as fetched from `GET /api/watchlist?account=<address>`
+
+#### Scenario: Empty watchlist shows empty state
+- **WHEN** a wallet has no watchlist entries
+- **THEN** the Watchlist section SHALL be hidden or show an empty-state prompt
+
+#### Scenario: Not-connected watchlist shows connect prompt
+- **WHEN** a visitor opens My-bids without a connected wallet
+- **THEN** the Watchlist section SHALL display a prompt to connect a wallet
+- **AND** SHALL NOT display an empty grid without context
+
+#### Scenario: Closed listing disappears from Watchlist grid
+- **WHEN** a listing in the wallet's watchlist closes (sold or cancelled)
+- **THEN** on the next query refresh the listing SHALL no longer appear in the
+  Watchlist grid
+
+### Requirement: Profile page displays real persisted data
+
+The `/profile` page SHALL fetch the connected wallet's profile from
+`GET /api/profiles/:address` and stats from `GET /api/profiles/:address/stats`
+via TanStack Query hooks, replacing all static panel data. The static
+`PROFILE_STATS`, `PROFILE_ACHIEVEMENTS`, `PROFILE_ACTIVITY`, and `PROFILE_REVIEWS`
+constants from `panels.ts` SHALL NOT be imported or rendered.
+
+#### Scenario: Connected user views their profile
+
+- **WHEN** a user with a connected wallet navigates to `/profile`
+- **THEN** the page SHALL display their saved `displayName`, `bio`, `location`,
+  `website`, and `memberSince` fetched from the API
+- **AND** the stats section SHALL show `collectionValueUsdc`, `cardsOwned`,
+  `cardsSold`, `sellerRating`, and `winRate` derived from real trade data
+
+#### Scenario: Profile page shows empty state for a new user
+
+- **WHEN** a freshly connected wallet with no trades or profile edits visits `/profile`
+- **THEN** the page SHALL render null/zero values (e.g. "—" for rating) rather
+  than the static mock numbers
+- **AND** SHALL NOT display `cardwizard_88` or any other hard-coded user data
+
+#### Scenario: Profile shows live reviews from counterparties
+
+- **WHEN** another user has posted a review for this wallet address
+- **THEN** the reviews section SHALL display that review with reviewer address,
+  star rating, text, and relative timestamp fetched from
+  `GET /api/profiles/:address/reviews`
+
+#### Scenario: Achievements reflect real activity
+
+- **WHEN** a user has completed at least one trade as buyer
+- **THEN** the `first-win` achievement badge SHALL render as unlocked
+- **AND** badges for thresholds not yet reached SHALL render as locked
+
+### Requirement: Profile-edit page persists changes to the API
+
+The `/profile/edit` page SHALL maintain a local form state for editable fields
+(displayName, bio, location, website, avatarUrl), call
+`PUT /api/profiles/:address` on save, and invalidate the profile query on
+success. The in-memory `draft` state and `saveProfile`/`setDraft` helpers in
+`TopDeckProvider` SHALL be removed.
+
+#### Scenario: User saves a profile edit
+
+- **WHEN** a user edits their bio on `/profile/edit` and taps Save
+- **THEN** the app SHALL call `PUT /api/profiles/:address` with the updated
+  fields, navigate back to `/profile`, and the profile page SHALL immediately
+  show the new bio without a page reload
+
+#### Scenario: User cancels a profile edit
+
+- **WHEN** a user navigates to `/profile/edit`, makes changes, and taps Cancel
+- **THEN** the app SHALL navigate back to `/profile` without calling the API,
+  and the profile data SHALL remain unchanged
+
+#### Scenario: Save fails with a network error
+
+- **WHEN** the `PUT /api/profiles/:address` call returns a non-2xx response
+- **THEN** the edit page SHALL display an error message and SHALL NOT navigate
+  away from `/profile/edit`
 

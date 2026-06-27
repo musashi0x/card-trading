@@ -1,26 +1,12 @@
 /**
  * TopDeck — static design data for the display panels (Leaderboard, Portfolio,
- * Profile, Trade). These screens have no backend in the fixed-price marketplace,
- * so — exactly like `mockCards` for the browse grid — they render prototype data
- * ported 1:1 from the Claude Design source (TopDeck.dc.html). The Trade flow's
- * "you give" side draws from MY_CARDS; the "you get" side draws from live cards.
+ * Trade). These screens render prototype data ported from the Claude Design
+ * source; profile data is now real (see the user-profiles change). The Trade
+ * flow's "you give" side draws from MY_CARDS; the "you get" side draws from live
+ * cards.
  */
 
-import { ComponentType } from 'react';
 import type { Rarity } from './lib';
-import EmojiEvents from '@mui/icons-material/EmojiEvents';
-import MilitaryTech from '@mui/icons-material/MilitaryTech';
-import Shield from '@mui/icons-material/Shield';
-import Star from '@mui/icons-material/Star';
-import Whatshot from '@mui/icons-material/Whatshot';
-import Diamond from '@mui/icons-material/Diamond';
-import MonetizationOn from '@mui/icons-material/MonetizationOn';
-import WorkspacePremium from '@mui/icons-material/WorkspacePremium';
-import Bolt from '@mui/icons-material/Bolt';
-import Gavel from '@mui/icons-material/Gavel';
-import LocalAtm from '@mui/icons-material/LocalAtm';
-import Favorite from '@mui/icons-material/Favorite';
-import Layers from '@mui/icons-material/Layers';
 
 /** Gradient avatars reused across leaderboard rows, reviews, and podium. */
 export const G = {
@@ -116,73 +102,6 @@ export const ALLOC_COLORS: Record<Rarity, string> = {
   rare: '#2d5bff',
   common: '#13c06a',
 };
-
-// ===== Profile =====
-export interface ProfileData {
-  username: string;
-  bio: string;
-  location: string;
-  website: string;
-  memberSince: string;
-  notifyOutbid: boolean;
-  notifyEnding: boolean;
-  notifySales: boolean;
-  publicCollection: boolean;
-}
-
-export const DEFAULT_PROFILE: ProfileData = {
-  username: 'cardwizard_88',
-  bio: 'Vintage Pokémon and 90s sports. Always hunting clean copies and fair trades.',
-  location: 'Portland, OR',
-  website: 'topdeck.gg/cardwizard',
-  memberSince: '2021',
-  notifyOutbid: true,
-  notifyEnding: true,
-  notifySales: true,
-  publicCollection: true,
-};
-
-export const PROFILE_STATS: Array<{ v: string; l: string }> = [
-  { v: '$28,400', l: 'Collection value' },
-  { v: '212', l: 'Cards owned' },
-  { v: '96', l: 'Cards sold' },
-  { v: '★ 4.7', l: 'Seller rating' },
-  { v: '54%', l: 'Win rate' },
-];
-
-export interface Achievement {
-  icon: ComponentType<any>;
-  name: string;
-  desc: string;
-  got: boolean;
-  bg: string;
-}
-
-export const PROFILE_ACHIEVEMENTS: Achievement[] = [
-  { icon: EmojiEvents, name: 'First win', desc: 'Won your first auction', got: true, bg: '#ffd84d' },
-  { icon: MilitaryTech, name: 'Century club', desc: '100+ cards collected', got: true, bg: '#bff3d4' },
-  { icon: Shield, name: 'Vault verified', desc: 'Identity authenticated', got: true, bg: '#cfe0ff' },
-  { icon: Star, name: '5-star seller', desc: '50 reviews at 4.5+', got: true, bg: '#ffe0d6' },
-  { icon: Whatshot, name: '30-day streak', desc: 'Active a month straight', got: true, bg: '#ffd1cc' },
-  { icon: Diamond, name: 'Top 50 collector', desc: 'Reach the season top 50', got: true, bg: '#e7ddff' },
-  { icon: MonetizationOn, name: 'Big spender', desc: '$10k in a single bid', got: false, bg: '#fff' },
-  { icon: WorkspacePremium, name: 'Season champion', desc: 'Finish #1 in a season', got: false, bg: '#fff' },
-];
-
-export const PROFILE_ACTIVITY: Array<{ icon: ComponentType<any>; iconBg: string; text: string; amt: string; when: string }> = [
-  { icon: EmojiEvents, iconBg: '#bff3d4', text: 'Won Aurora Phoenix Holo', amt: '$3,120', when: '2h ago' },
-  { icon: Bolt, iconBg: '#ffd1cc', text: 'Outbid on Galaxy Mage Prism', amt: '$940', when: '5h ago' },
-  { icon: Gavel, iconBg: '#ffd84d', text: 'Listed Chrome Rookie for auction', amt: '$410', when: '1d ago' },
-  { icon: LocalAtm, iconBg: '#bff3d4', text: 'Sold Pixel Familiar', amt: '$40', when: '2d ago' },
-  { icon: Favorite, iconBg: '#ffe0d6', text: 'Added Retro Slugger Gold to watchlist', amt: '$7,300', when: '3d ago' },
-  { icon: Layers, iconBg: '#cfe0ff', text: 'Bid on Solar Drake · 1st Ed', amt: '$2,450', when: '4d ago' },
-];
-
-export const PROFILE_REVIEWS: Array<{ name: string; art: string; stars: string; text: string; when: string }> = [
-  { name: 'VaultKings', art: G.g1, stars: '★★★★★', text: 'Fast shipping, card exactly as described. A+ trader.', when: '1w ago' },
-  { name: 'PullRatePro', art: G.g4, stars: '★★★★★', text: 'Smooth deal and great communication throughout.', when: '3w ago' },
-  { name: 'RookieRack', art: G.g2, stars: '★★★★☆', text: 'Good buyer — minor delay on payment but all sorted.', when: '1mo ago' },
-];
 
 // ===== Trade =====
 export interface MyCard {

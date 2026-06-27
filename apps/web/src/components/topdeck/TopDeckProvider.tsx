@@ -38,6 +38,7 @@ import { XLM_ASSET, formatAmount } from '@cardmkt/shared';
 import { ApiRequestError, api, type OrderWithCard } from '@/lib/api';
 import {
   invalidateOrders,
+  queryKeys,
   useCards,
   useDisputedOrders,
   useListings,
@@ -50,12 +51,11 @@ import {
   increment,
   mapListing,
   mapRarity,
-  mockCards,
   rarityArt,
   type Rarity,
   type TopCard,
 } from './lib';
-import { DEFAULT_PROFILE, EMPTY_TRADE, type LbTab, type ProfileData, type TradeState } from './panels';
+import { EMPTY_TRADE, type LbTab, type TradeState } from './panels';
 
 // ----- wallet / orders shapes consumed by the store -----
 
@@ -140,8 +140,6 @@ export interface TopDeckState {
   orderBusy: string | null;
   ordersArbiter: boolean;
   lbTab: LbTab;
-  profile: ProfileData;
-  draft: ProfileData | null;
   trade: TradeState;
   query: string;
   sort: string;
@@ -150,7 +148,6 @@ export interface TopDeckState {
   bidAmount: string;
   toast: string | null;
   toastKind: 'win' | 'outbid';
-  watched: Record<string, boolean>;
   status: Record<string, string>;
   myMax: Record<string, number>;
   sellStep: number;
@@ -178,11 +175,11 @@ export interface TopDeckState {
 
 function makeInitialState(seed: TopCard[]): TopDeckState {
   return {
-    selectedId: null, lbTab: 'collectors', profile: { ...DEFAULT_PROFILE }, draft: null, trade: { ...EMPTY_TRADE },
+    selectedId: null, lbTab: 'collectors', trade: { ...EMPTY_TRADE },
     query: '', sort: 'ending', now: Date.now(), page: 1,
     facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
     bidOpen: false, bidAmount: '', toast: null, toastKind: 'win',
-    watched: {}, status: {}, myMax: {},
+    status: {}, myMax: {},
     sellStep: 1, sellMode: 'hold', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
     form: { ...EMPTY_FORM },
     cards: seed,
@@ -214,6 +211,7 @@ export interface TopDeckContext {
   goLeaderboard: () => void;
   goPortfolio: () => void;
   goTrade: () => void;
+  goTrades: () => void;
   goProfile: () => void;
   openOrders: () => void;
   /** URL-sync the detail screen to a card id (called by /card/[id] on mount). */
@@ -229,7 +227,6 @@ export interface TopDeckContext {
   clearFilters: () => void;
   setQuery: (e: ChangeEvent<HTMLInputElement>) => void;
   clearQuery: () => void;
-  toggleWatch: (e: React.MouseEvent, id: string) => void;
   toggleFilters: () => void;
   closeFilters: () => void;
 
@@ -270,13 +267,6 @@ export interface TopDeckContext {
 
   // leaderboard
   setLbTab: (t: LbTab) => void;
-
-  // profile / edit
-  startEditProfile: () => void;
-  cancelEdit: () => void;
-  saveProfile: () => void;
-  setDraft: (k: keyof ProfileData, v: string) => void;
-  toggleDraft: (k: keyof ProfileData) => void;
 
   // trade builder
   openTradePicker: (side: 'give' | 'get') => void;
@@ -384,6 +374,7 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   const goLeaderboard = () => router.push('/leaderboard');
   const goPortfolio = () => router.push('/portfolio');
   const goTrade = () => router.push('/trade');
+  const goTrades = () => router.push('/trades');
   const goProfile = () => router.push('/profile');
   const openOrders = () => {
     setState({ navMenuOpen: false });
@@ -396,27 +387,6 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     setState((s) => ({ sellMode: mode, mintedCard: null, form: { ...s.form, cardId: '' } }));
   const setMyBidsTab = (t: 'bidding' | 'selling') => setState({ myBidsTab: t });
   const setLbTab = (t: LbTab) => setState({ lbTab: t });
-
-  // ----- edit profile -----
-  const startEditProfile = () => {
-    setState((s) => ({ draft: { ...s.profile } }));
-    router.push('/profile/edit');
-  };
-  const cancelEdit = () => {
-    setState({ draft: null });
-    router.push('/profile');
-  };
-  const saveProfile = () => {
-    setState((s) => ({ profile: s.draft ?? s.profile, draft: null }));
-    router.push('/profile');
-  };
-  const setDraft = (k: keyof ProfileData, v: string) =>
-    setState((s) => ({ draft: { ...(s.draft ?? s.profile), [k]: v } }));
-  const toggleDraft = (k: keyof ProfileData) =>
-    setState((s) => {
-      const d = s.draft ?? s.profile;
-      return { draft: { ...d, [k]: !d[k] } };
-    });
 
   // ----- trade builder -----
   const openTradePicker = (side: 'give' | 'get') => setState((s) => ({ trade: { ...s.trade, picker: side } }));
@@ -461,12 +431,6 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     if (pathname.startsWith('/card/') || pathname === '/sell') router.push('/');
   };
   const clearQuery = () => setState({ page: 1, query: '' });
-
-  // ----- watch -----
-  const toggleWatch = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    setState((s) => ({ watched: { ...s.watched, [id]: !s.watched[id] } }));
-  };
 
   // ----- bidding (simulated) -----
   const openBid = () => {
@@ -847,9 +811,9 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     explorerTx,
     explorerAddress: explorerAccount,
     getCard,
-    open, goHome, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goProfile, openOrders, viewCard,
+    open, goHome, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goTrades, goProfile, openOrders, viewCard,
     setPage, toggleCat, toggleRarity, toggleFlag, setPrice, setSort, clearFilters, setQuery, clearQuery,
-    toggleWatch, toggleFilters, closeFilters,
+    toggleFilters, closeFilters,
     setMyBidsTab,
     openBid, openBidFor, closeBid, onBidInput, setBid, confirmBid,
     selectPayAsset, buyNow, payWithPasskey, escrowBuy,
@@ -857,7 +821,6 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     setSellMode, setForm, readImageFile, onPickImage, onDropImage, setDragOver, selectCatalogCard,
     sellNext, sellBack, listAnother, publishListing,
     setLbTab,
-    startEditProfile, cancelEdit, saveProfile, setDraft, toggleDraft,
     openTradePicker, closeTradePicker, addTradeCard, removeTradeCard, setTradeCash, sendTrade, resetTrade,
     onWalletClick, closeWalletMenu, toggleNavMenu, closeNavMenu, disconnectWallet, copyAddress,
     showToast,
@@ -875,8 +838,22 @@ function Splash() {
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, background: '#fff7ec', color: INK, fontFamily: "'DM Sans',system-ui" }}>
       <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 40, letterSpacing: '-.03em' }}>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4d3d', animation: 'pulseDot 1.3s infinite' }} />Loading live auctions…
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4d3d', animation: 'pulseDot 1.3s infinite' }} />Loading marketplace…
       </div>
+    </div>
+  );
+}
+
+/** Shown when the first listings fetch fails — never a fabricated fallback. */
+function ErrorPanel({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, background: '#fff7ec', color: INK, fontFamily: "'DM Sans',system-ui", padding: 24, textAlign: 'center' }}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 40, letterSpacing: '-.03em' }}>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></div>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 22 }}>Couldn’t load the marketplace</div>
+      <div style={{ fontSize: 14, fontWeight: 500, color: 'rgba(26,19,5,.6)', maxWidth: 380 }}>
+        We couldn’t reach the listings service. Check your connection and try again.
+      </div>
+      <div onClick={onRetry} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Retry</div>
     </div>
   );
 }
@@ -900,14 +877,15 @@ export function TopDeckProvider({ children }: { children: ReactNode }) {
   } = useWallet();
   const { data: listings, isPending: listingsPending, isError: listingsError } = useListings();
 
-  // Map live listings to seed cards; fall back to demo cards when the API is
-  // unreachable or has no open listings, so the marketplace is never empty.
-  const seed = useMemo<TopCard[] | null>(() => {
+  // Map live listings to seed cards. Tri-state: `null` while the first fetch is
+  // in flight, the `'error'` sentinel when the API call fails, otherwise the
+  // (possibly empty) real listings. We never fabricate demo cards — an empty or
+  // errored response renders an honest empty/error state instead.
+  const seed = useMemo<TopCard[] | 'error' | null>(() => {
     if (listingsPending) return null;
-    if (listingsError || !listings) return mockCards();
+    if (listingsError || !listings) return 'error';
     const base = Date.now();
-    const mapped = listings.filter((l) => l.card).map((l) => mapListing(l, base));
-    return mapped.length ? mapped : mockCards(base);
+    return listings.filter((l) => l.card).map((l) => mapListing(l, base));
   }, [listings, listingsPending, listingsError]);
 
   const { data: catalog = [] } = useCards(address);
@@ -935,7 +913,9 @@ export function TopDeckProvider({ children }: { children: ReactNode }) {
     onSuccess: refreshOrders,
   });
 
-  if (!seed) return <Splash />;
+  if (seed === null) return <Splash />;
+  if (seed === 'error')
+    return <ErrorPanel onRetry={() => queryClient.invalidateQueries({ queryKey: queryKeys.listings() })} />;
 
   const wallet: WalletProps = {
     address,
