@@ -9,7 +9,9 @@ import type {
   MintCardRequest,
   MintCardResponse,
   Offer,
+  Order,
   PasskeyListRequest,
+  PasskeyOrderInput,
   PasskeySubmitRequest,
   PathPaymentBuildRequest,
   PathQuoteRequest,
@@ -18,6 +20,11 @@ import type {
   Trade,
   TradeAction,
 } from '@cardmkt/shared';
+
+/** An order joined with a thumbnail of its card, as the orders API returns it. */
+export type OrderWithCard = Order & {
+  card: { id: string; name: string; set: string; rarity: string; imageUrl: string };
+};
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
@@ -53,6 +60,24 @@ export const api = {
   },
   offers: (listingId: string) => request<Offer[]>(`/api/listings/${listingId}/offers`),
   trades: () => request<Trade[]>('/api/trades'),
+
+  /** Physical-escrow orders where `account` is buyer or seller. */
+  orders: (account: string) =>
+    request<OrderWithCard[]>(`/api/orders?account=${encodeURIComponent(account)}`),
+  /** Open disputes awaiting arbiter resolution. */
+  disputedOrders: () => request<OrderWithCard[]>('/api/orders/disputed'),
+  /** Arbiter resolution of a disputed order (server-signed with the arbiter key). */
+  resolveOrder: (orderId: string, refund: boolean) =>
+    request<SubmitTxResponse>('/api/tx/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ orderId, refund }),
+    }),
+  /** Relay a passkey-authorized escrow order action (gasless smart wallet). */
+  passkeyOrder: (body: PasskeyOrderInput) =>
+    request<SubmitTxResponse & { refId: string }>('/api/tx/passkey-order', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   build: (action: TradeAction, body: Record<string, unknown>) => {
     const path = action.replace('_', '-');

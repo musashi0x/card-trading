@@ -14,7 +14,13 @@
 
 import { PasskeyKit } from 'passkey-kit';
 import { Account, BASE_FEE, TransactionBuilder, rpc } from '@stellar/stellar-sdk';
-import { MarketplaceContract, toStroops, type SmartWalletAccount } from '@cardmkt/shared';
+import {
+  FULFILLMENT,
+  MarketplaceContract,
+  toStroops,
+  type FulfillmentMode,
+  type SmartWalletAccount,
+} from '@cardmkt/shared';
 
 const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? 'https://soroban-testnet.stellar.org';
 const NETWORK_PASSPHRASE =
@@ -134,12 +140,50 @@ export async function signList(
   wallet: SmartWalletAccount,
   cardToken: string,
   priceUsdc: string,
+  fulfillment: FulfillmentMode = 'digital',
 ): Promise<string> {
   const op = new MarketplaceContract(CONTRACT_ID).list(
     wallet.contractId,
     cardToken,
     toStroops(priceUsdc),
+    FULFILLMENT[fulfillment],
   );
+  return signWalletCall(wallet, op);
+}
+
+/** Build + passkey-sign a `purchase_escrow` with the smart wallet as buyer; return XDR. */
+export async function signPurchaseEscrow(
+  wallet: SmartWalletAccount,
+  contractListingId: number,
+): Promise<string> {
+  const op = new MarketplaceContract(CONTRACT_ID).purchaseEscrow(wallet.contractId, contractListingId);
+  return signWalletCall(wallet, op);
+}
+
+/** Build + passkey-sign a `confirm_receipt` with the smart wallet as buyer; return XDR. */
+export async function signConfirmReceipt(
+  wallet: SmartWalletAccount,
+  contractOrderId: number,
+): Promise<string> {
+  const op = new MarketplaceContract(CONTRACT_ID).confirmReceipt(wallet.contractId, contractOrderId);
+  return signWalletCall(wallet, op);
+}
+
+/** Build + passkey-sign a `dispute` with the smart wallet as a participant; return XDR. */
+export async function signDispute(
+  wallet: SmartWalletAccount,
+  contractOrderId: number,
+): Promise<string> {
+  const op = new MarketplaceContract(CONTRACT_ID).dispute(wallet.contractId, contractOrderId);
+  return signWalletCall(wallet, op);
+}
+
+/** Build + passkey-sign a `mark_shipped` with the smart wallet as seller; return XDR. */
+export async function signMarkShipped(
+  wallet: SmartWalletAccount,
+  contractOrderId: number,
+): Promise<string> {
+  const op = new MarketplaceContract(CONTRACT_ID).markShipped(wallet.contractId, contractOrderId);
   return signWalletCall(wallet, op);
 }
 

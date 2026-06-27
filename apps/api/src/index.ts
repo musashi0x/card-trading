@@ -10,6 +10,7 @@ import { env } from './env.js';
 import { catalogRouter } from './routes/catalog.js';
 import { cardsRouter } from './routes/cards.js';
 import { txRouter } from './routes/tx.js';
+import { ordersRouter } from './routes/orders.js';
 import { tradesRouter } from './routes/trades.js';
 import { devRouter } from './routes/dev.js';
 import { startIndexer } from './indexer.js';
@@ -24,6 +25,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.use('/api', catalogRouter);
 app.use('/api/tx', txRouter);
+app.use('/api/orders', ordersRouter);
 app.use('/api/trades', tradesRouter);
 // Dev-only conveniences (e.g. funding a smart wallet with test USDC).
 if (env.stellar.network !== 'mainnet') app.use('/api/dev', devRouter);

@@ -54,6 +54,133 @@ input::placeholder {
   color: rgba(26, 19, 5, 0.4);
 }
 
+/* The combined-tabs dropdown is mobile-only; desktop shows the inline links. */
+.nav-menu { display: none; }
+
+/* ===== Filters: docked sidebar on desktop, right slide-in drawer on mobile =====
+   `filtersOpen` state only gates the mobile drawer (.open); on desktop the panel
+   is always visible, so it defaults collapsed on mobile with no JS width checks. */
+.browse-layout {
+  display: grid;
+  grid-template-columns: 236px 1fr;
+  gap: 28px;
+  margin-top: 26px;
+  align-items: start;
+}
+.filter-panel {
+  position: sticky;
+  top: 88px;
+  background: #fff;
+  border: 3px solid #1a1305;
+  border-radius: 16px;
+  box-shadow: 5px 5px 0 #1a1305;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.filter-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 15px 16px;
+  background: #ffd84d;
+  border-bottom: 3px solid #1a1305;
+  flex: none;
+}
+.filter-panel__body {
+  padding: 16px 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+/* The Filters trigger button and the drawer's close (✕) only exist in drawer mode. */
+.filters-trigger { display: none; }
+.filters-close { display: none; }
+.filter-backdrop { display: none; }
+
+@media (max-width: 768px) {
+  /* Single column — the fixed drawer is out of flow, so the grid spans full width. */
+  .browse-layout { grid-template-columns: 1fr; }
+  /* The panel becomes a full-height drawer pinned to the right, off-screen until open. */
+  .filter-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100%;
+    width: min(330px, 86vw);
+    z-index: 46;
+    border: none;
+    border-left: 3px solid #1a1305;
+    border-radius: 0;
+    box-shadow: -6px 0 24px rgba(26, 19, 5, 0.18);
+    transform: translateX(100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .filter-panel.open { transform: translateX(0); }
+  .filter-panel__body { flex: 1; padding: 18px; }
+  .filters-trigger { display: inline-flex; }
+  .filters-close { display: flex; }
+  .filter-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    background: rgba(26, 19, 5, 0.4);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  .filter-backdrop.open { opacity: 1; pointer-events: auto; }
+}
+
+/* ===== Responsive (ported from the design's @container rules) =====
+   The component styles columns inline, so these layout overrides must use
+   !important to beat the element's own `style` attribute. Tiered so the wide
+   nav collapses before the content does, letting tablets keep side-by-side
+   layouts while phones stack everything. */
+
+/* Collapse the five inline tabs into the single Menu dropdown well before the
+   nav itself wraps: the links plus the three CTAs (Sell / Face ID / Connect)
+   need ~1240px to sit on one row, so swapping to the compact menu here keeps
+   the CTAs from being squeezed into multi-line text on mid-size laptops. */
+@media (max-width: 1200px) {
+  .nav-links { display: none !important; }
+  .nav-menu { display: block !important; }
+}
+
+/* The nav is the widest element — wrap (and drop the search) first. It's tall
+   once wrapped, so let it scroll away instead of pinning ~⅓ of the viewport. */
+@media (max-width: 900px) {
+  .topnav { flex-wrap: wrap !important; gap: 10px 12px !important; padding: 11px 16px !important; position: static !important; }
+  /* Search keeps its place but spans its own full-width row; the flex spacer
+     that right-aligns the nav on desktop is dropped so the links stay left. */
+  .nav-search { flex-basis: 100% !important; max-width: 100% !important; }
+  .nav-spacer { display: none !important; }
+}
+
+/* Card grid: 3 → 2 columns once three lots get cramped. */
+@media (max-width: 860px) {
+  .td-grid-3 { grid-template-columns: repeat(2, 1fr) !important; }
+}
+
+/* Tablet-portrait and below: collapse the side-by-side panels to one column. */
+@media (max-width: 760px) {
+  .stack { grid-template-columns: 1fr !important; }
+  .td-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+  .m-pad { padding-left: 18px !important; padding-right: 18px !important; }
+  .m-h1 { font-size: 28px !important; }
+  /* Once a side-by-side panel stacks, a `sticky` column would pin itself and
+     the now-below content scrolls over it — drop sticky so it scrolls inline. */
+  .m-unstick { position: static !important; }
+}
+
+/* Phone: the card grid goes single column. */
+@media (max-width: 520px) {
+  .td-grid-3 { grid-template-columns: 1fr !important; }
+}
+
 /* Strip number-input spinners so the bid/price fields stay clean. */
 input[type='number']::-webkit-outer-spin-button,
 input[type='number']::-webkit-inner-spin-button {

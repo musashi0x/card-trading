@@ -14,9 +14,24 @@
  */
 
 import { Component, type ChangeEvent, type CSSProperties, type DragEvent } from 'react';
-import type { Card, MintCardRequest, PathQuoteResponse, StellarAsset } from '@cardmkt/shared';
+import type {
+  Card,
+  FulfillmentMode,
+  MintCardRequest,
+  PathQuoteResponse,
+  StellarAsset,
+  TradeAction,
+} from '@cardmkt/shared';
 import { XLM_ASSET, formatAmount } from '@cardmkt/shared';
-import { ApiRequestError, api } from '@/lib/api';
+import { ApiRequestError, api, type OrderWithCard } from '@/lib/api';
+import type { OrderAction } from '@/components/WalletProvider';
+import FavoriteIcon from '@mui/icons-material/Favorite';
+import FavoriteBorderIcon from '@mui/icons-material/FavoriteBorder';
+import MenuIcon from '@mui/icons-material/Menu';
+import SearchIcon from '@mui/icons-material/Search';
+import CloseIcon from '@mui/icons-material/Close';
+import SearchOffIcon from '@mui/icons-material/SearchOff';
+import TuneIcon from '@mui/icons-material/Tune';
 import {
   type Rarity,
   type TopCard,
@@ -29,6 +44,27 @@ import {
   rarityMeta,
   shorten,
 } from './lib';
+import {
+  ALLOC_COLORS,
+  DEFAULT_PROFILE,
+  EMPTY_TRADE,
+  type LbTab,
+  LB_CFGS,
+  LB_SUBTITLE,
+  LB_USERS,
+  LB_YOU,
+  MY_CARDS,
+  PF_HIST_LABELS,
+  PF_HIST_VALS,
+  PF_RAW,
+  PROFILE_ACHIEVEMENTS,
+  PROFILE_ACTIVITY,
+  PROFILE_REVIEWS,
+  PROFILE_STATS,
+  type ProfileData,
+  type TradeItem,
+  type TradeState,
+} from './panels';
 
 const INK = '#1a1305';
 const DISPLAY = "'Bricolage Grotesque'";
@@ -46,11 +82,20 @@ interface WalletProps {
   /** Connect (or create) a passkey smart wallet via Face ID / Touch ID. */
   connectViaPasskey: () => Promise<void>;
   disconnect: () => void;
-  runAction: (action: 'list', body: Record<string, unknown>) => Promise<string>;
+  runAction: (action: TradeAction, body: Record<string, unknown>) => Promise<string>;
   /** Buy a real listing with the passkey smart wallet (gasless). Returns tx hash. */
   passkeyBuyNow: (listingId: string, contractListingId: number) => Promise<string>;
   /** List a card with the passkey smart wallet (gasless). Returns tx hash. */
-  passkeyList: (cardId: string, cardToken: string, priceUsdc: string) => Promise<string>;
+  passkeyList: (
+    cardId: string,
+    cardToken: string,
+    priceUsdc: string,
+    fulfillment?: FulfillmentMode,
+  ) => Promise<string>;
+  /** Buy a physical listing through the delivery-confirmation escrow. Returns tx hash. */
+  escrowPurchase: (listingId: string, contractListingId: number) => Promise<string>;
+  /** Take a participant action on an escrow order. Returns tx hash. */
+  orderAction: (action: OrderAction, orderId: string, contractOrderId: number) => Promise<string>;
   /** Mint (issue) a brand-new card owned by the connected wallet. */
   mintCard: (meta: Omit<MintCardRequest, 'owner'>) => Promise<Card>;
   /** Convert a held asset into the settlement USDC (pay-with-any-asset). */
@@ -87,6 +132,8 @@ interface Form {
   buyNowOn: boolean;
   buyNow: string;
   duration: number;
+  /** Delivery mode: `digital` (instant atomic swap) or `physical` (escrow). */
+  fulfillment: FulfillmentMode;
   /** Copies to issue when minting a brand-new card. */
   supply: string;
   /** Creator royalty percent (0–10) when minting a brand-new card. */
@@ -94,7 +141,25 @@ interface Form {
 }
 
 interface State {
-  screen: 'browse' | 'detail' | 'mybids' | 'sell';
+  screen: 'browse' | 'detail' | 'mybids' | 'sell' | 'leaderboard' | 'portfolio' | 'trade' | 'profile' | 'editprofile' | 'orders';
+  /** Escrow orders for the connected wallet (buyer or seller), loaded on demand. */
+  orders: OrderWithCard[];
+  /** Open disputes shown to the arbiter (the Orders screen's arbiter tab). */
+  disputed: OrderWithCard[];
+  ordersLoading: boolean;
+  ordersErr: string | null;
+  /** Order id with an action in flight, so its buttons can show a spinner. */
+  orderBusy: string | null;
+  /** Whether the Orders screen is showing the arbiter (disputes) view. */
+  ordersArbiter: boolean;
+  /** Leaderboard tab — ranks collectors, sellers, or traders. */
+  lbTab: LbTab;
+  /** The signed-in user's profile (static design data). */
+  profile: ProfileData;
+  /** In-progress edits on the Edit Profile screen; null when not editing. */
+  draft: ProfileData | null;
+  /** Peer-to-peer trade builder: card ids on each side, cash, open picker, sent. */
+  trade: TradeState;
   selectedId: string | null;
   query: string;
   sort: string;
@@ -133,6 +198,10 @@ interface State {
   payErr: string | null;
   /** Whether the connected-wallet management menu is open. */
   walletMenuOpen: boolean;
+  /** Whether the mobile nav dropdown (the five tabs, combined) is open. */
+  navMenuOpen: boolean;
+  /** Whether the filter sidebar body is expanded (collapsible on mobile). */
+  filtersOpen: boolean;
   /** True briefly after the address is copied, to flip the copy label. */
   addressCopied: boolean;
 }
@@ -140,7 +209,7 @@ interface State {
 const EMPTY_FORM: Form = {
   cardId: '', title: '', setLine: '', category: 'Other', rarity: 'rare', image: undefined,
   graded: false, grade: 'PSA 10', condition: 'Near Mint', startBid: '', buyNowOn: false, buyNow: '', duration: 3,
-  supply: '1', royaltyPct: '0',
+  fulfillment: 'digital', supply: '1', royaltyPct: '0',
 };
 
 export class TopDeckApp extends Component<Props, State> {
@@ -152,7 +221,8 @@ export class TopDeckApp extends Component<Props, State> {
   constructor(props: Props) {
     super(props);
     this.state = {
-      screen: 'browse', selectedId: null, query: '', sort: 'ending', now: Date.now(), page: 1,
+      screen: 'browse', lbTab: 'collectors', profile: { ...DEFAULT_PROFILE }, draft: null, trade: { ...EMPTY_TRADE },
+      selectedId: null, query: '', sort: 'ending', now: Date.now(), page: 1,
       facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
       bidOpen: false, bidAmount: '', toast: null, toastKind: 'win',
       watched: {}, status: {}, myMax: {},
@@ -161,7 +231,8 @@ export class TopDeckApp extends Component<Props, State> {
       cards: props.seedCards,
       payAsset: 'USDC', quote: null, quoting: false, quoteErr: null,
       paying: false, payErr: null,
-      walletMenuOpen: false, addressCopied: false,
+      orders: [], disputed: [], ordersLoading: false, ordersErr: null, orderBusy: null, ordersArbiter: false,
+      walletMenuOpen: false, navMenuOpen: false, filtersOpen: false, addressCopied: false,
     };
   }
 
@@ -190,6 +261,38 @@ export class TopDeckApp extends Component<Props, State> {
   private setSellMode = (mode: 'hold' | 'mint') =>
     this.setState((s) => ({ sellMode: mode, mintedCard: null, form: { ...s.form, cardId: '' } }));
   private setMyBidsTab = (t: 'bidding' | 'selling') => this.setState({ myBidsTab: t });
+
+  // ----- new screens -----
+  private goLeaderboard = () => { this.setState({ screen: 'leaderboard' }); window.scrollTo(0, 0); };
+  private goPortfolio = () => { this.setState({ screen: 'portfolio' }); window.scrollTo(0, 0); };
+  private goTrade = () => { this.setState({ screen: 'trade' }); window.scrollTo(0, 0); };
+  private goProfile = () => { this.setState({ screen: 'profile' }); window.scrollTo(0, 0); };
+  private setLbTab = (t: LbTab) => this.setState({ lbTab: t });
+
+  // ----- edit profile -----
+  // Edits live on a `draft` copy so Cancel discards them; Save commits the draft.
+  private startEditProfile = () => { this.setState((s) => ({ screen: 'editprofile', draft: { ...s.profile } })); window.scrollTo(0, 0); };
+  private cancelEdit = () => { this.setState({ screen: 'profile', draft: null }); window.scrollTo(0, 0); };
+  private saveProfile = () => { this.setState((s) => ({ screen: 'profile', profile: s.draft ?? s.profile, draft: null })); window.scrollTo(0, 0); };
+  private setDraft = (k: keyof ProfileData, v: string) =>
+    this.setState((s) => ({ draft: { ...(s.draft ?? s.profile), [k]: v } }));
+  private toggleDraft = (k: keyof ProfileData) =>
+    this.setState((s) => { const d = s.draft ?? s.profile; return { draft: { ...d, [k]: !d[k] } }; });
+
+  // ----- trade builder -----
+  private openTradePicker = (side: 'give' | 'get') => this.setState((s) => ({ trade: { ...s.trade, picker: side } }));
+  private closeTradePicker = () => this.setState((s) => ({ trade: { ...s.trade, picker: null } }));
+  private addTradeCard = (side: 'give' | 'get', id: string) =>
+    this.setState((s) => {
+      const arr = s.trade[side];
+      const next = arr.includes(id) ? arr : [...arr, id];
+      return { trade: { ...s.trade, [side]: next, picker: null } };
+    });
+  private removeTradeCard = (side: 'give' | 'get', id: string) =>
+    this.setState((s) => ({ trade: { ...s.trade, [side]: s.trade[side].filter((x) => x !== id) } }));
+  private setTradeCash = (v: string) => this.setState((s) => ({ trade: { ...s.trade, cash: v } }));
+  private sendTrade = () => { this.setState((s) => ({ trade: { ...s.trade, sent: true } })); window.scrollTo(0, 0); };
+  private resetTrade = () => this.setState({ trade: { ...EMPTY_TRADE } });
 
   // ----- pagination -----
   // Any change to the result set (filter/sort/search) sends the user back to
@@ -373,6 +476,91 @@ export class TopDeckApp extends Component<Props, State> {
     }
   };
 
+  // ----- physical escrow: buy + order management -----
+
+  /** Buy a physical listing through the delivery-confirmation escrow. */
+  private escrowBuy = async () => {
+    const c = this.getCard(this.state.selectedId);
+    if (!c?.real || c.contractListingId == null || !c.listingId) return;
+    const { escrowPurchase, address, walletKind, connect, connectViaPasskey } = this.props.wallet;
+    if (!address) {
+      if (walletKind == null && this.props.wallet.passkeyAvailable) {
+        await connectViaPasskey();
+      } else {
+        this.showToast('Connect your wallet to buy', 'outbid');
+        connect();
+        return;
+      }
+    }
+    this.setState({ paying: true, payErr: null });
+    try {
+      const hash = await escrowPurchase(c.listingId, c.contractListingId);
+      this.setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, paying: false, lastHash: hash }));
+      this.showToast(`Funds held in escrow — ${c.name} ships next 🛡`, 'win');
+      void this.loadOrders();
+    } catch (err) {
+      const msg = err instanceof ApiRequestError ? err.message : (err as Error).message;
+      this.setState({ paying: false, payErr: msg });
+      this.showToast(msg, 'outbid');
+    }
+  };
+
+  /** Load the connected wallet's orders (and open disputes for the arbiter view). */
+  private loadOrders = async () => {
+    const { address } = this.props.wallet;
+    if (!address) {
+      this.setState({ orders: [], disputed: [], ordersErr: 'Connect a wallet to see your orders' });
+      return;
+    }
+    this.setState({ ordersLoading: true, ordersErr: null });
+    try {
+      const [orders, disputed] = await Promise.all([
+        api.orders(address),
+        api.disputedOrders().catch(() => [] as OrderWithCard[]),
+      ]);
+      this.setState({ orders, disputed, ordersLoading: false });
+    } catch (err) {
+      this.setState({ ordersLoading: false, ordersErr: (err as Error).message });
+    }
+  };
+
+  /** A participant action (confirm / dispute / ship / timeout) on an order. */
+  private doOrderAction = async (action: OrderAction, o: OrderWithCard) => {
+    if (o.contractOrderId == null) {
+      this.showToast('Order is not yet confirmed on-chain', 'outbid');
+      return;
+    }
+    this.setState({ orderBusy: o.id });
+    try {
+      const hash = await this.props.wallet.orderAction(action, o.id, o.contractOrderId);
+      this.setState({ orderBusy: null, lastHash: hash });
+      this.showToast('Done ✓', 'win');
+      void this.loadOrders();
+    } catch (err) {
+      this.setState({ orderBusy: null });
+      this.showToast(err instanceof ApiRequestError ? err.message : (err as Error).message, 'outbid');
+    }
+  };
+
+  /** Arbiter resolution of a disputed order (server-signed with the arbiter key). */
+  private resolveDispute = async (o: OrderWithCard, refund: boolean) => {
+    this.setState({ orderBusy: o.id });
+    try {
+      const { hash } = await api.resolveOrder(o.id, refund);
+      this.setState({ orderBusy: null, lastHash: hash });
+      this.showToast(refund ? 'Refunded the buyer' : 'Released to the seller', 'win');
+      void this.loadOrders();
+    } catch (err) {
+      this.setState({ orderBusy: null });
+      this.showToast(err instanceof ApiRequestError ? err.message : (err as Error).message, 'outbid');
+    }
+  };
+
+  private openOrders = () => {
+    this.setState({ screen: 'orders', navMenuOpen: false });
+    void this.loadOrders();
+  };
+
   // ----- sell flow -----
   private fileInput: HTMLInputElement | null = null;
   private setForm = (k: keyof Form, v: unknown) => this.setState((s) => ({ form: { ...s.form, [k]: v } }));
@@ -506,9 +694,14 @@ export class TopDeckApp extends Component<Props, State> {
           sacAddress = this.props.catalog.find((c) => c.id === cardId)?.sacAddress ?? null;
         }
         if (!sacAddress) throw new Error('Card asset contract not deployed');
-        hash = await passkeyList(cardId, sacAddress, formatAmount(start));
+        hash = await passkeyList(cardId, sacAddress, formatAmount(start), f.fulfillment);
       } else {
-        hash = await runAction('list', { cardId, seller: address, priceUsdc: formatAmount(start) });
+        hash = await runAction('list', {
+          cardId,
+          seller: address,
+          priceUsdc: formatAmount(start),
+          fulfillment: f.fulfillment,
+        });
       }
       const card = this.formToCard({ ...f, cardId }, hash);
       this.setState((s) => ({ cards: [card, ...s.cards], sellStep: 4, lastHash: hash, publishing: false }));
@@ -530,6 +723,13 @@ export class TopDeckApp extends Component<Props, State> {
   };
 
   private closeWalletMenu = () => this.setState({ walletMenuOpen: false });
+
+  private toggleFilters = () => this.setState((s) => ({ filtersOpen: !s.filtersOpen }));
+  private closeFilters = () => this.setState({ filtersOpen: false });
+
+  // ----- mobile nav dropdown -----
+  private toggleNavMenu = () => this.setState((s) => ({ navMenuOpen: !s.navMenuOpen }));
+  private closeNavMenu = () => this.setState({ navMenuOpen: false });
 
   private disconnectWallet = () => {
     this.props.wallet.disconnect();
@@ -607,7 +807,7 @@ export class TopDeckApp extends Component<Props, State> {
       >
         <div style={{ position: 'relative', height, background: c.art }}>
           <div style={{ position: 'absolute', top: 10, left: 10, fontSize: 10, fontWeight: 800, letterSpacing: '.03em', padding: '4px 10px', borderRadius: 7, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
-          <div onClick={(e) => this.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 9, right: 9, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, background: watched ? '#ff4d3d' : '#fff', border: `2px solid ${INK}`, fontSize: 14, color: watched ? '#fff' : 'rgba(26,19,5,.3)' }}>♥</div>
+          <div onClick={(e) => this.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 9, right: 9, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, background: watched ? '#ff4d3d' : '#fff', border: `2px solid ${INK}`, fontSize: 14, color: watched ? '#fff' : 'rgba(26,19,5,.3)' }}>{watched ? <FavoriteIcon sx={{ fontSize: 17 }} /> : <FavoriteBorderIcon sx={{ fontSize: 17 }} />}</div>
           <div style={{ position: 'absolute', bottom: 10, right: 10, fontSize: 11, fontWeight: 800, padding: '4px 9px', borderRadius: 7, background: ending ? '#ff4d3d' : INK, color: '#fff', border: `2px solid ${INK}` }}>⏱ {fmtLeft(left)}</div>
         </div>
         <div style={{ padding: '13px 14px 15px' }}>
@@ -627,6 +827,51 @@ export class TopDeckApp extends Component<Props, State> {
 
   private chipStyle(active: boolean): CSSProperties {
     return { background: active ? INK : '#fff', color: active ? '#fff' : INK };
+  }
+
+  /** A top-nav text link with the design's underline active-state. */
+  private navLink(label: string, active: boolean, onClick: () => void) {
+    return (
+      <div key={label} onClick={onClick} style={{ cursor: 'pointer' }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: active ? INK : 'rgba(26,19,5,.55)', paddingBottom: 2, borderBottom: active ? `2.5px solid ${INK}` : '2.5px solid transparent' }}>{label}</div>
+      </div>
+    );
+  }
+
+  /**
+   * Mobile-only: the five nav tabs collapse into a single dropdown (the inline
+   * links overflow once the nav wraps). CSS shows this only ≤900px; the button
+   * surfaces the active section so the user keeps their bearings.
+   */
+  private renderNavMenu(items: Array<{ label: string; active: boolean; onClick: () => void }>) {
+    const open = this.state.navMenuOpen;
+    const active = items.find((i) => i.active);
+    return (
+      <div className="nav-menu" style={{ position: 'relative' }}>
+        <div onClick={this.toggleNavMenu} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 800, padding: '9px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
+          <MenuIcon sx={{ fontSize: 18 }} />
+          {active ? active.label : 'Menu'}
+          <span style={{ fontSize: 9, marginLeft: -2, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>▾</span>
+        </div>
+        {open && (
+          <>
+            {/* click-outside backdrop */}
+            <div onClick={this.closeNavMenu} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+            <div style={{ position: 'absolute', top: 'calc(100% + 8px)', left: 0, zIndex: 41, width: 200, background: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
+              {items.map((it, i) => (
+                <div
+                  key={it.label}
+                  onClick={() => { it.onClick(); this.closeNavMenu(); }}
+                  style={{ fontSize: 13.5, fontWeight: 700, padding: '12px 14px', cursor: 'pointer', background: it.active ? INK : '#fff', color: it.active ? '#fff' : INK, borderBottom: i === items.length - 1 ? 'none' : '2px solid rgba(26,19,5,.1)' }}
+                >
+                  {it.label}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
   }
 
   // ----- pagination controls -----
@@ -749,15 +994,24 @@ export class TopDeckApp extends Component<Props, State> {
       </div>
     );
 
+    const navItems: Array<{ label: string; active: boolean; onClick: () => void }> = [
+      { label: 'Auctions', active: ['browse', 'detail', 'sell'].includes(st.screen), onClick: this.goHome },
+      { label: 'My bids', active: st.screen === 'mybids', onClick: this.goMyBids },
+      { label: 'Leaderboard', active: st.screen === 'leaderboard', onClick: this.goLeaderboard },
+      { label: 'Portfolio', active: st.screen === 'portfolio', onClick: this.goPortfolio },
+      { label: 'Orders', active: st.screen === 'orders', onClick: this.openOrders },
+      { label: 'Trade', active: st.screen === 'trade', onClick: this.goTrade },
+    ];
+
     return (
       <div style={{ minHeight: '100vh', background: '#fff7ec', fontFamily: SANS, color: INK }}>
         {/* ===== TOP NAV ===== */}
-        <div style={{ position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: 18, padding: '14px 32px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
-          <div onClick={this.goHome} style={{ display: 'flex', alignItems: 'center', fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>
+        <div className="topnav" style={{ position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: 18, padding: '14px 32px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
+          <div onClick={this.goHome} style={{ display: 'flex', alignItems: 'center', flexShrink: 0, whiteSpace: 'nowrap', fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, letterSpacing: '-.03em', cursor: 'pointer' }}>
             <span>TOP<span style={{ color: '#ff4d3d' }}>DECK</span></span>
           </div>
-          <div style={{ flex: 1, maxWidth: 460, display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, padding: '9px 14px' }}>
-            <span style={{ fontSize: 14, color: 'rgba(26,19,5,.45)' }}>⌕</span>
+          <div className="nav-search" style={{ flex: 1, maxWidth: 460, display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, padding: '9px 14px' }}>
+            <SearchIcon sx={{ fontSize: 18, color: 'rgba(26,19,5,.45)' }} />
             <input
               value={st.query}
               onChange={this.setQuery}
@@ -766,54 +1020,63 @@ export class TopDeckApp extends Component<Props, State> {
               style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: SANS, fontSize: 13.5, fontWeight: 500, color: INK }}
             />
             {st.query && (
-              <span onClick={this.clearQuery} title="Clear search" style={{ cursor: 'pointer', fontSize: 13, fontWeight: 800, color: 'rgba(26,19,5,.45)', padding: '0 2px' }}>✕</span>
+              <span onClick={this.clearQuery} title="Clear search" style={{ cursor: 'pointer', display: 'flex', color: 'rgba(26,19,5,.45)', padding: '0 2px' }}><CloseIcon sx={{ fontSize: 16 }} /></span>
             )}
           </div>
-          <div style={{ flex: 1 }} />
-          <div onClick={this.goHome} style={{ cursor: 'pointer' }}>
-            <div style={{ fontSize: 13.5, fontWeight: 700, color: st.screen === 'mybids' ? 'rgba(26,19,5,.55)' : INK, paddingBottom: 2, borderBottom: st.screen === 'mybids' ? '2.5px solid transparent' : `2.5px solid ${INK}` }}>Auctions</div>
+          <div className="nav-spacer" style={{ flex: 1 }} />
+          <div className="nav-links" style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+            {navItems.map((it) => this.navLink(it.label, it.active, it.onClick))}
           </div>
-          <div onClick={this.goMyBids} style={{ cursor: 'pointer' }}>
-            <div style={{ fontSize: 13.5, fontWeight: 700, color: st.screen === 'mybids' ? INK : 'rgba(26,19,5,.55)', paddingBottom: 2, borderBottom: st.screen === 'mybids' ? `2.5px solid ${INK}` : '2.5px solid transparent' }}>My bids</div>
-          </div>
-          <div onClick={this.goSell} style={{ fontSize: 13, fontWeight: 700, padding: '9px 16px', background: '#2d5bff', color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>Sell a card</div>
+          {this.renderNavMenu(navItems)}
+          <div onClick={this.goSell} style={{ fontSize: 13, fontWeight: 700, flexShrink: 0, whiteSpace: 'nowrap', padding: '9px 16px', background: '#2d5bff', color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>Sell a card</div>
           {wallet.passkeyAvailable && !wallet.address && (
-            <div onClick={() => { if (!wallet.connecting) void wallet.connectViaPasskey(); }} title="Create or connect a passkey smart wallet — no seed phrase" style={{ fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>⚡ Face ID</div>
+            <div onClick={() => { if (!wallet.connecting) void wallet.connectViaPasskey(); }} title="Create or connect a passkey smart wallet — no seed phrase" style={{ fontSize: 12.5, fontWeight: 800, flexShrink: 0, whiteSpace: 'nowrap', padding: '8px 13px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>⚡ Face ID</div>
           )}
-          <div style={{ position: 'relative' }}>
-            <div onClick={this.onWalletClick} title={wallet.address ? 'Manage wallet' : 'Connect wallet'} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
+          <div style={{ position: 'relative', flexShrink: 0 }}>
+            <div onClick={this.onWalletClick} title={wallet.address ? 'Manage wallet' : 'Connect wallet'} style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
               <span style={{ width: 9, height: 9, borderRadius: '50%', background: wallet.address ? '#13c06a' : 'rgba(26,19,5,.3)' }} />
               {wallet.connecting ? 'Connecting…' : wallet.address ? `${wallet.walletKind === 'passkey' ? '⚡ ' : ''}${shorten(wallet.address)}` : 'Connect'}
               {wallet.address && <span style={{ fontSize: 9, marginLeft: -2, transform: st.walletMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>▾</span>}
             </div>
             {wallet.address && st.walletMenuOpen && this.renderWalletMenu(wallet.address)}
           </div>
+          <div onClick={this.goProfile} title="Profile" style={{ width: 34, height: 34, borderRadius: 9, background: 'linear-gradient(135deg,#ff4d3d,#ffb83d)', border: `2.5px solid ${INK}`, cursor: 'pointer', boxShadow: st.screen === 'profile' || st.screen === 'editprofile' ? '0 0 0 3px #ff4d3d' : 'none' }} />
         </div>
 
         {/* ===== BROWSE ===== */}
         {st.screen === 'browse' && (
-          <div style={{ maxWidth: 1180, margin: '0 auto', padding: '30px 32px 80px' }}>
+          <div className="m-pad" style={{ maxWidth: 1180, margin: '0 auto', padding: '30px 32px 80px' }}>
             <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', flexWrap: 'wrap', gap: 14, marginBottom: 8 }}>
               <div>
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, color: '#ff4d3d', letterSpacing: '.04em', marginBottom: 6 }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4d3d', animation: 'pulseDot 1.3s infinite' }} />LIVE AUCTIONS
                 </div>
-                <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 38, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>Bid, win, collect.</h1>
+                <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 38, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>Bid, win, collect.</h1>
                 <div style={{ fontSize: 14, color: 'rgba(26,19,5,.55)', marginTop: 8, fontWeight: 500 }}>{list.length} cards under the hammer · new lots every hour</div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>{list.length} of {st.cards.length} lots</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>{list.length} of {st.cards.length} lots</div>
+                <div onClick={this.toggleFilters} className="filters-trigger" style={{ alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 800, padding: '9px 15px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
+                  <TuneIcon sx={{ fontSize: 18 }} />
+                  {activeCount > 0 && <span style={{ fontSize: 11, fontWeight: 800, minWidth: 18, height: 18, padding: '0 5px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: '#ff4d3d', color: '#fff', border: `2px solid ${INK}`, borderRadius: 999 }}>{activeCount}</span>}
+                </div>
+              </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '236px 1fr', gap: 28, marginTop: 26, alignItems: 'start' }}>
-              {/* filter sidebar */}
-              <div style={{ position: 'sticky', top: 88, background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, overflow: 'hidden' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '15px 16px', background: '#ffd84d', borderBottom: `3px solid ${INK}` }}>
-                  <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>Filters</div>
-                  {activeCount > 0 && (
-                    <div onClick={this.clearFilters} style={{ fontSize: 11.5, fontWeight: 800, padding: '5px 11px', background: INK, color: '#fff', borderRadius: 7, cursor: 'pointer' }}>Clear {activeCount}</div>
-                  )}
+            <div className="browse-layout">
+              {/* Filters — docked sidebar on desktop, right slide-in drawer on mobile */}
+              <aside className={`filter-panel${st.filtersOpen ? ' open' : ''}`} aria-label="Filters">
+                <div className="filter-panel__head">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>Filters</div>
+                    {activeCount > 0 && <span style={{ fontSize: 11, fontWeight: 800, minWidth: 18, height: 18, padding: '0 5px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: '#ff4d3d', color: '#fff', border: `2px solid ${INK}`, borderRadius: 999 }}>{activeCount}</span>}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    {activeCount > 0 && <div onClick={this.clearFilters} style={{ fontSize: 11.5, fontWeight: 800, padding: '5px 11px', background: INK, color: '#fff', borderRadius: 7, cursor: 'pointer' }}>Clear {activeCount}</div>}
+                    <div onClick={this.closeFilters} className="filters-close" title="Close filters" style={{ cursor: 'pointer' }}><CloseIcon sx={{ fontSize: 22 }} /></div>
+                  </div>
                 </div>
-                <div style={{ padding: '16px 16px 18px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+                <div className="filter-panel__body">
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 9 }}>CATEGORY</div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
@@ -848,20 +1111,20 @@ export class TopDeckApp extends Component<Props, State> {
                     </div>
                   </div>
                 </div>
-              </div>
+              </aside>
 
               {/* grid */}
               <div>
                 {list.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '60px 24px', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16 }}>
-                    <div style={{ fontSize: 42 }}>🔍</div>
+                    <div style={{ display: 'flex', justifyContent: 'center' }}><SearchOffIcon sx={{ fontSize: 48, color: 'rgba(26,19,5,.4)' }} /></div>
                     <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 21, marginTop: 10 }}>{query ? `No lots match “${st.query.trim()}”` : 'No lots match those filters'}</div>
                     <div style={{ fontSize: 13.5, color: 'rgba(26,19,5,.55)', fontWeight: 500, marginTop: 6 }}>{query ? 'Try a different search or clear it.' : 'Try loosening a filter or two.'}</div>
                     <div onClick={this.clearFilters} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 22px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>{query ? 'Clear search & filters' : 'Clear filters'}</div>
                   </div>
                 ) : (
                   <>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 20 }}>
+                    <div className="td-grid-3" style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 20 }}>
                       {pageList.map((c) => this.cardTile(c, 172))}
                     </div>
                     {totalPages > 1 && this.renderPagination(page, totalPages, list.length, pageStart, pageList.length)}
@@ -869,6 +1132,9 @@ export class TopDeckApp extends Component<Props, State> {
                 )}
               </div>
             </div>
+
+            {/* Backdrop dims the page behind the mobile filter drawer */}
+            <div className={`filter-backdrop${st.filtersOpen ? ' open' : ''}`} onClick={this.closeFilters} />
           </div>
         )}
 
@@ -877,8 +1143,8 @@ export class TopDeckApp extends Component<Props, State> {
 
         {/* ===== MY BIDS ===== */}
         {st.screen === 'mybids' && (
-          <div style={{ maxWidth: 1080, margin: '0 auto', padding: '30px 32px 90px' }}>
-            <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 36, letterSpacing: '-.02em', margin: 0 }}>My bids</h1>
+          <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '30px 32px 90px' }}>
+            <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 36, letterSpacing: '-.02em', margin: 0 }}>My bids</h1>
             <div style={{ fontSize: 14, color: 'rgba(26,19,5,.55)', marginTop: 6, fontWeight: 500 }}>Every lot you&apos;re chasing — and everything you&apos;re selling.</div>
 
             <div style={{ display: 'inline-flex', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', margin: '20px 0 24px', boxShadow: `3px 3px 0 ${INK}` }}>
@@ -893,6 +1159,27 @@ export class TopDeckApp extends Component<Props, State> {
 
         {/* ===== SELL ===== */}
         {st.screen === 'sell' && this.renderSell()}
+
+        {/* ===== LEADERBOARD ===== */}
+        {st.screen === 'leaderboard' && this.renderLeaderboard()}
+
+        {/* ===== PORTFOLIO ===== */}
+        {st.screen === 'portfolio' && this.renderPortfolio()}
+
+        {/* ===== PROFILE ===== */}
+        {st.screen === 'profile' && this.renderProfile()}
+
+        {/* ===== EDIT PROFILE ===== */}
+        {st.screen === 'editprofile' && this.renderEditProfile()}
+
+        {/* ===== TRADE ===== */}
+        {st.screen === 'orders' && this.renderOrders()}
+
+        {st.screen === 'trade' && !st.trade.sent && this.renderTrade()}
+        {st.screen === 'trade' && st.trade.sent && this.renderTradeSent()}
+
+        {/* ===== TRADE PICKER MODAL ===== */}
+        {st.trade.picker && this.renderTradePicker()}
 
         {/* ===== BID MODAL ===== */}
         {st.bidOpen && sel && this.renderBidModal(sel)}
@@ -1023,6 +1310,145 @@ export class TopDeckApp extends Component<Props, State> {
     );
   }
 
+  // ----- Orders (physical-escrow tracking + disputes) -----
+
+  /** Brand colors for each escrow-order status badge. */
+  private orderStatusStyle(status: OrderWithCard['status']): { bg: string; fg: string; label: string } {
+    switch (status) {
+      case 'funded':
+        return { bg: '#ffd84d', fg: INK, label: 'FUNDED · AWAITING SHIPMENT' };
+      case 'shipped':
+        return { bg: '#2d5bff', fg: '#fff', label: 'SHIPPED · IN TRANSIT' };
+      case 'disputed':
+        return { bg: '#ff4d3d', fg: '#fff', label: 'DISPUTED' };
+      case 'released':
+        return { bg: '#13c06a', fg: '#fff', label: 'RELEASED · COMPLETE' };
+      case 'refunded':
+        return { bg: '#94a0b3', fg: INK, label: 'REFUNDED' };
+    }
+  }
+
+  private renderOrders() {
+    const st = this.state;
+    const { address } = this.props.wallet;
+    const tab = (label: string, on: boolean, onClick: () => void, count?: number) => (
+      <div
+        onClick={onClick}
+        style={{
+          fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '9px 16px', cursor: 'pointer',
+          background: on ? INK : '#fff', color: on ? '#fff' : INK, border: `2.5px solid ${INK}`,
+          borderRadius: 9, boxShadow: on ? `2px 2px 0 ${INK}` : 'none',
+        }}
+      >
+        {label}{count != null && count > 0 ? ` · ${count}` : ''}
+      </div>
+    );
+    const list = st.ordersArbiter ? st.disputed : st.orders;
+    return (
+      <div style={{ maxWidth: 920, margin: '0 auto', padding: '28px 20px 80px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, flex: 1 }}>Escrow orders</div>
+          <div onClick={() => void this.loadOrders()} style={{ fontSize: 13, fontWeight: 800, padding: '8px 13px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>↻ Refresh</div>
+        </div>
+        <p style={{ color: '#5c5443', fontSize: 14, margin: '0 0 18px', maxWidth: 620 }}>
+          Physical cards settle through a blockchain escrow: your funds are held by the contract
+          until you confirm the card arrived. If something goes wrong, open a dispute and the
+          arbiter decides — neither side can take the money and run.
+        </p>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
+          {tab('My orders', !st.ordersArbiter, () => this.setState({ ordersArbiter: false }))}
+          {tab('Arbiter · disputes', st.ordersArbiter, () => this.setState({ ordersArbiter: true }), st.disputed.length)}
+        </div>
+
+        {st.ordersLoading && <div style={{ color: '#5c5443', fontSize: 14 }}>Loading orders…</div>}
+        {st.ordersErr && !st.ordersLoading && (
+          <div style={{ color: '#b3261e', fontSize: 14, fontWeight: 700 }}>{st.ordersErr}</div>
+        )}
+        {!st.ordersLoading && !st.ordersErr && list.length === 0 && (
+          <div style={{ border: `2.5px dashed ${INK}`, borderRadius: 14, padding: 40, textAlign: 'center', color: '#5c5443' }}>
+            {st.ordersArbiter ? 'No open disputes.' : 'No escrow orders yet. Buy a physical listing to start one.'}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {list.map((o) => this.renderOrderCard(o, address))}
+        </div>
+      </div>
+    );
+  }
+
+  private renderOrderCard(o: OrderWithCard, address: string | null) {
+    const st = this.state;
+    const badge = this.orderStatusStyle(o.status);
+    const role = address && o.seller === address ? 'seller' : 'buyer';
+    const busy = st.orderBusy === o.id;
+    const active = o.status === 'funded' || o.status === 'shipped';
+    const deadlineMs = o.confirmDeadline ? o.confirmDeadline * 1000 : 0;
+    const overdue = deadlineMs > 0 && deadlineMs <= st.now;
+    const classic = this.props.wallet.walletKind === 'classic';
+
+    const btn = (label: string, onClick: () => void, bg: string, fg = '#fff') => (
+      <div
+        onClick={() => { if (!busy) onClick(); }}
+        style={{
+          fontFamily: DISPLAY, fontWeight: 800, fontSize: 13.5, padding: '10px 14px', textAlign: 'center',
+          background: busy ? '#cfc8b8' : bg, color: fg, border: `2.5px solid ${INK}`, borderRadius: 10,
+          boxShadow: `2px 2px 0 ${INK}`, cursor: busy ? 'default' : 'pointer',
+        }}
+      >
+        {busy ? '…' : label}
+      </div>
+    );
+
+    return (
+      <div key={o.id} style={{ display: 'flex', gap: 16, background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, padding: 16, boxShadow: `4px 4px 0 ${INK}` }}>
+        <div style={{ width: 72, height: 96, flex: 'none', borderRadius: 10, border: `2.5px solid ${INK}`, background: o.card.imageUrl ? `center/cover no-repeat url("${o.card.imageUrl}")` : rarityArt(mapRarity(o.card.rarity)) }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 18 }}>{o.card.name}</div>
+            <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.4, padding: '4px 8px', borderRadius: 999, background: badge.bg, color: badge.fg, border: `2px solid ${INK}` }}>{badge.label}</div>
+          </div>
+          <div style={{ color: '#5c5443', fontSize: 13, margin: '4px 0 10px' }}>
+            {money(Number(o.amountUsdc))} · You’re the {role}
+            {active && deadlineMs > 0 && (
+              <> · {overdue ? 'confirmation window elapsed' : `confirm window: ${fmtLeft(deadlineMs - st.now)} left`}</>
+            )}
+            {o.trackingRef && <> · tracking {o.trackingRef}</>}
+          </div>
+
+          {/* Role-based actions */}
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {!st.ordersArbiter && role === 'buyer' && active &&
+              btn('✓ Confirm receipt', () => void this.doOrderAction('confirm_receipt', o), '#13c06a')}
+            {!st.ordersArbiter && role === 'seller' && o.status === 'funded' &&
+              btn('📦 Mark shipped', () => void this.doOrderAction('mark_shipped', o), '#2d5bff')}
+            {!st.ordersArbiter && active &&
+              btn('⚠ Open dispute', () => void this.doOrderAction('dispute', o), '#fff', INK)}
+            {!st.ordersArbiter && active && overdue && classic &&
+              btn('⏱ Claim (timeout)', () => void this.doOrderAction('claim_timeout', o), '#e0a92e', INK)}
+
+            {/* Arbiter view */}
+            {st.ordersArbiter && o.status === 'disputed' && (
+              <>
+                {btn('↩ Refund buyer', () => void this.resolveDispute(o, true), '#ff4d3d')}
+                {btn('→ Release seller', () => void this.resolveDispute(o, false), '#13c06a')}
+              </>
+            )}
+
+            {(o.status === 'released' || o.status === 'refunded') && o.settleTxHash && (
+              <a href={this.props.explorerTx(o.settleTxHash)} target="_blank" rel="noreferrer" style={{ fontSize: 13, fontWeight: 800, color: '#2d5bff', alignSelf: 'center' }}>
+                View settlement ↗
+              </a>
+            )}
+            {o.status === 'disputed' && !st.ordersArbiter && (
+              <div style={{ fontSize: 13, color: '#5c5443', alignSelf: 'center' }}>Awaiting arbiter decision…</div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   private renderDetail(c: TopCard) {
     const st = this.state;
     const rm = rarityMeta(c.rarity);
@@ -1045,11 +1471,11 @@ export class TopDeckApp extends Component<Props, State> {
     }));
 
     return (
-      <div style={{ maxWidth: 1080, margin: '0 auto', padding: '24px 32px 90px' }}>
+      <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '24px 32px 90px' }}>
         <div onClick={this.goHome} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 20, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← All auctions</div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: 40, alignItems: 'start' }}>
-          <div style={{ position: 'sticky', top: 90 }}>
+        <div className="stack" style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: 40, alignItems: 'start' }}>
+          <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
             <div style={{ position: 'relative', aspectRatio: '3 / 4', borderRadius: 18, border: `3px solid ${INK}`, boxShadow: `7px 7px 0 ${INK}`, background: c.art, overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: 14, left: 14, fontSize: 12, fontWeight: 800, letterSpacing: '.03em', padding: '5px 13px', borderRadius: 8, background: rm.bg, color: rm.color, border: `2px solid ${INK}` }}>{rm.label}</div>
               <div onClick={(e) => this.toggleWatch(e, c.id)} style={{ position: 'absolute', top: 13, right: 13, width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 10, background: watched ? '#ff4d3d' : '#fff', border: `2.5px solid ${INK}`, fontSize: 18, color: watched ? '#fff' : 'rgba(26,19,5,.35)', cursor: 'pointer' }}>♥</div>
@@ -1094,20 +1520,40 @@ export class TopDeckApp extends Component<Props, State> {
                   <div onClick={this.buyNow} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Buy now · {money(c.buyNow)}</div>
                 )}
               </div>
-              {this.props.wallet.passkeyAvailable && c.real && c.contractListingId != null && (
+              {c.real && c.contractListingId != null && c.fulfillment === 'physical' && (
                 <>
                   <div
-                    onClick={this.state.paying ? undefined : this.payWithPasskey}
-                    style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: this.state.paying ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: this.state.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                    onClick={this.state.paying ? undefined : this.escrowBuy}
+                    style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: this.state.paying ? 'rgba(26,19,5,.35)' : '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: this.state.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
                   >
-                    {this.state.paying ? 'Confirming…' : `⚡ Pay with Face ID · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                    {this.state.paying ? 'Locking funds in escrow…' : `🛡 Buy with escrow · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
                   </div>
                   <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
-                    {this.state.payErr ?? 'No seed phrase · no extension · fees sponsored'}
+                    {this.state.payErr ?? 'Funds held on-chain until you confirm the card arrives'}
                   </div>
                 </>
               )}
-              <div style={{ textAlign: 'center', fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>🛡 Buyer protection · authenticated by TopDeck Vault before shipping</div>
+              {this.props.wallet.passkeyAvailable &&
+                c.real &&
+                c.contractListingId != null &&
+                c.fulfillment !== 'physical' && (
+                  <>
+                    <div
+                      onClick={this.state.paying ? undefined : this.payWithPasskey}
+                      style={{ marginTop: 12, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: this.state.paying ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: this.state.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}
+                    >
+                      {this.state.paying ? 'Confirming…' : `⚡ Pay with Face ID · ${money(c.buyNow > 0 ? c.buyNow : c.currentBid)}`}
+                    </div>
+                    <div style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
+                      {this.state.payErr ?? 'No seed phrase · no extension · fees sponsored'}
+                    </div>
+                  </>
+                )}
+              <div style={{ textAlign: 'center', fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', marginTop: 12 }}>
+                {c.fulfillment === 'physical'
+                  ? '🛡 Escrow-protected · dispute resolution by the TopDeck arbiter'
+                  : '🛡 Buyer protection · authenticated by TopDeck Vault before shipping'}
+              </div>
             </div>
 
             {c.buyNow > 0 && this.renderPayWith(c)}
@@ -1136,6 +1582,601 @@ export class TopDeckApp extends Component<Props, State> {
                 ))}
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== LEADERBOARD =====
+  private renderLeaderboard() {
+    const st = this.state;
+    const cfg = LB_CFGS[st.lbTab];
+    const deltaMeta = (d: number) =>
+      d > 0 ? { t: '▲ ' + d, c: '#0a5e34' } : d < 0 ? { t: '▼ ' + Math.abs(d), c: '#a3160a' } : { t: '—', c: 'rgba(26,19,5,.4)' };
+    const all = [...LB_USERS]
+      .sort((a, b) => (b[cfg.key] as number) - (a[cfg.key] as number))
+      .map((u, i) => ({ rank: i + 1, u, dm: deltaMeta(u.delta) }));
+    const medals = [{ m: '🥇 1st', bg: '#ffd84d' }, { m: '🥈 2nd', bg: '#dfe5ee' }, { m: '🥉 3rd', bg: '#eab36a' }];
+    const podium = [1, 0, 2].map((idx) => ({ entry: all[idx]!, idx, center: idx === 0 }));
+    const rest = all.slice(3);
+    const you = LB_YOU[st.lbTab];
+
+    const tab = (label: string, key: LbTab, last = false) => (
+      <div onClick={() => this.setLbTab(key)} style={{ fontSize: 13.5, fontWeight: 800, padding: '11px 22px', cursor: 'pointer', borderRight: last ? 'none' : `3px solid ${INK}`, background: st.lbTab === key ? INK : '#fff', color: st.lbTab === key ? '#fff' : INK }}>{label}</div>
+    );
+
+    return (
+      <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '30px 32px 90px' }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, color: '#ff4d3d', letterSpacing: '.04em', marginBottom: 6 }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4d3d', animation: 'pulseDot 1.3s infinite' }} />SEASON 4 · ENDS IN 12 DAYS
+        </div>
+        <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 38, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>Leaderboard</h1>
+        <div style={{ fontSize: 14, color: 'rgba(26,19,5,.55)', marginTop: 8, fontWeight: 500 }}>{LB_SUBTITLE[st.lbTab]}</div>
+
+        <div style={{ display: 'inline-flex', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', margin: '22px 0 4px', boxShadow: `3px 3px 0 ${INK}` }}>
+          {tab('Top collectors', 'collectors')}
+          {tab('Top sellers', 'sellers')}
+          {tab('Top traders', 'traders', true)}
+        </div>
+
+        {/* podium */}
+        <div className="stack" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 18, alignItems: 'end', margin: '28px 0 30px' }}>
+          {podium.map(({ entry, idx, center }) => {
+            const u = entry.u;
+            const medal = medals[idx]!;
+            return (
+              <div key={u.name} style={{ background: center ? '#fff7ec' : '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, padding: '20px 16px 22px', textAlign: 'center' }}>
+                <div style={{ display: 'inline-block', fontFamily: DISPLAY, fontWeight: 800, fontSize: 13, padding: '4px 13px', borderRadius: 8, border: `2.5px solid ${INK}`, background: medal.bg, color: '#1a1305' }}>{medal.m}</div>
+                <div style={{ width: center ? 66 : 54, height: center ? 66 : 54, borderRadius: 14, border: `3px solid ${INK}`, background: u.art, margin: '16px auto 0' }} />
+                <div style={{ fontWeight: 700, fontSize: 16, marginTop: 12 }}>{u.name}</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 3 }}>{u.tag}</div>
+                <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: center ? 27 : 22, marginTop: 13, lineHeight: 1 }}>{money(u[cfg.key] as number)}</div>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.45)', marginTop: 5 }}>{cfg.label}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ranked list */}
+        <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 18px', background: '#ffd84d', borderBottom: `3px solid ${INK}`, fontSize: 10.5, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.65)' }}>
+            <div style={{ width: 28 }}>#</div>
+            <div style={{ width: 40 }} />
+            <div style={{ flex: 1 }}>MEMBER</div>
+            <div style={{ width: 120, textAlign: 'right' }}>{cfg.label}</div>
+            <div style={{ width: 64, textAlign: 'right' }}>CHANGE</div>
+          </div>
+          {rest.map((e) => (
+            <div key={e.u.name} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '13px 18px', borderBottom: '1.5px solid rgba(26,19,5,.1)', background: (e.rank - 1) % 2 === 0 ? '#fff' : 'rgba(26,19,5,.04)' }}>
+              <div style={{ width: 28, fontFamily: DISPLAY, fontWeight: 800, fontSize: 17 }}>{e.rank}</div>
+              <div style={{ width: 40, height: 40, borderRadius: 11, border: `2.5px solid ${INK}`, background: e.u.art, flex: 'none' }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 14.5 }}>{e.u.name}</div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>{cfg.sub(e.u)}</div>
+              </div>
+              <div style={{ width: 120, textAlign: 'right', fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{money(e.u[cfg.key] as number)}</div>
+              <div style={{ width: 64, textAlign: 'right', fontSize: 12.5, fontWeight: 800, color: e.dm.c }}>{e.dm.t}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* your rank */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 16, padding: '15px 18px', background: INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: '4px 4px 0 #ff4d3d' }}>
+          <div style={{ width: 28, fontFamily: DISPLAY, fontWeight: 800, fontSize: 17, color: '#ffd84d' }}>47</div>
+          <div style={{ width: 40, height: 40, borderRadius: 11, border: '2.5px solid #fff', background: 'linear-gradient(135deg,#ff4d3d,#ffb83d)', flex: 'none' }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 800, fontSize: 14.5 }}>You</div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,.6)', marginTop: 2 }}>{you.sub}</div>
+          </div>
+          <div style={{ width: 120, textAlign: 'right', fontFamily: DISPLAY, fontWeight: 800, fontSize: 16, color: '#ffd84d' }}>{money(you.value)}</div>
+          <div style={{ width: 64, textAlign: 'right', fontSize: 12.5, fontWeight: 800, color: '#7affb0' }}>▲ 5</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== PORTFOLIO =====
+  private renderPortfolio() {
+    const totalVal = PF_RAW.reduce((s, h) => s + h.value, 0);
+    const totalCost = PF_RAW.reduce((s, h) => s + h.cost, 0);
+    const gain = totalVal - totalCost;
+    const pct = totalCost > 0 ? (gain / totalCost) * 100 : 0;
+    const signPct = (p: number) => (p >= 0 ? '+' : '−') + Math.abs(p).toFixed(1) + '%';
+    const histVals = [...PF_HIST_VALS, totalVal];
+    const histMax = Math.max(...histVals);
+    const allocMap = {} as Partial<Record<Rarity, number>>;
+    PF_RAW.forEach((h) => { allocMap[h.rarity] = (allocMap[h.rarity] ?? 0) + h.value; });
+    const alloc = (['legendary', 'epic', 'rare', 'common'] as Rarity[])
+      .filter((r) => allocMap[r])
+      .map((r) => { const v = allocMap[r]!; const p = (v / totalVal) * 100; return { label: rarityMeta(r).label, color: ALLOC_COLORS[r], pct: Math.round(p) + '%', width: p + '%', valueFmt: money(v) }; });
+    const best = [...PF_RAW].map((h) => ({ h, pct: h.cost > 0 ? ((h.value - h.cost) / h.cost) * 100 : 0 })).sort((a, b) => b.pct - a.pct)[0]!;
+    const losers = PF_RAW.filter((h) => h.value < h.cost).length;
+
+    return (
+      <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '30px 32px 90px' }}>
+        <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 38, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>Portfolio</h1>
+        <div style={{ fontSize: 14, color: 'rgba(26,19,5,.55)', marginTop: 8, fontWeight: 500 }}>Your collection, valued live against the market.</div>
+
+        {/* value + chart */}
+        <div className="stack" style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 20, marginTop: 24, alignItems: 'stretch' }}>
+          <div style={{ background: INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 18, boxShadow: '5px 5px 0 #ff4d3d', padding: 24, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,.6)' }}>Total portfolio value</div>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 46, lineHeight: 1, marginTop: 6 }}>{money(totalVal)}</div>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, marginTop: 14, fontSize: 13.5, fontWeight: 800, padding: '7px 13px', borderRadius: 9, background: gain >= 0 ? '#13c06a' : '#ff4d3d', color: '#fff', border: '2.5px solid #fff', width: 'fit-content' }}>
+              {(gain >= 0 ? '▲ ' : '▼ ') + '$' + Math.abs(gain).toLocaleString() + ' (' + signPct(pct) + ')'}
+            </div>
+            <div style={{ flex: 1 }} />
+            <div style={{ display: 'flex', gap: 26, marginTop: 22, paddingTop: 18, borderTop: '1.5px solid rgba(255,255,255,.18)' }}>
+              <div>
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,.55)', fontWeight: 700 }}>Cost basis</div>
+                <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 18, marginTop: 3 }}>{money(totalCost)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,.55)', fontWeight: 700 }}>Cards held</div>
+                <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 18, marginTop: 3 }}>{PF_RAW.length}</div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 18, boxShadow: `5px 5px 0 ${INK}`, padding: '20px 22px', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 17 }}>Value over time</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>Last 8 months</div>
+            </div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', gap: 10, paddingTop: 24, minHeight: 190 }}>
+              {histVals.map((v, i) => (
+                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
+                  <div style={{ width: '100%', height: Math.round((v / histMax) * 150), background: i === histVals.length - 1 ? '#ff4d3d' : '#ffd84d', border: `2.5px solid ${INK}`, borderRadius: '7px 7px 0 0' }} />
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>{PF_HIST_LABELS[i]}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* stat tiles */}
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 18 }}>
+          <div style={{ flex: 1, minWidth: 150, background: '#bff3d4', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '16px 18px' }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, lineHeight: 1, color: gain >= 0 ? '#0a5e34' : '#a3160a' }}>{signPct(pct)}</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#0a5e34', marginTop: 5 }}>All-time return</div>
+          </div>
+          <div style={{ flex: 1.6, minWidth: 220, background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '16px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>Top performer</div>
+              <div style={{ fontWeight: 700, fontSize: 16, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{best.h.name}</div>
+            </div>
+            <div style={{ flex: 'none', fontFamily: DISPLAY, fontWeight: 800, fontSize: 18, color: '#0a5e34', padding: '6px 12px', borderRadius: 9, background: '#e3f8ec', border: `2.5px solid ${INK}` }}>{signPct(best.pct)}</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 150, background: '#ffd1cc', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '16px 18px' }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, lineHeight: 1, color: '#a3160a' }}>{losers}</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#a3160a', marginTop: 5 }}>Cards in the red</div>
+          </div>
+        </div>
+
+        {/* allocation */}
+        <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, padding: '20px 22px', marginTop: 18 }}>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 17, marginBottom: 14 }}>Allocation by rarity</div>
+          <div style={{ display: 'flex', height: 26, border: `3px solid ${INK}`, borderRadius: 9, overflow: 'hidden' }}>
+            {alloc.map((a, i) => (
+              <div key={a.label} style={{ width: a.width, background: a.color, borderRight: i === alloc.length - 1 ? 'none' : `2px solid ${INK}` }} />
+            ))}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px 26px', marginTop: 15 }}>
+            {alloc.map((a) => (
+              <div key={a.label} style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                <span style={{ width: 13, height: 13, borderRadius: 4, background: a.color, border: `2px solid ${INK}`, flex: 'none' }} />
+                <span style={{ fontSize: 12.5, fontWeight: 700 }}>{a.label}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: 'rgba(26,19,5,.5)' }}>{a.pct} · {a.valueFmt}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* holdings */}
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, margin: '30px 0 14px' }}>Holdings</div>
+        <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 18px', background: '#ffd84d', borderBottom: `3px solid ${INK}`, fontSize: 10.5, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.65)' }}>
+            <div style={{ width: 46 }} />
+            <div style={{ flex: 1 }}>CARD</div>
+            <div style={{ width: 90, textAlign: 'right' }}>COST</div>
+            <div style={{ width: 90, textAlign: 'right' }}>VALUE</div>
+            <div style={{ width: 120, textAlign: 'right' }}>RETURN</div>
+          </div>
+          {PF_RAW.map((h) => {
+            const ch = h.value - h.cost;
+            const p = h.cost > 0 ? (ch / h.cost) * 100 : 0;
+            const up = ch >= 0;
+            const rm = rarityMeta(h.rarity);
+            return (
+              <div key={h.name} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '13px 18px', borderBottom: '1.5px solid rgba(26,19,5,.1)' }}>
+                <div style={{ position: 'relative', width: 46, height: 46, flex: 'none', borderRadius: 10, border: `2.5px solid ${INK}`, background: rarityArt(h.rarity) }}>
+                  <div style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 800, padding: '1.5px 5px', borderRadius: 4, background: rm.bg, color: rm.color, border: `1.5px solid ${INK}` }}>{rm.label}</div>
+                </div>
+                <div style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 14.5 }}>{h.name}</div>
+                <div style={{ width: 90, textAlign: 'right', fontSize: 13.5, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>{money(h.cost)}</div>
+                <div style={{ width: 90, textAlign: 'right', fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{money(h.value)}</div>
+                <div style={{ width: 120, textAlign: 'right' }}>
+                  <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, color: up ? '#0a5e34' : '#a3160a' }}>{signPct(p)}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: up ? '#0a5e34' : '#a3160a', marginTop: 1 }}>{(up ? '+$' : '−$') + Math.abs(ch).toLocaleString()}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ===== PROFILE =====
+  private renderProfile() {
+    const p = this.state.profile;
+    const hasWebsite = !!(p.website || '').trim();
+    return (
+      <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '30px 32px 90px' }}>
+        {/* header card */}
+        <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 18, boxShadow: `5px 5px 0 ${INK}`, overflow: 'hidden' }}>
+          <div style={{ height: 118, background: 'linear-gradient(120deg,#ff4d3d,#ffb83d 55%,#ffd84d)', borderBottom: `3px solid ${INK}` }} />
+          <div style={{ padding: '0 26px 22px', display: 'flex', alignItems: 'flex-end', gap: 18, flexWrap: 'wrap' }}>
+            <div style={{ width: 96, height: 96, borderRadius: 20, border: `3px solid ${INK}`, background: 'linear-gradient(135deg,#ff4d3d,#ffb83d)', marginTop: -48, boxShadow: `3px 3px 0 ${INK}`, flex: 'none' }} />
+            <div style={{ flex: 1, minWidth: 200, paddingTop: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+                <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>{p.username}</h1>
+                <span style={{ fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 7, background: '#cfe0ff', border: `2.5px solid ${INK}`, whiteSpace: 'nowrap' }}>🛡 VERIFIED</span>
+              </div>
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.55)', marginTop: 9 }}>
+                <span>📍 {p.location}</span>
+                <span>🗓 Member since {p.memberSince}</span>
+                <span>🏅 #47 collector this season</span>
+                {hasWebsite && <span>🔗 {p.website}</span>}
+              </div>
+              <div style={{ fontSize: 13.5, fontWeight: 500, color: 'rgba(26,19,5,.7)', marginTop: 11, maxWidth: 540, lineHeight: 1.45 }}>{p.bio}</div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, paddingTop: 14 }}>
+              <div onClick={this.startEditProfile} style={{ fontSize: 13, fontWeight: 800, padding: '11px 18px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: '2px 2px 0 #ff4d3d', cursor: 'pointer' }}>Edit profile</div>
+              <div style={{ fontSize: 13, fontWeight: 800, padding: '11px 16px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, cursor: 'pointer' }}>↗ Share</div>
+            </div>
+          </div>
+        </div>
+
+        {/* stats strip */}
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 18 }}>
+          {PROFILE_STATS.map((s) => (
+            <div key={s.l} style={{ flex: 1, minWidth: 140, background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '16px 18px' }}>
+              <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 26, lineHeight: 1 }}>{s.v}</div>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: 'rgba(26,19,5,.55)', marginTop: 5 }}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* achievements */}
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, margin: '30px 0 14px' }}>Achievements</div>
+        <div className="td-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14 }}>
+          {PROFILE_ACHIEVEMENTS.map((a) => (
+            <div key={a.name} style={{ position: 'relative', background: a.got ? a.bg : '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: 16, textAlign: 'center', opacity: a.got ? 1 : 0.5 }}>
+              <div style={{ fontSize: 30, lineHeight: 1 }}>{a.icon}</div>
+              <div style={{ fontWeight: 800, fontSize: 13.5, marginTop: 9, color: a.got ? INK : 'rgba(26,19,5,.5)' }}>{a.name}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 3, lineHeight: 1.3 }}>{a.desc}</div>
+              {!a.got && <div style={{ position: 'absolute', top: 9, right: 11, fontSize: 13 }}>🔒</div>}
+            </div>
+          ))}
+        </div>
+
+        {/* activity + reviews */}
+        <div className="stack" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 20, marginTop: 30, alignItems: 'start' }}>
+          <div>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, marginBottom: 14 }}>Recent activity</div>
+            <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, overflow: 'hidden' }}>
+              {PROFILE_ACTIVITY.map((e, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 13, padding: '14px 18px', borderBottom: i === PROFILE_ACTIVITY.length - 1 ? 'none' : '1.5px solid rgba(26,19,5,.1)' }}>
+                  <div style={{ width: 38, height: 38, borderRadius: 10, border: `2.5px solid ${INK}`, background: e.iconBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, flex: 'none' }}>{e.icon}</div>
+                  <div style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 14 }}>{e.text}</div>
+                  <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15 }}>{e.amt}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', minWidth: 52, textAlign: 'right' }}>{e.when}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, marginBottom: 14 }}>Reviews · ★ 4.7</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {PROFILE_REVIEWS.map((r, i) => (
+                <div key={i} style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, padding: '15px 16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+                    <div style={{ width: 34, height: 34, borderRadius: 9, border: `2.5px solid ${INK}`, background: r.art, flex: 'none' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{r.name}</div>
+                      <div style={{ fontSize: 12, color: '#e0a92e', letterSpacing: 1 }}>{r.stars}</div>
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.45)' }}>{r.when}</div>
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: 'rgba(26,19,5,.75)', marginTop: 10, lineHeight: 1.4 }}>{r.text}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== EDIT PROFILE =====
+  private renderEditProfile() {
+    const d = this.state.draft ?? this.state.profile;
+    const toggle = (on: boolean, onClick: () => void) => (
+      <div onClick={onClick} style={{ width: 46, height: 28, borderRadius: 999, border: `2.5px solid ${INK}`, background: on ? '#13c06a' : '#fff', position: 'relative', cursor: 'pointer', flex: 'none' }}>
+        <div style={{ position: 'absolute', top: 1, left: on ? 18 : 2, width: 20, height: 20, borderRadius: '50%', background: '#fff', border: `2px solid ${INK}`, transition: 'left .15s' }} />
+      </div>
+    );
+    const label = (text: string) => <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>{text}</div>;
+    const inputStyle: CSSProperties = { width: '100%', fontFamily: SANS, fontSize: 15, fontWeight: 600, padding: '13px 15px', border: `3px solid ${INK}`, borderRadius: 11, outline: 'none', background: '#fff', boxSizing: 'border-box' };
+    const cardHead = (text: string) => <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16, padding: '14px 18px', borderBottom: `2.5px solid ${INK}`, background: '#ffd84d' }}>{text}</div>;
+    const setting = (title: string, desc: string, on: boolean, onClick: () => void, last = false) => (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 0', borderBottom: last ? 'none' : '1.5px solid rgba(26,19,5,.1)' }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>{title}</div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>{desc}</div>
+        </div>
+        {toggle(on, onClick)}
+      </div>
+    );
+
+    return (
+      <div className="m-pad" style={{ maxWidth: 980, margin: '0 auto', padding: '24px 32px 90px' }}>
+        <div onClick={this.cancelEdit} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 18, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← Back to profile</div>
+        <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: 0 }}>Edit profile</h1>
+        <div style={{ fontSize: 14, color: 'rgba(26,19,5,.55)', marginTop: 6, fontWeight: 500 }}>Update how the marketplace sees you.</div>
+
+        <div className="stack" style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 36, alignItems: 'start', marginTop: 26 }}>
+          {/* left: form */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+            <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
+              {cardHead('Public details')}
+              <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 18 }}>
+                <div>
+                  {label('USERNAME')}
+                  <input value={d.username} onChange={(e) => this.setDraft('username', e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  {label('BIO')}
+                  <textarea value={d.bio} onChange={(e) => this.setDraft('bio', e.target.value)} rows={3} style={{ ...inputStyle, fontSize: 14.5, fontWeight: 500, lineHeight: 1.45, resize: 'vertical' }} />
+                </div>
+                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    {label('LOCATION')}
+                    <input value={d.location} onChange={(e) => this.setDraft('location', e.target.value)} placeholder="City, State" style={inputStyle} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    {label('WEBSITE')}
+                    <input value={d.website} onChange={(e) => this.setDraft('website', e.target.value)} placeholder="yoursite.com" style={inputStyle} />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
+              {cardHead('Notifications')}
+              <div style={{ padding: '4px 18px 8px' }}>
+                {setting('Outbid alerts', 'Ping me the moment someone outbids me', d.notifyOutbid, () => this.toggleDraft('notifyOutbid'))}
+                {setting('Auctions ending soon', "Remind me before lots I'm watching close", d.notifyEnding, () => this.toggleDraft('notifyEnding'))}
+                {setting('Sale confirmations', 'Email me when one of my cards sells', d.notifySales, () => this.toggleDraft('notifySales'), true)}
+              </div>
+            </div>
+
+            <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
+              {cardHead('Privacy')}
+              <div style={{ padding: '4px 18px 8px' }}>
+                {setting('Public collection', 'Let anyone view your portfolio and stats', d.publicCollection, () => this.toggleDraft('publicCollection'), true)}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
+              <div onClick={this.saveProfile} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 28px', background: '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Save changes</div>
+              <div onClick={this.cancelEdit} style={{ fontWeight: 800, fontSize: 15, padding: '14px 22px', background: '#fff', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer' }}>Cancel</div>
+            </div>
+          </div>
+
+          {/* right: avatar */}
+          <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 10 }}>PROFILE PHOTO</div>
+            <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `5px 5px 0 ${INK}`, padding: 18, textAlign: 'center' }}>
+              <div style={{ position: 'relative', width: 160, height: 160, margin: '0 auto', borderRadius: 18, border: `3px solid ${INK}`, background: 'linear-gradient(135deg,#ff4d3d,#ffb83d)', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 13 }}>Drop a new photo</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 14, lineHeight: 1.4 }}>Drag an image onto the square, or click to browse.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== TRADE =====
+  /** Resolve the live "you get" pool (open listings the user doesn't own). */
+  private tradeGetPool(): TradeItem[] {
+    return this.state.cards
+      .filter((c) => !c.mine)
+      .map((c) => ({ id: c.id, name: c.name, rarity: c.rarity, value: c.currentBid, grade: c.grade, seller: c.seller }));
+  }
+
+  private tradeRow(item: TradeItem, side: 'give' | 'get') {
+    const rm = rarityMeta(item.rarity);
+    return (
+      <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: side === 'give' ? '#fff7ec' : '#f3f7ff', border: `2.5px solid ${INK}`, borderRadius: 11, padding: '9px 11px' }}>
+        <div style={{ position: 'relative', width: 48, height: 48, flex: 'none', borderRadius: 9, border: `2.5px solid ${INK}`, background: rarityArt(item.rarity) }}>
+          <div style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 800, padding: '1.5px 5px', borderRadius: 4, background: rm.bg, color: rm.color, border: `1.5px solid ${INK}` }}>{rm.label}</div>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 13.5, lineHeight: 1.2 }}>{item.name}</div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>{item.grade}{item.seller ? ' · ' + item.seller : ''}</div>
+        </div>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 14 }}>{money(item.value)}</div>
+        <div onClick={() => this.removeTradeCard(side, item.id)} style={{ width: 26, height: 26, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 7, border: `2px solid ${INK}`, background: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}>✕</div>
+      </div>
+    );
+  }
+
+  private renderTrade() {
+    const tr = this.state.trade;
+    const myById = Object.fromEntries(MY_CARDS.map((c) => [c.id, c]));
+    const getById = Object.fromEntries(this.tradeGetPool().map((c) => [c.id, c]));
+    const giveItems: TradeItem[] = tr.give.map((id) => myById[id]).filter(Boolean) as TradeItem[];
+    const getItems: TradeItem[] = tr.get.map((id) => getById[id]).filter(Boolean) as TradeItem[];
+    const cashN = Number(tr.cash) || 0;
+    const giveVal = giveItems.reduce((a, c) => a + c.value, 0) + cashN;
+    const getVal = getItems.reduce((a, c) => a + c.value, 0);
+    const diff = giveVal - getVal;
+    const tot = giveVal + getVal;
+    const meter = tot > 0 ? Math.round((giveVal / tot) * 100) : 50;
+    const fair = getVal > 0 && Math.abs(diff) <= Math.max(50, getVal * 0.05);
+    const fairLabel = tot === 0 ? 'Add cards to both sides to start'
+      : fair ? 'Fair trade — nicely balanced ✓'
+        : diff > 0 ? 'Your side is ' + money(diff) + ' richer'
+          : "You're asking for " + money(-diff) + ' more';
+    const canSend = giveItems.length > 0 && getItems.length > 0;
+
+    const side = (
+      title: string, headBg: string, count: number, items: TradeItem[], sideKey: 'give' | 'get',
+      emptyText: string, onAdd: () => void, footLabel: string, footVal: number, footBg: string,
+    ) => (
+      <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', background: headBg, borderBottom: `3px solid ${INK}` }}>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 16 }}>{title}</div>
+          <div style={{ fontSize: 11, fontWeight: 800, padding: '3px 9px', borderRadius: 7, background: INK, color: '#fff' }}>{count}</div>
+        </div>
+        <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 140 }}>
+          {items.map((it) => this.tradeRow(it, sideKey))}
+          {items.length === 0 && (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.45)', padding: 14 }}>{emptyText}</div>
+          )}
+          <div onClick={onAdd} style={{ textAlign: 'center', fontSize: 13, fontWeight: 800, padding: 11, border: `2.5px dashed ${INK}`, borderRadius: 11, cursor: 'pointer', background: '#fff', color: INK }}>+ Add a card</div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 18px', borderTop: `2.5px solid ${INK}`, background: footBg }}>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>{footLabel}</span>
+          <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 17 }}>{money(footVal)}</span>
+        </div>
+      </div>
+    );
+
+    return (
+      <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '30px 32px 90px' }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, color: '#2d5bff', letterSpacing: '.04em', marginBottom: 6 }}>
+          <span style={{ fontSize: 14 }}>⇄</span>PEER-TO-PEER
+        </div>
+        <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 38, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>Trade cards</h1>
+        <div style={{ fontSize: 14, color: 'rgba(26,19,5,.55)', marginTop: 8, fontWeight: 500 }}>Build a straight swap — any collector who owns these cards can accept your offer.</div>
+
+        <div className="stack" style={{ display: 'grid', gridTemplateColumns: '1fr 54px 1fr', gap: 14, alignItems: 'start', marginTop: 26 }}>
+          {side('You give', '#ffd84d', giveItems.length, giveItems, 'give', 'Add cards from your collection.', () => this.openTradePicker('give'), 'Your side incl. cash', giveVal, '#fff7ec')}
+          <div style={{ alignSelf: 'center', display: 'flex', justifyContent: 'center' }}>
+            <div style={{ width: 48, height: 48, borderRadius: '50%', border: `3px solid ${INK}`, background: '#2d5bff', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, boxShadow: `3px 3px 0 ${INK}` }}>⇄</div>
+          </div>
+          {side('You get', '#cfe0ff', getItems.length, getItems, 'get', 'Add cards you want from the market.', () => this.openTradePicker('get'), 'Their side', getVal, '#f3f7ff')}
+        </div>
+
+        {/* balance + cash */}
+        <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, padding: '20px 22px', marginTop: 18 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 17 }}>Trade balance</div>
+            <div style={{ fontSize: 12.5, fontWeight: 800, padding: '6px 13px', borderRadius: 9, border: `2.5px solid ${INK}`, background: tot === 0 ? '#fff' : fair ? '#bff3d4' : '#ffd1cc', color: tot === 0 ? 'rgba(26,19,5,.5)' : fair ? '#0a5e34' : '#a3160a' }}>{fairLabel}</div>
+          </div>
+          <div style={{ position: 'relative', height: 16, border: `2.5px solid ${INK}`, borderRadius: 999, overflow: 'hidden', background: '#fff', marginTop: 16 }}>
+            <div style={{ width: meter + '%', height: '100%', background: '#2d5bff', transition: 'width .2s' }} />
+            <div style={{ position: 'absolute', top: -4, left: '50%', width: 3, height: 24, background: INK, transform: 'translateX(-50%)' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 700, color: 'rgba(26,19,5,.5)', marginTop: 7 }}>
+            <span>You give</span><span>balanced</span><span>You get</span>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', marginTop: 18, paddingTop: 16, borderTop: '1.5px solid rgba(26,19,5,.12)' }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em' }}>ADD CASH TO YOUR SIDE</div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>Sweeten the deal to balance the value.</div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', background: '#fff', border: `3px solid ${INK}`, borderRadius: 11, padding: '2px 15px', width: 180 }}>
+              <span style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 19 }}>$</span>
+              <input type="number" value={tr.cash} onChange={(e) => this.setTradeCash(e.target.value)} placeholder="0" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: DISPLAY, fontWeight: 800, fontSize: 19, padding: '10px 6px', width: '100%', minWidth: 0 }} />
+            </div>
+          </div>
+        </div>
+
+        {/* actions */}
+        <div style={{ display: 'flex', gap: 12, marginTop: 20 }}>
+          <div onClick={canSend ? this.sendTrade : undefined} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 30px', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: canSend ? 'pointer' : 'not-allowed', background: canSend ? '#13c06a' : '#e7ddc8', color: canSend ? '#fff' : 'rgba(26,19,5,.4)' }}>⇄ Post trade offer</div>
+          <div onClick={this.resetTrade} style={{ fontWeight: 800, fontSize: 15, padding: '14px 22px', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer', background: '#fff' }}>Clear</div>
+        </div>
+      </div>
+    );
+  }
+
+  private renderTradeSent() {
+    const tr = this.state.trade;
+    const myById = Object.fromEntries(MY_CARDS.map((c) => [c.id, c]));
+    const getById = Object.fromEntries(this.tradeGetPool().map((c) => [c.id, c]));
+    const cashN = Number(tr.cash) || 0;
+    const giveVal = tr.give.reduce((a, id) => a + (myById[id]?.value ?? 0), 0) + cashN;
+    const getVal = tr.get.reduce((a, id) => a + (getById[id]?.value ?? 0), 0);
+
+    return (
+      <div className="m-pad" style={{ maxWidth: 560, margin: '30px auto 0', padding: '0 32px 90px', textAlign: 'center' }}>
+        <div style={{ fontSize: 56 }}>🤝</div>
+        <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: '10px 0 0' }}>Trade offer posted!</h1>
+        <div style={{ fontSize: 14.5, color: 'rgba(26,19,5,.6)', fontWeight: 500, marginTop: 8 }}>We&apos;ll notify you the moment a collector who owns those cards accepts. You can track it under My bids.</div>
+
+        <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 16, boxShadow: `5px 5px 0 ${INK}`, padding: '20px 22px', marginTop: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 18 }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, lineHeight: 1 }}>{tr.give.length}</div>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: 'rgba(26,19,5,.55)', marginTop: 4 }}>You give · {money(giveVal)}</div>
+          </div>
+          <div style={{ width: 44, height: 44, borderRadius: '50%', border: `3px solid ${INK}`, background: '#2d5bff', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, flex: 'none' }}>⇄</div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, lineHeight: 1 }}>{tr.get.length}</div>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: 'rgba(26,19,5,.55)', marginTop: 4 }}>You get · {money(getVal)}</div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 26 }}>
+          <div onClick={() => { this.resetTrade(); this.goHome(); }} style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 15, padding: '14px 26px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Back to auctions</div>
+          <div onClick={this.resetTrade} style={{ fontWeight: 800, fontSize: 15, padding: '14px 24px', background: '#fff', border: `3px solid ${INK}`, borderRadius: 12, cursor: 'pointer' }}>Build another</div>
+        </div>
+      </div>
+    );
+  }
+
+  private renderTradePicker() {
+    const tr = this.state.trade;
+    const pool: TradeItem[] =
+      tr.picker === 'give' ? MY_CARDS.filter((c) => !tr.give.includes(c.id))
+        : tr.picker === 'get' ? this.tradeGetPool().filter((c) => !tr.get.includes(c.id))
+          : [];
+    const title = tr.picker === 'give' ? "Pick a card you'll give" : 'Pick a card you want';
+
+    return (
+      <div onClick={this.closeTradePicker} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(26,19,5,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, animation: 'modalIn .15s ease both' }}>
+        <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 680, maxHeight: '80vh', display: 'flex', flexDirection: 'column', background: '#fff7ec', border: `3px solid ${INK}`, borderRadius: 18, boxShadow: `8px 8px 0 ${INK}`, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '18px 22px', borderBottom: `3px solid ${INK}`, background: '#ffd84d' }}>
+            <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 19 }}>{title}</div>
+            <div onClick={this.closeTradePicker} style={{ width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, border: `2.5px solid ${INK}`, background: '#fff', fontSize: 16, fontWeight: 800, cursor: 'pointer' }}>✕</div>
+          </div>
+          <div className="stack" style={{ padding: '18px 22px', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 12 }}>
+            {pool.map((c) => {
+              const rm = rarityMeta(c.rarity);
+              return (
+                <div key={c.id} onClick={() => this.addTradeCard(tr.picker as 'give' | 'get', c.id)} style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 12, padding: '10px 12px', cursor: 'pointer', boxShadow: `2px 2px 0 ${INK}` }}>
+                  <div style={{ position: 'relative', width: 50, height: 50, flex: 'none', borderRadius: 9, border: `2.5px solid ${INK}`, background: rarityArt(c.rarity) }}>
+                    <div style={{ position: 'absolute', bottom: 3, left: 3, fontSize: 7, fontWeight: 800, padding: '1.5px 5px', borderRadius: 4, background: rm.bg, color: rm.color, border: `1.5px solid ${INK}` }}>{rm.label}</div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13.5, lineHeight: 1.2 }}>{c.name}</div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)', marginTop: 2 }}>{c.grade}{c.seller ? ' · ' + c.seller : ''}</div>
+                    <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, marginTop: 4 }}>{money(c.value)}</div>
+                  </div>
+                  <div style={{ width: 28, height: 28, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, border: `2px solid ${INK}`, background: '#13c06a', color: '#fff', fontSize: 16, fontWeight: 800 }}>+</div>
+                </div>
+              );
+            })}
+            {pool.length === 0 && (
+              <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: 30, fontSize: 13.5, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>Every card is already in your trade.</div>
+            )}
           </div>
         </div>
       </div>
@@ -1214,7 +2255,7 @@ export class TopDeckApp extends Component<Props, State> {
         {watchList.length > 0 && (
           <>
             <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 20, margin: '36px 0 16px' }}>♥ Watchlist</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 20 }}>
+            <div className="td-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 20 }}>
               {watchList.map((c) => this.cardTile(c, 150))}
             </div>
           </>
@@ -1306,7 +2347,7 @@ export class TopDeckApp extends Component<Props, State> {
 
     if (st.sellStep === 4) {
       return (
-        <div style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
+        <div className="m-pad" style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
           <div style={{ maxWidth: 520, margin: '30px auto 0', textAlign: 'center' }}>
             <div style={{ fontSize: 56 }}>🎉</div>
             <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: '10px 0 0' }}>Your auction is live!</h1>
@@ -1346,9 +2387,9 @@ export class TopDeckApp extends Component<Props, State> {
     );
 
     return (
-      <div style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
+      <div className="m-pad" style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
         <div onClick={this.goHome} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 18, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← Cancel</div>
-        <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: 0 }}>List a card for auction</h1>
+        <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: 0 }}>List a card for auction</h1>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0 26px' }}>
           {stepDot(1)}
@@ -1358,7 +2399,7 @@ export class TopDeckApp extends Component<Props, State> {
           {stepDot(3)}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 40, alignItems: 'start' }}>
+        <div className="stack" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 40, alignItems: 'start' }}>
           <div>
             {/* STEP 1 — pick a real card */}
             {st.sellStep === 1 && (
@@ -1507,6 +2548,18 @@ export class TopDeckApp extends Component<Props, State> {
                     {([[1, '1 day'], [3, '3 days'], [7, '7 days']] as Array<[number, string]>).map(([v, l]) => chip(f.duration === v, l, () => this.setForm('duration', v)))}
                   </div>
                 </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>DELIVERY</div>
+                  <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                    {chip(f.fulfillment === 'digital', '⚡ Digital · instant', () => this.setForm('fulfillment', 'digital'))}
+                    {chip(f.fulfillment === 'physical', '🛡 Physical · escrow', () => this.setForm('fulfillment', 'physical'))}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'rgba(26,19,5,.55)', marginTop: 7, maxWidth: 460 }}>
+                    {f.fulfillment === 'physical'
+                      ? 'Buyer’s funds are held in escrow until they confirm the card arrived. Disputes go to the arbiter.'
+                      : 'The card token transfers to the buyer the instant they pay — best for digital-only cards.'}
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1515,7 +2568,7 @@ export class TopDeckApp extends Component<Props, State> {
               <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, boxShadow: `4px 4px 0 ${INK}`, overflow: 'hidden' }}>
                 <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 17, padding: '15px 18px', borderBottom: `2.5px solid ${INK}`, background: '#ffd84d' }}>Review your listing</div>
                 <div style={{ padding: '6px 18px 12px' }}>
-                  {([['Card', f.title || 'Untitled card'], ['Set', f.setLine || '—'], ['Condition', f.graded ? `${f.grade} · Graded` : f.condition], ['Starting bid', money(startN)], ['Buy it now', f.buyNowOn && buyN > 0 ? money(buyN) : 'None'], ['Runs for', durLabel]] as Array<[string, string]>).map(([k, v], i, arr) => (
+                  {([['Card', f.title || 'Untitled card'], ['Set', f.setLine || '—'], ['Condition', f.graded ? `${f.grade} · Graded` : f.condition], ['Starting bid', money(startN)], ['Buy it now', f.buyNowOn && buyN > 0 ? money(buyN) : 'None'], ['Delivery', f.fulfillment === 'physical' ? 'Physical · escrow' : 'Digital · instant'], ['Runs for', durLabel]] as Array<[string, string]>).map(([k, v], i, arr) => (
                     <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 0', borderBottom: i === arr.length - 1 ? 'none' : '1.5px solid rgba(26,19,5,.1)' }}>
                       <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(26,19,5,.55)' }}>{k}</span>
                       <span style={{ fontSize: 13.5, fontWeight: 700 }}>{v}</span>
@@ -1556,7 +2609,7 @@ export class TopDeckApp extends Component<Props, State> {
           </div>
 
           {/* live preview */}
-          <div style={{ position: 'sticky', top: 90 }}>
+          <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
             <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.04em', color: 'rgba(26,19,5,.5)', marginBottom: 10 }}>LIVE PREVIEW</div>
             <div style={{ background: '#fff', border: `3px solid ${INK}`, borderRadius: 14, overflow: 'hidden', boxShadow: `5px 5px 0 ${INK}` }}>
               <div style={{ position: 'relative', height: 230, background: previewArt }}>

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { QueryProvider } from '@/components/QueryProvider';
 import { WalletProvider } from '@/components/WalletProvider';
 import { DevAnnotations } from '@/components/DevAnnotations';
 

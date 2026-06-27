@@ -28,6 +28,13 @@ export const env = {
   },
   platformIssuer: required('PLATFORM_ISSUER'),
   /**
+   * Dispute arbiter secret. The arbiter is a separate key from the admin so
+   * refereeing is decoupled from contract administration. The API signs `resolve`
+   * server-side with this key (an arbitration-dashboard action). Empty when
+   * arbitration is not configured; the resolve route then returns 501.
+   */
+  arbiterSecret: process.env.ARBITER_SECRET ?? '',
+  /**
    * Secret for the USDC issuer (== platform issuer here), used only by the
    * testnet-gated dev funding route to mint test USDC to a smart wallet. Empty
    * in environments that don't enable dev funding.

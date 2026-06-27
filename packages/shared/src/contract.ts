@@ -20,6 +20,14 @@ function u32(value: number): xdr.ScVal {
   return nativeToScVal(value, { type: 'u32' });
 }
 
+function bool(value: boolean): xdr.ScVal {
+  return nativeToScVal(value, { type: 'bool' });
+}
+
+/** Listing fulfillment modes; mirror the `FULFILL_*` constants in the contract. */
+export const FULFILLMENT = { digital: 0, physical: 1 } as const;
+export type FulfillmentMode = keyof typeof FULFILLMENT;
+
 export class MarketplaceContract {
   private readonly contract: Contract;
 
@@ -27,10 +35,11 @@ export class MarketplaceContract {
     this.contract = new Contract(contractId);
   }
 
-  /** init(admin, platform, usdc_token, fee_bps, max_royalty_bps) — one-time setup. */
+  /** init(admin, platform, arbiter, usdc_token, fee_bps, max_royalty_bps) — one-time setup. */
   init(
     admin: string,
     platform: string,
+    arbiter: string,
     usdcToken: string,
     feeBps: number,
     maxRoyaltyBps: number,
@@ -39,10 +48,21 @@ export class MarketplaceContract {
       'init',
       addr(admin),
       addr(platform),
+      addr(arbiter),
       addr(usdcToken),
       u32(feeBps),
       u32(maxRoyaltyBps),
     );
+  }
+
+  /** set_arbiter(arbiter) — admin re-points the dispute arbiter. */
+  setArbiter(arbiter: string): xdr.Operation {
+    return this.contract.call('set_arbiter', addr(arbiter));
+  }
+
+  /** set_paused(paused) — admin toggles the circuit breaker. */
+  setPaused(paused: boolean): xdr.Operation {
+    return this.contract.call('set_paused', bool(paused));
   }
 
   /** set_royalty(card_token, creator, royalty_bps) — admin registers a card's creator royalty. */
@@ -55,9 +75,20 @@ export class MarketplaceContract {
     return this.contract.call('get_royalty_view', addr(cardToken));
   }
 
-  /** list(seller, card_token, price) -> listing_id. Locks the card. */
-  list(seller: string, cardToken: string, priceStroops: bigint): xdr.Operation {
-    return this.contract.call('list', addr(seller), addr(cardToken), i128(priceStroops));
+  /** list(seller, card_token, price, fulfillment) -> listing_id. Locks the card. */
+  list(
+    seller: string,
+    cardToken: string,
+    priceStroops: bigint,
+    fulfillment: number = FULFILLMENT.digital,
+  ): xdr.Operation {
+    return this.contract.call(
+      'list',
+      addr(seller),
+      addr(cardToken),
+      i128(priceStroops),
+      u32(fulfillment),
+    );
   }
 
   /** cancel_listing(seller, listing_id). Returns the escrowed card. */
@@ -80,9 +111,46 @@ export class MarketplaceContract {
     return this.contract.call('accept_offer', addr(seller), u32(offerId));
   }
 
-  /** buy_now(buyer, listing_id). Atomic settlement at asking price. */
+  /** buy_now(buyer, listing_id). Atomic settlement at asking price (digital). */
   buyNow(buyer: string, listingId: number): xdr.Operation {
     return this.contract.call('buy_now', addr(buyer), u32(listingId));
+  }
+
+  // --- physical escrow ---
+
+  /** purchase_escrow(buyer, listing_id) -> order_id. Locks USDC; holds the card. */
+  purchaseEscrow(buyer: string, listingId: number): xdr.Operation {
+    return this.contract.call('purchase_escrow', addr(buyer), u32(listingId));
+  }
+
+  /** mark_shipped(seller, order_id). Seller signals dispatch; resets the window. */
+  markShipped(seller: string, orderId: number): xdr.Operation {
+    return this.contract.call('mark_shipped', addr(seller), u32(orderId));
+  }
+
+  /** confirm_receipt(buyer, order_id). Releases funds to seller + card to buyer. */
+  confirmReceipt(buyer: string, orderId: number): xdr.Operation {
+    return this.contract.call('confirm_receipt', addr(buyer), u32(orderId));
+  }
+
+  /** claim_timeout(order_id). Permissionless release to seller after the window. */
+  claimTimeout(orderId: number): xdr.Operation {
+    return this.contract.call('claim_timeout', u32(orderId));
+  }
+
+  /** dispute(caller, order_id). Buyer or seller freezes the order for the arbiter. */
+  dispute(caller: string, orderId: number): xdr.Operation {
+    return this.contract.call('dispute', addr(caller), u32(orderId));
+  }
+
+  /** resolve(order_id, refund). Arbiter refunds the buyer (true) or releases the seller (false). */
+  resolve(orderId: number, refund: boolean): xdr.Operation {
+    return this.contract.call('resolve', u32(orderId), bool(refund));
+  }
+
+  /** get_order_view(order_id) — read-only, for the indexer. */
+  getOrderView(orderId: number): xdr.Operation {
+    return this.contract.call('get_order_view', u32(orderId));
   }
 
   /** get_listing_view(listing_id) — read-only, for the indexer. */

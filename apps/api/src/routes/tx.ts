@@ -11,6 +11,7 @@ import { eq } from 'drizzle-orm';
 import { TransactionBuilder } from '@stellar/stellar-sdk';
 import { db, schema } from '@cardmkt/db';
 import {
+  FULFILLMENT,
   MarketplaceContract,
   acceptOfferSchema,
   buyNowSchema,
@@ -19,10 +20,14 @@ import {
   fromStellarAsset,
   listInputSchema,
   makeOfferSchema,
+  orderActionSchema,
   passkeyListSchema,
+  passkeyOrderSchema,
   passkeySubmitSchema,
   pathPaymentBuildSchema,
   pathQuoteSchema,
+  purchaseEscrowSchema,
+  resolveOrderSchema,
   submitTxSchema,
   toStellarAsset,
   toStroops,
@@ -46,6 +51,7 @@ import {
   requireSmartWalletUsdc,
   requireSourceBalance,
   requireTrustline,
+  signAndSubmitAs,
   submitClassicTx,
   submitSignedTx,
   transactionReturnValue,
@@ -57,7 +63,7 @@ export const txRouter: Router = Router();
 
 const contract = new MarketplaceContract(env.contractId);
 const usdc = usdcAsset(env.usdc.code, env.usdc.issuer);
-const { cards, listings, offers, trades } = schema;
+const { cards, listings, offers, orders, trades } = schema;
 
 function notFound(what: string): never {
   throw new PreflightError(`${what} not found`, 'NOT_FOUND');
@@ -106,7 +112,12 @@ txRouter.post('/list', async (req, res, next) => {
     // Seller must actually hold a copy of the card.
     await requireBalance(input.seller, cardAsset(card.assetCode, card.issuer), '1');
 
-    const op = contract.list(input.seller, card.sacAddress, toStroops(input.priceUsdc));
+    const op = contract.list(
+      input.seller,
+      card.sacAddress,
+      toStroops(input.priceUsdc),
+      FULFILLMENT[input.fulfillment],
+    );
     const xdr = await buildContractTx(input.seller, op);
 
     const [listing] = await db
@@ -116,6 +127,7 @@ txRouter.post('/list', async (req, res, next) => {
         seller: input.seller,
         priceUsdc: input.priceUsdc,
         status: 'open',
+        fulfillment: input.fulfillment,
       })
       .returning();
 
@@ -215,6 +227,206 @@ txRouter.post('/buy-now', async (req, res, next) => {
     const op = contract.buyNow(input.buyer, cid);
     const xdr = await buildContractTx(input.buyer, op);
     res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: listing.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- physical escrow: order helpers ---
+
+async function getOrderWithListingCard(orderId: string) {
+  const [row] = await db
+    .select({ order: orders, listing: listings, card: cards })
+    .from(orders)
+    .innerJoin(listings, eq(orders.listingId, listings.id))
+    .innerJoin(cards, eq(listings.cardId, cards.id))
+    .where(eq(orders.id, orderId));
+  if (!row) notFound('Order');
+  return row;
+}
+
+/** Record the settlement of a released escrow order as a trade row. */
+async function recordOrderTrade(
+  order: { listingId: string; buyer: string; seller: string; amountUsdc: string },
+  card: { royaltyBps: number; creatorAccount: string | null },
+  hash: string,
+): Promise<void> {
+  await db.insert(trades).values({
+    listingId: order.listingId,
+    buyer: order.buyer,
+    seller: order.seller,
+    priceUsdc: order.amountUsdc,
+    feeUsdc: feeFor(order.amountUsdc),
+    royaltyUsdc: royaltyFor(order.amountUsdc, card, order.seller),
+    settleTxHash: hash,
+  });
+}
+
+// --- build: purchase_escrow (buyer locks USDC against a physical listing) ---
+txRouter.post('/purchase-escrow', async (req, res, next) => {
+  try {
+    const input = purchaseEscrowSchema.parse(req.body);
+    const { listing, card } = await getListingWithCard(input.listingId);
+    const cid = needContractId(listing.contractListingId, 'Listing');
+    if (listing.fulfillment !== 'physical') {
+      throw new PreflightError('Listing is not a physical (escrow) listing', 'WRONG_FULFILLMENT');
+    }
+    // Buyer needs the asking price in USDC and a card trustline so the card can
+    // be delivered on release; a royalty payee must be able to receive USDC too.
+    await requireBalance(input.buyer, usdc, listing.priceUsdc);
+    await requireTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
+    await requireCreatorTrustline(card, listing.seller);
+
+    const op = contract.purchaseEscrow(input.buyer, cid);
+    const xdr = await buildContractTx(input.buyer, op);
+
+    const [order] = await db
+      .insert(orders)
+      .values({
+        listingId: listing.id,
+        buyer: input.buyer,
+        seller: listing.seller,
+        amountUsdc: listing.priceUsdc,
+        status: 'funded',
+      })
+      .returning();
+
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: order!.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: mark_shipped (seller signals dispatch) ---
+txRouter.post('/mark-shipped', async (req, res, next) => {
+  try {
+    const input = orderActionSchema.parse(req.body);
+    const trackingRef =
+      typeof req.body.trackingRef === 'string' ? req.body.trackingRef.trim() : undefined;
+    const { order } = await getOrderWithListingCard(input.orderId);
+    const oid = needContractId(order.contractOrderId, 'Order');
+    if (order.seller !== input.account) {
+      throw new PreflightError('Only the seller can mark an order shipped', 'NOT_SELLER');
+    }
+    if (order.status !== 'funded') {
+      throw new PreflightError(`Order cannot be shipped from status "${order.status}"`, 'BAD_STATE');
+    }
+    if (trackingRef) {
+      await db.update(orders).set({ trackingRef }).where(eq(orders.id, order.id));
+    }
+    const op = contract.markShipped(input.account, oid);
+    const xdr = await buildContractTx(input.account, op);
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: order.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: confirm_receipt (buyer releases funds to the seller) ---
+txRouter.post('/confirm-receipt', async (req, res, next) => {
+  try {
+    const input = orderActionSchema.parse(req.body);
+    const { order } = await getOrderWithListingCard(input.orderId);
+    const oid = needContractId(order.contractOrderId, 'Order');
+    if (order.buyer !== input.account) {
+      throw new PreflightError('Only the buyer can confirm receipt', 'NOT_BUYER');
+    }
+    if (order.status !== 'funded' && order.status !== 'shipped') {
+      throw new PreflightError(`Order cannot be confirmed from status "${order.status}"`, 'BAD_STATE');
+    }
+    const op = contract.confirmReceipt(input.account, oid);
+    const xdr = await buildContractTx(input.account, op);
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: order.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: dispute (buyer or seller freezes the order for the arbiter) ---
+txRouter.post('/dispute', async (req, res, next) => {
+  try {
+    const input = orderActionSchema.parse(req.body);
+    const { order } = await getOrderWithListingCard(input.orderId);
+    const oid = needContractId(order.contractOrderId, 'Order');
+    if (order.buyer !== input.account && order.seller !== input.account) {
+      throw new PreflightError('Only the buyer or seller can dispute an order', 'NOT_PARTICIPANT');
+    }
+    if (order.status !== 'funded' && order.status !== 'shipped') {
+      throw new PreflightError(`Order cannot be disputed from status "${order.status}"`, 'BAD_STATE');
+    }
+    const op = contract.dispute(input.account, oid);
+    const xdr = await buildContractTx(input.account, op);
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: order.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- build: claim_timeout (anyone releases to the seller after the window) ---
+txRouter.post('/claim-timeout', async (req, res, next) => {
+  try {
+    const input = orderActionSchema.parse(req.body);
+    const { order } = await getOrderWithListingCard(input.orderId);
+    const oid = needContractId(order.contractOrderId, 'Order');
+    if (order.status !== 'funded' && order.status !== 'shipped') {
+      throw new PreflightError(`Order cannot be timed out from status "${order.status}"`, 'BAD_STATE');
+    }
+    if (order.confirmDeadline && Date.now() / 1000 < order.confirmDeadline) {
+      throw new PreflightError('Confirmation window has not elapsed yet', 'DEADLINE_NOT_REACHED', {
+        confirmDeadline: order.confirmDeadline,
+      });
+    }
+    // `claim_timeout` takes no signer; `account` is just the fee-paying source.
+    const op = contract.claimTimeout(oid);
+    const xdr = await buildContractTx(input.account, op);
+    res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: order.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- resolve: arbiter settles a disputed order (server-signed) ---
+//
+// The arbiter is a separate key from the admin; the API holds it and signs
+// `resolve` directly (an arbitration-dashboard action), so this both submits and
+// reconciles. Returns 501 when no arbiter key is configured.
+txRouter.post('/resolve', async (req, res, next) => {
+  try {
+    const input = resolveOrderSchema.parse(req.body);
+    if (!env.arbiterSecret) {
+      const e = new PreflightError('Arbitration is not configured on this server', 'NO_ARBITER');
+      e.status = 501;
+      throw e;
+    }
+    const { order, card } = await getOrderWithListingCard(input.orderId);
+    const oid = needContractId(order.contractOrderId, 'Order');
+    if (order.status !== 'disputed') {
+      throw new PreflightError('Only a disputed order can be resolved', 'BAD_STATE', {
+        status: order.status,
+      });
+    }
+
+    const result = await signAndSubmitAs(env.arbiterSecret, contract.resolve(oid, input.refund));
+    if (!result.successful) {
+      throw new PreflightError('Resolution did not succeed on-chain', 'TX_FAILED', {
+        hash: result.hash,
+      });
+    }
+
+    if (input.refund) {
+      await db
+        .update(orders)
+        .set({ status: 'refunded', settleTxHash: result.hash })
+        .where(eq(orders.id, order.id));
+    } else {
+      await db
+        .update(orders)
+        .set({ status: 'released', settleTxHash: result.hash })
+        .where(eq(orders.id, order.id));
+      await recordOrderTrade(order, card, result.hash);
+    }
+
+    res.json({ hash: result.hash, successful: true });
   } catch (err) {
     next(err);
   }
@@ -432,6 +644,37 @@ txRouter.post('/submit', async (req, res, next) => {
         }
         break;
       }
+      case 'purchase_escrow': {
+        // The contract returns the new order id; the listing is now reserved.
+        const [order] = await db.select().from(orders).where(eq(orders.id, refId));
+        if (order) {
+          await db
+            .update(orders)
+            .set({ contractOrderId: Number(result.returnValue), escrowTxHash: result.hash })
+            .where(eq(orders.id, refId));
+          await db.update(listings).set({ status: 'sold' }).where(eq(listings.id, order.listingId));
+        }
+        break;
+      }
+      case 'mark_shipped':
+        await db.update(orders).set({ status: 'shipped' }).where(eq(orders.id, refId));
+        break;
+      case 'dispute':
+        await db.update(orders).set({ status: 'disputed' }).where(eq(orders.id, refId));
+        break;
+      case 'confirm_receipt':
+      case 'claim_timeout': {
+        // Both release the escrow to the seller and deliver the card to the buyer.
+        const { order, card } = await getOrderWithListingCard(refId);
+        if (order.status !== 'released') {
+          await db
+            .update(orders)
+            .set({ status: 'released', settleTxHash: result.hash })
+            .where(eq(orders.id, refId));
+          await recordOrderTrade(order, card, result.hash);
+        }
+        break;
+      }
     }
 
     res.json({ hash: result.hash, successful: true });
@@ -553,6 +796,84 @@ txRouter.post('/passkey-list', async (req, res, next) => {
       .returning();
 
     res.json({ hash: result.hash, successful: true, refId: listing!.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- submit: passkey smart-wallet escrow order action (gasless relay) + reconcile ---
+//
+// A smart-wallet (`C…`) actor on the physical-escrow flow. The browser builds +
+// passkey-signs the order call client-side and posts the envelope here; we relay
+// it and reconcile the order row. `purchase_escrow` targets a listing (and
+// recovers the new order id from the result); the rest target an existing order.
+txRouter.post('/passkey-order', async (req, res, next) => {
+  try {
+    const input = passkeyOrderSchema.parse(req.body);
+
+    if (input.action === 'purchase_escrow') {
+      if (!input.listingId) {
+        throw new PreflightError('listingId is required for purchase_escrow', 'BAD_REQUEST');
+      }
+      const { listing } = await getListingWithCard(input.listingId);
+      needContractId(listing.contractListingId, 'Listing');
+      if (listing.fulfillment !== 'physical') {
+        throw new PreflightError('Listing is not a physical (escrow) listing', 'WRONG_FULFILLMENT');
+      }
+      await requireSmartWalletUsdc(input.account, listing.priceUsdc);
+
+      const result = await relaySubmitter().submit(input.signedXdr);
+      if (!result.successful) {
+        throw new PreflightError('Relayed transaction did not succeed on-chain', 'TX_FAILED', {
+          hash: result.hash,
+        });
+      }
+      const returned = await transactionReturnValue(result.hash);
+      const contractOrderId = returned == null ? null : Number(returned);
+      const [order] = await db
+        .insert(orders)
+        .values({
+          listingId: listing.id,
+          buyer: input.account,
+          seller: listing.seller,
+          amountUsdc: listing.priceUsdc,
+          status: 'funded',
+          contractOrderId: Number.isFinite(contractOrderId) ? contractOrderId : null,
+          escrowTxHash: result.hash,
+        })
+        .returning();
+      await db.update(listings).set({ status: 'sold' }).where(eq(listings.id, listing.id));
+      res.json({ hash: result.hash, successful: true, refId: order!.id });
+      return;
+    }
+
+    // Existing-order actions.
+    if (!input.orderId) {
+      throw new PreflightError('orderId is required for this action', 'BAD_REQUEST');
+    }
+    const { order, card } = await getOrderWithListingCard(input.orderId);
+    needContractId(order.contractOrderId, 'Order');
+
+    const result = await relaySubmitter().submit(input.signedXdr);
+    if (!result.successful) {
+      throw new PreflightError('Relayed transaction did not succeed on-chain', 'TX_FAILED', {
+        hash: result.hash,
+      });
+    }
+
+    if (input.action === 'mark_shipped') {
+      await db.update(orders).set({ status: 'shipped' }).where(eq(orders.id, order.id));
+    } else if (input.action === 'dispute') {
+      await db.update(orders).set({ status: 'disputed' }).where(eq(orders.id, order.id));
+    } else if (input.action === 'confirm_receipt') {
+      await db
+        .update(orders)
+        .set({ status: 'released', settleTxHash: result.hash })
+        .where(eq(orders.id, order.id));
+      await recordOrderTrade(order, card, result.hash);
+    }
+
+    res.json({ hash: result.hash, successful: true, refId: order.id });
   } catch (err) {
     next(err);
   }

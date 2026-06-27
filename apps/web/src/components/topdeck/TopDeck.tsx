@@ -40,6 +40,8 @@ export function TopDeck() {
     runAction,
     passkeyBuyNow,
     passkeyList,
+    escrowPurchase,
+    orderAction,
     mintCard,
     payWithAsset,
   } = useWallet();
@@ -96,6 +98,8 @@ export function TopDeck() {
         runAction: (action, body) => runAction(action, body),
         passkeyBuyNow,
         passkeyList,
+        escrowPurchase,
+        orderAction,
         mintCard,
         payWithAsset,
       }}

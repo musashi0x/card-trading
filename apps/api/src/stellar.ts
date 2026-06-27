@@ -462,6 +462,23 @@ export async function mintUsdcTo(
   });
 }
 
+/**
+ * Build, sign (with `secret`), and submit a contract-call sourced from that
+ * key's own account. Used for server-held keys that act in their own right — e.g.
+ * the arbiter resolving a disputed escrow order. Unlike {@link withIssuerLock}
+ * helpers, the source is the signer itself, not the platform issuer.
+ */
+export async function signAndSubmitAs(
+  secret: string,
+  operation: xdr.Operation,
+): Promise<SubmitResult> {
+  const kp = Keypair.fromSecret(secret);
+  const unsignedXdr = await buildContractTx(kp.publicKey(), operation);
+  const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
+  tx.sign(kp);
+  return submitSignedTx(tx.toXDR());
+}
+
 // --- card minting (issue a new card asset at runtime) ---
 
 /** One card copy in stroops — assets carry 7 decimals, so 1 copy = 1.0 unit. */

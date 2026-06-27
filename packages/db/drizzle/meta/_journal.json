@@ -15,6 +15,13 @@
       "when": 1782477216302,
       "tag": "0001_wakeful_george_stacy",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1782537185658,
+      "tag": "0002_nebulous_steve_rogers",
+      "breakpoints": true
     }
   ]
 }
