@@ -50,13 +50,25 @@ function toProfile(row: typeof users.$inferSelect): ProfileResponse {
   };
 }
 
+function getDeterministicAvatar(address: string): string {
+  let hash = 0;
+  for (let i = 0; i < address.length; i++) {
+    hash = (hash * 31 + address.charCodeAt(i)) >>> 0;
+  }
+  const index = hash % 3;
+  return `/avatars/avatar-${index + 1}.png`;
+}
+
 /** Fetch the users row for an address, creating an empty one on first sight. */
 async function ensureUser(address: string): Promise<typeof users.$inferSelect> {
   const [existing] = await db.select().from(users).where(eq(users.stellarAddress, address));
   if (existing) return existing;
   const [created] = await db
     .insert(users)
-    .values({ stellarAddress: address })
+    .values({
+      stellarAddress: address,
+      avatarUrl: getDeterministicAvatar(address),
+    })
     .onConflictDoNothing()
     .returning();
   if (created) return created;
