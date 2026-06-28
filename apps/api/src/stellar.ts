@@ -120,14 +120,97 @@ export interface SubmitResult {
   returnValue: unknown;
 }
 
+/**
+ * Transaction-level result codes the API turns into a specific, actionable error
+ * instead of an opaque SUBMIT_FAILED. The dominant one is `txTooLate`: a signed
+ * XDR is only valid until its `maxTime` (we build with `.setTimeout(180)`), so
+ * once more than ~3 minutes pass between build → sign → submit — a slow wallet
+ * prompt, a resubmitted stale request, or a server clock running behind the
+ * network — the ledger rejects it as expired. The fix is always the same: build
+ * and sign a fresh transaction, so the message says exactly that.
+ */
+const TX_RESULT_ERRORS: Record<string, { code: string; message: string }> = {
+  txTooLate: {
+    code: 'TX_EXPIRED',
+    message:
+      'This transaction expired before it reached the network. Please sign and submit a fresh transaction.',
+  },
+  txTooEarly: {
+    code: 'TX_NOT_YET_VALID',
+    message: 'This transaction is not valid yet. Please try again in a moment.',
+  },
+  txBadSeq: {
+    code: 'TX_BAD_SEQUENCE',
+    message: 'This transaction used a stale account sequence. Please try again.',
+  },
+  txInsufficientFee: {
+    code: 'INSUFFICIENT_FEE',
+    message: 'The network fee was too low to include this transaction. Please try again.',
+  },
+  txInsufficientBalance: {
+    code: 'INSUFFICIENT_BALANCE',
+    message: 'The account balance is too low to cover this transaction.',
+  },
+  txBadAuth: {
+    code: 'BAD_AUTH',
+    message:
+      'The transaction signature was not accepted. Please reconnect your wallet and try again.',
+  },
+  txNoAccount: {
+    code: 'ACCOUNT_NOT_FOUND',
+    message: 'The source account does not exist on the network.',
+  },
+};
+
+/**
+ * Pull the transaction-level result code name (e.g. `txTooLate`) out of a failed
+ * submission. Tries the typed XDR accessor first, then the raw js-xdr
+ * `_attributes` shape a deserialized error carries, so an SDK structure change
+ * degrades to "unknown" rather than throwing inside the error path.
+ */
+function txResultCode(errorResult: unknown): string | undefined {
+  if (!errorResult) return undefined;
+  try {
+    const typed = errorResult as { result?: () => { switch?: () => { name?: string } } };
+    const name = typed.result?.().switch?.().name;
+    if (typeof name === 'string') return name;
+  } catch {
+    // fall through to the raw shape
+  }
+  const raw = (errorResult as { _attributes?: { result?: { _switch?: { name?: string } } } })
+    ?._attributes?.result?._switch?.name;
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+/** Horizon reports the same codes in snake_case (`tx_too_late`); normalize to camelCase. */
+function horizonResultCode(err: unknown): string | undefined {
+  const tx = (
+    err as {
+      response?: { data?: { extras?: { result_codes?: { transaction?: string } } } };
+    }
+  )?.response?.data?.extras?.result_codes?.transaction;
+  return tx ? tx.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase()) : undefined;
+}
+
+/** Map a failed submission's result code to a specific, client-actionable error. */
+function submitFailure(codeName: string | undefined, details?: Record<string, unknown>): PreflightError {
+  const known = codeName ? TX_RESULT_ERRORS[codeName] : undefined;
+  if (known) {
+    return new PreflightError(known.message, known.code, { resultCode: codeName, ...details });
+  }
+  return new PreflightError(
+    codeName ? `Transaction submission failed (${codeName})` : 'Transaction submission failed',
+    'SUBMIT_FAILED',
+    { resultCode: codeName, ...details },
+  );
+}
+
 /** Submit a wallet-signed XDR and wait for the result, returning the parsed return value. */
 export async function submitSignedTx(signedXdr: string): Promise<SubmitResult> {
   const tx = TransactionBuilder.fromXDR(signedXdr, env.stellar.networkPassphrase);
   const sent = await rpcServer.sendTransaction(tx);
   if (sent.status === 'ERROR') {
-    throw new PreflightError('Transaction submission failed', 'SUBMIT_FAILED', {
-      errorResult: sent.errorResult,
-    });
+    throw submitFailure(txResultCode(sent.errorResult), { errorResult: sent.errorResult });
   }
 
   // Poll until the transaction settles.
@@ -157,9 +240,8 @@ async function issuerSequence(): Promise<bigint> {
 
 /** A bad-sequence rejection — duplicate/stale sequence; retryable once re-synced. */
 function isBadSeqError(err: unknown): boolean {
-  const name = (err as { details?: { errorResult?: { _attributes?: { result?: { _switch?: { name?: string } } } } } })
-    ?.details?.errorResult?._attributes?.result?._switch?.name;
-  if (name === 'txBadSeq') return true;
+  const errorResult = (err as { details?: { errorResult?: unknown } })?.details?.errorResult;
+  if (txResultCode(errorResult) === 'txBadSeq') return true;
   const msg = err instanceof Error ? err.message : String(err);
   return /txBadSeq|tx_bad_seq|bad sequence/i.test(msg);
 }
@@ -308,8 +390,17 @@ export async function buildPathPaymentTx(
 /** Submit a wallet-signed classic tx via Horizon (used for trustlines). */
 export async function submitClassicTx(signedXdr: string): Promise<string> {
   const tx = TransactionBuilder.fromXDR(signedXdr, env.stellar.networkPassphrase);
-  const res = await horizon.submitTransaction(tx);
-  return res.hash;
+  try {
+    const res = await horizon.submitTransaction(tx);
+    return res.hash;
+  } catch (err) {
+    // Classic trustline txs carry the same 180s window, so an expired or
+    // otherwise-rejected submission gets the same actionable error as the
+    // Soroban path rather than leaking a raw Horizon 400.
+    const codeName = horizonResultCode(err);
+    if (codeName && TX_RESULT_ERRORS[codeName]) throw submitFailure(codeName);
+    throw err;
+  }
 }
 
 interface HorizonBalance {

@@ -635,6 +635,51 @@ export interface LeaderboardResponse {
   cachedAt: string;
 }
 
+/** A review left on a card by a previous owner/trader. */
+export interface CardReview {
+  id: string;
+  cardId: string;
+  authorAddress: string;
+  stars: number;
+  body: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Aggregate + list response for card reviews. */
+export interface CardReviewsResponse {
+  reviews: CardReview[];
+  aggregate: {
+    averageStars: number | null;
+    reviewCount: number;
+  };
+}
+
+/** Body for submitting or updating a card review. */
+export interface CardReviewBody {
+  authorAddress: string;
+  stars: number;
+  body?: string | null;
+}
+
+/** A public comment on a card detail page. */
+export interface CardComment {
+  id: string;
+  cardId: string;
+  /** Null for soft-deleted comments. */
+  authorAddress: string | null;
+  /** Replaced with "[comment removed]" when soft-deleted. */
+  body: string;
+  createdAt: string;
+  deletedAt: string | null;
+}
+
+/** Body for posting a card comment. */
+export interface CardCommentBody {
+  authorAddress: string;
+  body: string;
+}
+
 /** Structured, actionable error returned by pre-flight validation. */
 export interface ApiError {
   error: string;

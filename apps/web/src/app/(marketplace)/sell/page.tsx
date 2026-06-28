@@ -169,13 +169,13 @@ export default function SellPage() {
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CATEGORY</div>
                 <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
-                  {['Pokémon', 'Sports', 'Other'].map((v) => chip(f.category === v, v, () => td.setForm('category', v)))}
+                  {['Pokémon', 'Sports', 'Other'].map((v) => chip(f.category === v, v, () => td.setForm('category', v), v))}
                 </div>
               </div>
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>RARITY</div>
                 <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
-                  {(['common', 'rare', 'epic', 'legendary'] as Rarity[]).map((v) => chip(f.rarity === v, v.charAt(0).toUpperCase() + v.slice(1), () => td.setForm('rarity', v)))}
+                  {(['common', 'rare', 'epic', 'legendary'] as Rarity[]).map((v) => chip(f.rarity === v, v.charAt(0).toUpperCase() + v.slice(1), () => td.setForm('rarity', v), v))}
                 </div>
               </div>
               {st.sellMode === 'mint' && (
@@ -210,7 +210,7 @@ export default function SellPage() {
                   <input value={f.grade} onChange={(e) => td.setForm('grade', e.target.value)} placeholder="e.g. PSA 10, BGS 9.5" style={{ ...inputStyle, marginTop: 12, width: 240 }} />
                 ) : (
                   <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', marginTop: 12 }}>
-                    {['Mint', 'Near Mint', 'Lightly Played', 'Played'].map((v) => chip(f.condition === v, v, () => td.setForm('condition', v)))}
+                    {['Mint', 'Near Mint', 'Lightly Played', 'Played'].map((v) => chip(f.condition === v, v, () => td.setForm('condition', v), v))}
                   </div>
                 )}
               </div>

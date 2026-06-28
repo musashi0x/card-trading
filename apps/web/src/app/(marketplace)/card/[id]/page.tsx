@@ -4,7 +4,11 @@ import { useEffect, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useTopDeck, PAY_ASSETS, type PayAssetId } from '@/components/topdeck/TopDeckProvider';
 import { type TopCard, money, fmtLeft, fmtAgo, mapBid, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
-import { useAuctionBids, useToggleWatch, useWatchlist } from '@/lib/queries';
+import { useAuctionBids, useToggleWatch, useWatchlist, useCardReviews, useSubmitCardReview, useDeleteCardReview, useCardComments, usePostCardComment, useDeleteCardComment } from '@/lib/queries';
+import { ReviewForm } from '@/components/topdeck/shared/ReviewForm';
+import { ReviewList } from '@/components/topdeck/shared/ReviewList';
+import { CommentInput } from '@/components/topdeck/shared/CommentInput';
+import { CommentThread } from '@/components/topdeck/shared/CommentThread';
 import { INK, DISPLAY, SANS } from '@/components/topdeck/theme';
 import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
 import BoltIcon from '@mui/icons-material/Bolt';
@@ -126,8 +130,20 @@ export default function CardDetailPage() {
   const td = useTopDeck();
   const st = td.state;
   const { address, connect } = td.wallet;
+  const c = id ? td.getCard(id) : undefined;
+  const cardId = c?.cardId ?? null;
+
   const { data: watchEntries } = useWatchlist(address);
   const toggleWatch = useToggleWatch(address);
+  const { data: reviewsData } = useCardReviews(cardId ?? '');
+  const submitReview = useSubmitCardReview(cardId ?? '', address);
+  const deleteReview = useDeleteCardReview(cardId ?? '', address);
+  const myReview = reviewsData?.reviews.find((r) => r.authorAddress === address);
+  const { data: comments = [] } = useCardComments(cardId ?? '');
+  const postComment = usePostCardComment(cardId ?? '', address);
+  const deleteComment = useDeleteCardComment(cardId ?? '', address);
+  // Real bid history for auctions, sourced from the bids API (high bid first).
+  const { data: apiBids = [] } = useAuctionBids(c?.isAuction ? (c.auctionId ?? null) : null);
   const watchedSet = useMemo(() => new Set((watchEntries ?? []).map((e) => e.id)), [watchEntries]);
 
   useEffect(() => {
@@ -135,10 +151,6 @@ export default function CardDetailPage() {
       td.viewCard(id);
     }
   }, [id]);
-
-  const c = id ? td.getCard(id) : undefined;
-  // Real bid history for auctions, sourced from the bids API (high bid first).
-  const { data: apiBids = [] } = useAuctionBids(c?.isAuction ? (c.auctionId ?? null) : null);
 
   if (!c) {
     return (
@@ -322,7 +334,9 @@ export default function CardDetailPage() {
                 <span>{c.sellerRating} · {c.sellerSales} sales</span>
               </div>
             </div>
-            <div style={{ fontSize: 12, fontWeight: 700, padding: '8px 14px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>View store</div>
+            {c.sellerAddress && (
+              <div onClick={() => td.goStore(c.sellerAddress!)} style={{ fontSize: 12, fontWeight: 700, padding: '8px 14px', border: `2.5px solid ${INK}`, borderRadius: 9, cursor: 'pointer' }}>View store</div>
+            )}
           </div>
 
           <div style={{ marginTop: 24 }}>
@@ -339,6 +353,58 @@ export default function CardDetailPage() {
               ))}
             </div>
           </div>
+
+          {cardId && (
+            <>
+              {/* Reviews */}
+              <div style={{ marginTop: 32 }}>
+                <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 18, marginBottom: 12 }}>Reviews</div>
+                <ReviewList
+                  reviews={reviewsData?.reviews ?? []}
+                  averageStars={reviewsData?.aggregate.averageStars ?? null}
+                  reviewCount={reviewsData?.aggregate.reviewCount ?? 0}
+                  myAddress={address}
+                  onDelete={(reviewId) => deleteReview.mutate(reviewId)}
+                  deleting={deleteReview.isPending}
+                  now={st.now}
+                />
+                {address ? (
+                  <ReviewForm
+                    onSubmit={(stars, body) =>
+                      submitReview.mutate({ authorAddress: address, stars, body: body || null })
+                    }
+                    submitting={submitReview.isPending}
+                    existing={myReview ? { stars: myReview.stars, body: myReview.body } : undefined}
+                  />
+                ) : (
+                  <div
+                    onClick={connect}
+                    style={{ marginTop: 12, padding: '12px 16px', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 10, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)', cursor: 'pointer', textAlign: 'center' }}
+                  >
+                    Connect wallet to leave a review
+                  </div>
+                )}
+              </div>
+
+              {/* Comments */}
+              <div style={{ marginTop: 32 }}>
+                <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 18, marginBottom: 12 }}>Comments</div>
+                <CommentThread
+                  comments={comments}
+                  myAddress={address}
+                  onDelete={(commentId) => deleteComment.mutate(commentId)}
+                  deleting={deleteComment.isPending}
+                  now={st.now}
+                />
+                <CommentInput
+                  connected={!!address}
+                  onConnect={connect}
+                  onSubmit={(body) => postComment.mutate(body)}
+                  submitting={postComment.isPending}
+                />
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -9,7 +9,7 @@ import { defineConfig } from 'vitest/config';
  * `fileParallelism: false` keeps DB-touching suites from racing on shared tables.
  */
 const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5433/cardmkt_test';
+  process.env.TEST_DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/cardmkt_test';
 
 export default defineConfig({
   test: {

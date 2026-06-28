@@ -8,6 +8,11 @@ import type {
   BidListResponse,
   BuildTxResponse,
   Card,
+  CardCommentBody,
+  CardComment,
+  CardReview,
+  CardReviewBody,
+  CardReviewsResponse,
   Listing,
   MyBidsResponse,
   MintCardRequest,
@@ -280,4 +285,36 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ wallet, amountUsdc }),
     }),
+
+  /** Reviews for a card (list + aggregate). */
+  cardReviews: (cardId: string) =>
+    request<CardReviewsResponse>(`/api/catalog/${encodeURIComponent(cardId)}/reviews`),
+  /** Submit or update a card review (upsert). */
+  submitCardReview: (cardId: string, body: CardReviewBody) =>
+    request<CardReview>(`/api/catalog/${encodeURIComponent(cardId)}/reviews`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Delete (hard) a card review. */
+  deleteCardReview: (cardId: string, reviewId: string, authorAddress: string) =>
+    request<void>(
+      `/api/catalog/${encodeURIComponent(cardId)}/reviews/${reviewId}?authorAddress=${encodeURIComponent(authorAddress)}`,
+      { method: 'DELETE' },
+    ),
+
+  /** Public comments for a card (oldest first). */
+  cardComments: (cardId: string) =>
+    request<CardComment[]>(`/api/catalog/${encodeURIComponent(cardId)}/comments`),
+  /** Post a new comment on a card. */
+  postCardComment: (cardId: string, body: CardCommentBody) =>
+    request<CardComment>(`/api/catalog/${encodeURIComponent(cardId)}/comments`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Soft-delete a card comment. */
+  deleteCardComment: (cardId: string, commentId: string, authorAddress: string) =>
+    request<void>(
+      `/api/catalog/${encodeURIComponent(cardId)}/comments/${commentId}?authorAddress=${encodeURIComponent(authorAddress)}`,
+      { method: 'DELETE' },
+    ),
 };

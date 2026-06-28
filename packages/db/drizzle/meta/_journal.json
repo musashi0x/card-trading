@@ -57,6 +57,13 @@
       "when": 1782577441769,
       "tag": "0007_add_trade_proposals",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782620035934,
+      "tag": "0008_windy_screwball",
+      "breakpoints": true
     }
   ]
 }

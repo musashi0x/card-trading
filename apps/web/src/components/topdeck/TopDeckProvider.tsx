@@ -167,6 +167,8 @@ export interface TopDeckState {
   dragOver: boolean;
   form: Form;
   cards: TopCard[];
+  /** A manual browse-grid refresh is in flight. */
+  refreshing: boolean;
   now: number;
   page: number;
   payAsset: PayAssetId;
@@ -179,6 +181,7 @@ export interface TopDeckState {
   navMenuOpen: boolean;
   filtersOpen: boolean;
   addressCopied: boolean;
+  guideOpen: boolean;
 }
 
 function makeInitialState(seed: TopCard[]): TopDeckState {
@@ -191,10 +194,12 @@ function makeInitialState(seed: TopCard[]): TopDeckState {
     sellStep: 1, sellMode: 'hold', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
     form: { ...EMPTY_FORM },
     cards: seed,
+    refreshing: false,
     payAsset: 'USDC', quote: null, quoting: false, quoteErr: null,
     paying: false, payErr: null,
     orderBusy: null, ordersArbiter: false,
     walletMenuOpen: false, navMenuOpen: false, filtersOpen: false, addressCopied: false,
+    guideOpen: false,
   };
 }
 
@@ -221,11 +226,17 @@ export interface TopDeckContext {
   goTrade: () => void;
   goTrades: () => void;
   goProfile: () => void;
+  /** Open a seller's public store/profile page. */
+  goStore: (address: string) => void;
   openOrders: () => void;
+  openGuide: () => void;
+  closeGuide: () => void;
   /** URL-sync the detail screen to a card id (called by /card/[id] on mount). */
   viewCard: (id: string) => void;
 
-  // browse: filters / sort / search / pagination
+  // browse: refresh / filters / sort / search / pagination
+  /** Re-fetch open listings + auctions and reseed the browse grid. */
+  refresh: () => Promise<void>;
   setPage: (p: number) => void;
   toggleCat: (v: string) => void;
   toggleRarity: (v: string) => void;
@@ -306,11 +317,13 @@ interface StoreProps {
   wallet: WalletProps;
   orders: OrdersProps;
   seedCards: TopCard[];
+  /** Re-fetch the live listings + auctions and map them to fresh browse cards. */
+  fetchFreshCards: () => Promise<TopCard[]>;
   catalog: Card[];
   children: ReactNode;
 }
 
-function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StoreProps) {
+function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, children }: StoreProps) {
   const router = useRouter();
   const pathname = usePathname();
 
@@ -339,6 +352,14 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     return () => clearInterval(tick);
   }, [pathname, setState]);
 
+  // onboarding guide auto-open for new users
+  useEffect(() => {
+    const seen = localStorage.getItem('topdeck_guide_seen');
+    if (!seen) {
+      setState({ guideOpen: true });
+    }
+  }, [setState]);
+
   useEffect(
     () => () => {
       if (toastT.current) clearTimeout(toastT.current);
@@ -359,6 +380,22 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     [setState],
   );
 
+  // ----- browse grid refresh -----
+  // The grid snapshots its cards at mount (plus optimistic edits), so a manual
+  // refresh re-fetches the live listings/auctions and reseeds the grid with the
+  // authoritative server state.
+  const refresh = useCallback(async () => {
+    if (ref.current.refreshing) return;
+    setState({ refreshing: true });
+    try {
+      const fresh = await fetchFreshCards();
+      setState({ cards: fresh, page: 1, refreshing: false });
+    } catch {
+      setState({ refreshing: false });
+      showToast('Could not refresh — try again', 'outbid');
+    }
+  }, [fetchFreshCards, setState, showToast]);
+
   // ----- navigation -----
   const open = (id: string) => {
     setState({ selectedId: id, payAsset: 'USDC', quote: null, quoteErr: null });
@@ -375,9 +412,15 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
   const goTrade = () => router.push('/trade');
   const goTrades = () => router.push('/trades');
   const goProfile = () => router.push('/profile');
+  const goStore = (address: string) => router.push(`/profile/${encodeURIComponent(address)}`);
   const openOrders = () => {
     setState({ navMenuOpen: false });
     router.push('/orders');
+  };
+  const openGuide = () => setState({ guideOpen: true });
+  const closeGuide = () => {
+    localStorage.setItem('topdeck_guide_seen', 'true');
+    setState({ guideOpen: false });
   };
   const viewCard = (id: string) =>
     setState({ selectedId: id, payAsset: 'USDC', quote: null, quoteErr: null, paying: false, payErr: null });
@@ -579,19 +622,20 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     const c = getCard(ref.current.selectedId);
     if (!c) return;
     const { address, connect, payWithAsset } = wallet;
-    const def = PAY_ASSETS.find((a) => a.id === ref.current.payAsset);
-
-    if (!def?.asset) {
-      setState((s) => ({ status: { ...s.status, [c.id]: 'won' } }));
-      showToast('Purchased! ' + c.name + ' is yours 🎉', 'win');
-      return;
-    }
 
     if (!address) {
       showToast('Connect your wallet to pay', 'outbid');
       connect();
       return;
     }
+
+    const def = PAY_ASSETS.find((a) => a.id === ref.current.payAsset);
+    if (!def?.asset) {
+      setState((s) => ({ status: { ...s.status, [c.id]: 'won' } }));
+      showToast('Purchased! ' + c.name + ' is yours 🎉', 'win');
+      return;
+    }
+
     const quote = ref.current.quote;
     if (!quote) {
       showToast('Fetching a quote — try again in a moment', 'outbid');
@@ -886,7 +930,8 @@ function TopDeckStore({ wallet, orders, seedCards, catalog, children }: StorePro
     explorerTx,
     explorerAddress: explorerAccount,
     getCard,
-    open, goHome, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goTrades, goProfile, openOrders, viewCard,
+    open, goHome, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goTrades, goProfile, goStore, openOrders, openGuide, closeGuide, viewCard,
+    refresh,
     setPage, toggleCat, toggleRarity, toggleFlag, setPrice, setSort, clearFilters, setQuery, clearQuery,
     toggleFilters, closeFilters,
     setMyBidsTab,
@@ -975,6 +1020,21 @@ export function TopDeckProvider({ children }: { children: ReactNode }) {
     [queryClient, address],
   );
 
+  // Pull the authoritative open listings + auctions and map them to browse cards.
+  // `fetchQuery` also writes through to the shared cache, so the 5s polls pick up
+  // from the freshly refreshed data rather than refetching twice.
+  const fetchFreshCards = useCallback(async (): Promise<TopCard[]> => {
+    const [freshListings, freshAuctions] = await Promise.all([
+      queryClient.fetchQuery({ queryKey: queryKeys.listings(), queryFn: () => api.listings() }),
+      queryClient.fetchQuery({ queryKey: queryKeys.auctions(), queryFn: () => api.auctions('open') }),
+    ]);
+    const auctionCards = freshAuctions
+      .filter((a) => a.card)
+      .map((a) => mapAuction(a, [], address ?? undefined));
+    const listingCards = freshListings.filter((l) => l.card).map((l) => mapListing(l));
+    return [...auctionCards, ...listingCards];
+  }, [queryClient, address]);
+
   const orderActionMut = useMutation({
     mutationFn: (v: { action: OrderAction; orderId: string; contractOrderId: number }) =>
       orderAction(v.action, v.orderId, v.contractOrderId),
@@ -1028,7 +1088,7 @@ export function TopDeckProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <TopDeckStore wallet={wallet} orders={orders} seedCards={seed} catalog={catalog}>
+    <TopDeckStore wallet={wallet} orders={orders} seedCards={seed} fetchFreshCards={fetchFreshCards} catalog={catalog}>
       {children}
     </TopDeckStore>
   );

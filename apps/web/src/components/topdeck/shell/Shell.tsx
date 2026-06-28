@@ -7,6 +7,8 @@ import { INK, SANS } from '../theme';
 import { TopNav } from './TopNav';
 import { Toast } from '../shared/Toast';
 import { BidModal } from '../shared/BidModal';
+import { GuideModal } from '../shared/GuideModal';
+import { SigningLoader } from '../shared/SigningLoader';
 
 /**
  * The page chrome shared by every route: the sticky top nav, the routed page
@@ -29,6 +31,8 @@ export function Shell({ children }: { children: ReactNode }) {
       <TopNav />
       {children}
       {td.state.bidOpen && sel && <BidModal card={sel} />}
+      <GuideModal />
+      <SigningLoader />
       <Toast />
     </div>
   );

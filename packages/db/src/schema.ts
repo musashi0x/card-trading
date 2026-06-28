@@ -280,6 +280,45 @@ export const reviews = pgTable('reviews', {
 });
 
 /**
+ * Card-level reviews. One review per (card, author) enforced by unique index;
+ * upsert semantics — submitting again updates the existing row. Only wallets
+ * that have previously bought or sold the card may review it (enforced in API).
+ */
+export const cardReviews = pgTable(
+  'card_reviews',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    cardId: uuid('card_id')
+      .notNull()
+      .references(() => cards.id),
+    authorAddress: text('author_address').notNull(),
+    stars: integer('stars').notNull(),
+    body: text('body'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    cardAuthorUnique: uniqueIndex('card_reviews_card_author_unique').on(t.cardId, t.authorAddress),
+  }),
+);
+
+/**
+ * Card-level public comments. Any authenticated (wallet-connected) user may
+ * comment. Soft-deleted rows keep `deleted_at` set; the body is redacted in the
+ * API response so threads stay coherent.
+ */
+export const cardComments = pgTable('card_comments', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  cardId: uuid('card_id')
+    .notNull()
+    .references(() => cards.id),
+  authorAddress: text('author_address').notNull(),
+  body: text('body').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+});
+
+/**
  * Per-wallet watchlist. A row means `account` is watching a specific open
  * listing. Keyed by listing (not card) so it captures the price the user cared
  * about; rows are removed by the indexer when the listing closes.
@@ -309,4 +348,6 @@ export type TradeRow = typeof trades.$inferSelect;
 export type TradeProposalRow = typeof tradeProposals.$inferSelect;
 export type WatchlistRow = typeof watchlist.$inferSelect;
 export type ReviewRow = typeof reviews.$inferSelect;
+export type CardReviewRow = typeof cardReviews.$inferSelect;
+export type CardCommentRow = typeof cardComments.$inferSelect;
 export type UserRow = typeof users.$inferSelect;

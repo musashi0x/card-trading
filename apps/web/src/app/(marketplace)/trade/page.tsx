@@ -91,10 +91,17 @@ export default function TradePage() {
   const { data: listings = [] } = useListings();
 
   // The get side draws from live open listings the user doesn't already own.
-  const getPool = useMemo<Listing[]>(
-    () => listings.filter((l) => l.card && l.seller !== address),
-    [listings, address],
-  );
+  // Selection is tracked by card id, so collapse multiple listings of the same
+  // card to a single tile (e.g. a card with supply > 1, or relisted) — keeping
+  // the first occurrence — to avoid duplicate React keys and coupled selection.
+  const getPool = useMemo<Listing[]>(() => {
+    const seen = new Set<string>();
+    return listings.filter((l) => {
+      if (!l.card || l.seller === address || seen.has(l.card.id)) return false;
+      seen.add(l.card.id);
+      return true;
+    });
+  }, [listings, address]);
 
   function toggle(set: React.Dispatch<React.SetStateAction<Set<string>>>, id: string) {
     set((prev) => {
@@ -241,7 +248,7 @@ export default function TradePage() {
               {getPool.length === 0 && <Empty>No open listings to request right now.</Empty>}
               {getPool.map((l) => (
                 <CardTile
-                  key={l.card!.id}
+                  key={l.id}
                   name={l.card!.name}
                   rarity={l.card!.rarity}
                   sub={`${money(Number(l.priceUsdc))} · ${l.seller.slice(0, 4)}…`}
