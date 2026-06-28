@@ -73,7 +73,7 @@ Because `reconcile()` only runs after a confirmed tx, and the chain guard makes 
 - **Residual window remains non-zero.** The recheck shrinks but cannot eliminate the race between conversion confirming and `buy_now` landing. Accepted: bounded by the slippage-capped residual and clear retry UX; eliminating it requires contract changes the spec forbids.
 - **Moving the escrow insert to reconcile** changes where `refId` originates for the escrow build; needs care so the submit→reconcile correlation still works. Mitigated by the sweep fallback if the insert can't move.
 
-## Open Questions
+## Resolved Questions
 
-- Should a post-conversion settlement failure attempt an automatic single `buy_now` retry before surfacing the residual to the buyer, or always hand control back to the buyer immediately?
-- For the abandoned-order sweep: TTL value and whether it runs as a cron, on-read lazy cleanup, or a startup task.
+- **Post-conversion failure handling**: control is handed back to the buyer rather than auto-retrying. On a failed settlement the UI shows a residual-USDC notice with an explicit "Retry purchase" action (for transient/retryable errors) or a "Browse other cards" action (for terminal `LISTING_CLOSED` / `NotOpen` / `SelfTrade` / `WrongFulfillment`). Rationale: an auto-retry can race the same snipe again and spends gas without the buyer's intent; an explicit retry is predictable and the USDC is already held so re-converting is never needed.
+- **Abandoned-order sweep**: implemented as build-time-insert + lazy TTL sweep (Decision 6, sweep branch), not insert-on-reconcile — because `submit`/`reconcile` correlate the escrow order by the pre-created `refId`, and re-keying that correlation was out of proportion to the fix. `sweepAbandonedOrders(ttlMs = 15min)` deletes `funded` orders with **both** `contractOrderId` and `escrowTxHash` null and `createdAt` older than the TTL (a confirmed-but-unparsed order keeps its `escrowTxHash`, so it is never swept; an in-flight signature is protected by the TTL). It runs lazily on `GET /api/orders` and before inserting a fresh order in `POST /api/tx/purchase-escrow`.
