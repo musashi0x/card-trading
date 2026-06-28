@@ -91,6 +91,8 @@ async function action(
       const msg = String(err);
       const transient =
         msg.includes('SUBMIT_FAILED') ||
+        msg.includes('TX_EXPIRED') ||
+        msg.includes('TX_BAD_SEQUENCE') ||
         msg.includes('TxBadSeq') ||
         msg.includes('Error(Contract, #3)') ||
         msg.includes('TX_FAILED');
