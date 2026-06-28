@@ -27,9 +27,32 @@ const WASM = resolve(
 const NETWORK = 'testnet';
 const FEE_BPS = '200'; // 2%
 const MAX_ROYALTY_BPS = '1000'; // 10% ceiling; fee + royalty must stay < 100%
+const NETWORK_PASSPHRASE = 'Test SDF Network ; September 2015';
 
+// CLI 27's `contract id asset --network testnet` reads the rpc-url from the named
+// network but not its passphrase, so it errors unless the passphrase is in the
+// environment. Inject it for every call so a half-configured network still works.
 function sh(args: string[]): string {
-  return execFileSync('stellar', args, { encoding: 'utf8' }).trim();
+  return execFileSync('stellar', args, {
+    encoding: 'utf8',
+    env: { ...process.env, STELLAR_NETWORK_PASSPHRASE: NETWORK_PASSPHRASE },
+  }).trim();
+}
+
+// A `contract deploy` returns before the RPC has indexed the new instance, so an
+// immediate invoke can fail with Error(Storage, MissingValue). Retry through the
+// propagation gap before giving up.
+function shRetry(args: string[], tries = 5, delayMs = 3000): string {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return sh(args);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt >= tries || !msg.includes('MissingValue')) throw err;
+      console.log(`  (instance not indexed yet — retry ${attempt}/${tries - 1})`);
+      execFileSync('sleep', [String(delayMs / 1000)]);
+    }
+  }
 }
 
 interface Accounts {
@@ -81,7 +104,7 @@ function main() {
   if (!accounts.arbiter) {
     console.warn('[deploy] no arbiter account in stellar-accounts.json — using platform as arbiter');
   }
-  sh([
+  shRetry([
     'contract', 'invoke', '--id', contractId, '--source-account', source, '--network', NETWORK,
     '--', 'init',
     '--admin', accounts.platform.publicKey,

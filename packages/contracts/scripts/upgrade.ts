@@ -27,9 +27,16 @@ const WASM = resolve(
   'target/wasm32v1-none/release/marketplace_contract.wasm',
 );
 const NETWORK = 'testnet';
+const NETWORK_PASSPHRASE = 'Test SDF Network ; September 2015';
 
+// CLI 27 reads the rpc-url from the named network but not its passphrase, so
+// inject the passphrase into the environment for every call (see deploy.ts).
 function sh(args: string[]): string {
-  return execFileSync('stellar', args, { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] }).trim();
+  return execFileSync('stellar', args, {
+    encoding: 'utf8',
+    stdio: ['inherit', 'pipe', 'inherit'],
+    env: { ...process.env, STELLAR_NETWORK_PASSPHRASE: NETWORK_PASSPHRASE },
+  }).trim();
 }
 
 interface Accounts {

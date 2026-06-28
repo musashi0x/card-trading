@@ -430,6 +430,45 @@ export async function getAssetBalance(account: string, asset: Asset): Promise<st
   return bal?.balance ?? '0';
 }
 
+/** Get both XLM and USDC balances and trustline status for an account (classic or contract). */
+export async function getAccountBalances(account: string): Promise<{ usdc: string; xlm: string; usdcTrustline: boolean }> {
+  const usdcAsset = new Asset(env.usdc.code, env.usdc.issuer);
+  let usdc = '0';
+  let xlm = '0';
+  let usdcTrustline = false;
+
+  if (isContractAddress(account)) {
+    // Contract accounts are funded via smart contracts directly, they don't need a classic trustline.
+    usdcTrustline = true;
+    try {
+      const stroops = await smartWalletUsdcStroops(account);
+      if (stroops != null) {
+        usdc = (Number(stroops) / 10_000_000).toFixed(7);
+      }
+    } catch (err) {
+      // Contract might not exist or be deployed yet
+    }
+  } else {
+    try {
+      const list = await balances(account);
+      const usdcBal = findBalance(list, usdcAsset);
+      if (usdcBal) {
+        usdc = usdcBal.balance;
+        usdcTrustline = true;
+      }
+      const xlmBal = findBalance(list, Asset.native());
+      if (xlmBal) {
+        xlm = xlmBal.balance;
+      }
+    } catch {
+      // Account doesn't exist on-chain or not funded
+    }
+  }
+
+  return { usdc, xlm, usdcTrustline };
+}
+
+
 /**
  * Filter `cards` down to those `account` actually holds on-chain. "Holding" a
  * card means a positive token balance, read differently per account kind:

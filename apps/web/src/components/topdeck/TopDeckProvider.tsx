@@ -231,6 +231,7 @@ export interface TopDeckContext {
   goSell: () => void;
   goLeaderboard: () => void;
   goPortfolio: () => void;
+  goFaucet: () => void;
   goTrade: () => void;
   goTrades: () => void;
   goProfile: () => void;
@@ -422,6 +423,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
   };
   const goLeaderboard = () => router.push('/leaderboard');
   const goPortfolio = () => router.push('/portfolio');
+  const goFaucet = () => {
+    setState({ walletMenuOpen: false });
+    router.push('/faucet');
+  };
   const goTrade = () => router.push('/trade');
   const goTrades = () => router.push('/trades');
   const goProfile = () => router.push('/profile');
@@ -1045,7 +1050,7 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     explorerTx,
     explorerAddress: explorerAccount,
     getCard,
-    open, goHome, goBrowse, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goTrades, goProfile, goStore, openOrders, openGuide, closeGuide, viewCard,
+    open, goHome, goBrowse, goMyBids, goSell, goLeaderboard, goPortfolio, goFaucet, goTrade, goTrades, goProfile, goStore, openOrders, openGuide, closeGuide, viewCard,
     refresh,
     setPage, toggleCat, toggleRarity, toggleFlag, setPrice, setSort, clearFilters, setQuery, clearQuery,
     toggleFilters, closeFilters,

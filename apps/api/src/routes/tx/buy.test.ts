@@ -57,7 +57,7 @@ vi.mock('../../stellar.js', () => ({
 // The contract client + helpers; the op itself is opaque to buildContractTx.
 vi.mock('./shared.js', () => ({
   contract: { buyNow: vi.fn(() => ({ op: 'buy_now' })) },
-  usdc: { code: 'USDC' },
+  usdc: { getCode: () => 'USDC', getIssuer: () => 'GUSDCISSUER' },
   notFound: (what: string) => {
     throw new PreflightError(`${what} not found`, 'NOT_FOUND');
   },
@@ -69,6 +69,7 @@ vi.mock('./shared.js', () => ({
 }));
 
 const { buildRouter } = await import('./build.js');
+const { hasTrustline } = await import('../../stellar.js');
 
 const { cards, listings, orders } = schema;
 const BUYER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0xb1));
@@ -90,7 +91,11 @@ function makeApp(): express.Express {
         res.status(400).json({ error: err.issues[0]?.message ?? 'Invalid', code: 'VALIDATION' });
         return;
       }
-      res.status(err.status ?? 500).json({ error: err.message, code: err.code ?? 'INTERNAL' });
+      res.status(err.status ?? 500).json({
+        error: err.message,
+        code: err.code ?? 'INTERNAL',
+        details: (err as { details?: Record<string, unknown> }).details,
+      });
     },
   );
   return app;
@@ -154,6 +159,17 @@ describe('POST /api/tx/buy-now pre-flight', () => {
     const res = await request(app).post('/api/tx/buy-now').send({ listingId, buyer: BUYER });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('LISTING_CLOSED');
+  });
+
+  it('returns a change_trust recovery XDR when the buyer lacks a USDC trustline', async () => {
+    vi.mocked(hasTrustline).mockResolvedValueOnce(false);
+    const listingId = await makeListing('open');
+    const res = await request(app).post('/api/tx/buy-now').send({ listingId, buyer: BUYER });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('MISSING_TRUSTLINE');
+    // The client signs + submits this to self-heal, then retries the build.
+    expect(res.body.details.xdr).toBe('UNSIGNED_XDR');
+    expect(res.body.details.assetCode).toBe('USDC');
   });
 });
 

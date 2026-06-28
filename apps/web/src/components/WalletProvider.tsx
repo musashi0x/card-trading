@@ -162,6 +162,29 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setAddress(null);
   }, [walletKind]);
 
+  /**
+   * If a build failed only because the account lacks a USDC trustline, the API
+   * attaches a ready-to-sign `change_trust` XDR. Sign + submit it and return true
+   * so the caller can retry the original build; return false for any other error
+   * so it propagates. Classic wallets only (passkey accounts manage USDC differently).
+   */
+  const recoverMissingTrustline = useCallback(
+    async (err: unknown): Promise<boolean> => {
+      if (
+        !address ||
+        !(err instanceof ApiRequestError) ||
+        err.code !== 'MISSING_TRUSTLINE' ||
+        typeof err.details?.xdr !== 'string'
+      ) {
+        return false;
+      }
+      const ctSigned = await signXdr(err.details.xdr, address, String(err.details.networkPassphrase));
+      await api.submitClassic(ctSigned);
+      return true;
+    },
+    [address],
+  );
+
   const passkeyBuyNow = useCallback(
     async (listingId: string, contractListingId: number): Promise<string> => {
       const wallet = smartWallet.current;
@@ -225,12 +248,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         return hash;
       }
       if (!address) throw new Error('Connect a wallet first');
-      const built = await api.build('purchase_escrow', { listingId, buyer: address });
+      let built;
+      try {
+        built = await api.build('purchase_escrow', { listingId, buyer: address });
+      } catch (err) {
+        // Missing USDC trustline: establish it from the recovery XDR, then retry.
+        if (!(await recoverMissingTrustline(err))) throw err;
+        built = await api.build('purchase_escrow', { listingId, buyer: address });
+      }
       const signed = await signXdr(built.xdr, address, built.networkPassphrase);
       const { hash } = await api.submit(signed, 'purchase_escrow', built.refId);
       return hash;
     },
-    [address, walletKind],
+    [address, walletKind, recoverMissingTrustline],
   );
 
   /** A participant action on an existing escrow order (classic or passkey). */
@@ -270,12 +300,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const runAction = useCallback(
     async (action: TradeAction, body: Record<string, unknown>): Promise<string> => {
       if (!address) throw new Error('Connect a wallet first');
-      const built = await api.build(action, body);
+      let built;
+      try {
+        built = await api.build(action, body);
+      } catch (err) {
+        // Missing USDC trustline: establish it from the recovery XDR, then retry.
+        if (!(await recoverMissingTrustline(err))) throw err;
+        built = await api.build(action, body);
+      }
       const signed = await signXdr(built.xdr, address, built.networkPassphrase);
       const { hash } = await api.submit(signed, action, built.refId);
       return hash;
     },
-    [address],
+    [address, recoverMissingTrustline],
   );
 
   /** Sign + submit a classic changeTrust so the buyer can receive a card. */
@@ -355,28 +392,15 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       try {
         built = await api.pathPayment(buildBody);
       } catch (err) {
-        // Missing USDC trustline: sign the returned change_trust, then retry.
-        if (
-          err instanceof ApiRequestError &&
-          err.code === 'MISSING_TRUSTLINE' &&
-          typeof err.details?.xdr === 'string'
-        ) {
-          const ctSigned = await signXdr(
-            err.details.xdr,
-            address,
-            String(err.details.networkPassphrase),
-          );
-          await api.submitClassic(ctSigned);
-          built = await api.pathPayment(buildBody);
-        } else {
-          throw err;
-        }
+        // Missing USDC trustline: establish it from the recovery XDR, then retry.
+        if (!(await recoverMissingTrustline(err))) throw err;
+        built = await api.pathPayment(buildBody);
       }
       const signed = await signXdr(built.xdr, address, built.networkPassphrase);
       const { hash } = await api.submitClassic(signed);
       return hash;
     },
-    [address],
+    [address, recoverMissingTrustline],
   );
 
   const value = useMemo(

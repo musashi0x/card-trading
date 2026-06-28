@@ -331,10 +331,13 @@ export const api = {
 
   /** Dev-only: mint test USDC into a smart wallet so the first purchase has funds. */
   devFundWallet: (wallet: string, amountUsdc?: string) =>
-    request<SubmitTxResponse & { amountUsdc: string }>('/api/dev/fund-wallet', {
+    request<SubmitTxResponse & { amountUsdc: string; wallet: string }>('/api/dev/fund-wallet', {
       method: 'POST',
       body: JSON.stringify({ wallet, amountUsdc }),
     }),
+  /** Dev-only: query USDC and XLM balances and trustline status for an address. */
+  devGetBalance: (address: string) =>
+    request<{ usdc: string; xlm: string; usdcTrustline: boolean }>(`/api/dev/balance/${encodeURIComponent(address)}`),
 
   /** Reviews for a card (list + aggregate). */
   cardReviews: (cardId: string) =>
