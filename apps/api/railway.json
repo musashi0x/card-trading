@@ -1,0 +1,15 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "pnpm exec turbo run build --filter=@cardmkt/api"
+  },
+  "deploy": {
+    "preDeployCommand": "pnpm --filter @cardmkt/db migrate",
+    "startCommand": "pnpm --filter @cardmkt/api start",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 100,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}

@@ -4,7 +4,7 @@ import { useEffect, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useTopDeck, PAY_ASSETS, type PayAssetId } from '@/components/topdeck/TopDeckProvider';
 import { type TopCard, money, fmtLeft, fmtAgo, mapBid, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
-import { useAuctionBids, useToggleWatch, useWatchlist, useCardReviews, useSubmitCardReview, useDeleteCardReview, useCardComments, usePostCardComment, useDeleteCardComment } from '@/lib/queries';
+import { useAuctionBids, useToggleWatch, useWatchlist, useCardReviews, useCardReviewEligibility, useSubmitCardReview, useDeleteCardReview, useCardComments, usePostCardComment, useDeleteCardComment } from '@/lib/queries';
 import { ReviewForm } from '@/components/topdeck/shared/ReviewForm';
 import { ReviewList } from '@/components/topdeck/shared/ReviewList';
 import { CommentInput } from '@/components/topdeck/shared/CommentInput';
@@ -139,6 +139,9 @@ export default function CardDetailPage() {
   const submitReview = useSubmitCardReview(cardId ?? '', address);
   const deleteReview = useDeleteCardReview(cardId ?? '', address);
   const myReview = reviewsData?.reviews.find((r) => r.authorAddress === address);
+  const { data: eligibility } = useCardReviewEligibility(cardId ?? '', address);
+  // Show the form to wallets that may review (owned/traded the card) or already have one.
+  const canReview = !!myReview || !!eligibility?.eligible;
   const { data: comments = [] } = useCardComments(cardId ?? '');
   const postComment = usePostCardComment(cardId ?? '', address);
   const deleteComment = useDeleteCardComment(cardId ?? '', address);
@@ -386,7 +389,14 @@ export default function CardDetailPage() {
                   deleting={deleteReview.isPending}
                   now={st.now}
                 />
-                {address ? (
+                {!address ? (
+                  <div
+                    onClick={connect}
+                    style={{ marginTop: 12, padding: '12px 16px', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 10, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)', cursor: 'pointer', textAlign: 'center' }}
+                  >
+                    Connect wallet to leave a review
+                  </div>
+                ) : canReview ? (
                   <ReviewForm
                     onSubmit={(stars, body) =>
                       submitReview.mutate({ authorAddress: address, stars, body: body || null })
@@ -396,10 +406,9 @@ export default function CardDetailPage() {
                   />
                 ) : (
                   <div
-                    onClick={connect}
-                    style={{ marginTop: 12, padding: '12px 16px', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 10, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)', cursor: 'pointer', textAlign: 'center' }}
+                    style={{ marginTop: 12, padding: '12px 16px', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 10, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)', textAlign: 'center' }}
                   >
-                    Connect wallet to leave a review
+                    Only owners or traders of this card can leave a review
                   </div>
                 )}
               </div>

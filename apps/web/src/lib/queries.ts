@@ -13,6 +13,8 @@ type ListingFilters = { q?: string; set?: string; rarity?: string };
 
 export const queryKeys = {
   cardReviews: (cardId: string) => ['cardReviews', cardId] as const,
+  cardReviewEligibility: (cardId: string, address: string) =>
+    ['cardReviews', cardId, 'eligibility', address] as const,
   cardComments: (cardId: string) => ['cardComments', cardId] as const,
   cards: (owner?: string) => ['cards', owner ?? 'all'] as const,
   listings: (filters?: ListingFilters) => ['listings', filters ?? {}] as const,
@@ -227,6 +229,15 @@ export function useCardReviews(cardId: string) {
     queryKey: queryKeys.cardReviews(cardId),
     queryFn: () => api.cardReviews(cardId),
     enabled: !!cardId,
+  });
+}
+
+/** Whether the connected wallet may post a review for this card. */
+export function useCardReviewEligibility(cardId: string, address: string | null) {
+  return useQuery({
+    queryKey: queryKeys.cardReviewEligibility(cardId, address ?? ''),
+    queryFn: () => api.cardReviewEligibility(cardId, address as string),
+    enabled: !!cardId && !!address,
   });
 }
 

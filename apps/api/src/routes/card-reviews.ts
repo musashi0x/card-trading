@@ -82,6 +82,25 @@ cardReviewsRouter.get('/', async (req, res, next) => {
   }
 });
 
+// GET /api/catalog/:id/reviews/eligibility?address=...
+// Lets the web client know whether a wallet may post a review for this card,
+// so it can show or hide the review form instead of letting the POST 403.
+cardReviewsRouter.get('/eligibility', async (req, res, next) => {
+  try {
+    const { id: cardId } = req.params as { id: string };
+    const address = req.query.address as string | undefined;
+
+    if (!address || !STELLAR_ADDRESS.test(address)) {
+      res.status(400).json({ error: 'address query param required', code: 'INVALID_PARAMS' });
+      return;
+    }
+
+    res.json({ eligible: await hasOwnedCard(cardId, address) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/catalog/:id/reviews
 cardReviewsRouter.post('/', async (req, res, next) => {
   try {

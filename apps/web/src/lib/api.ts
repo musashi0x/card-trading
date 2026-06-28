@@ -342,6 +342,11 @@ export const api = {
   /** Reviews for a card (list + aggregate). */
   cardReviews: (cardId: string) =>
     request<CardReviewsResponse>(`/api/catalog/${encodeURIComponent(cardId)}/reviews`),
+  /** Whether a wallet is allowed to post a review for this card. */
+  cardReviewEligibility: (cardId: string, address: string) =>
+    request<{ eligible: boolean }>(
+      `/api/catalog/${encodeURIComponent(cardId)}/reviews/eligibility?address=${encodeURIComponent(address)}`,
+    ),
   /** Submit or update a card review (upsert). */
   submitCardReview: (cardId: string, body: CardReviewBody) =>
     request<CardReview>(`/api/catalog/${encodeURIComponent(cardId)}/reviews`, {
