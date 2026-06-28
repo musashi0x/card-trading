@@ -76,6 +76,45 @@ function isLaggingLedgerError(err: unknown): boolean {
   );
 }
 
+/**
+ * Resolve the source account (and thus the sequence number) a contract build
+ * should use. Contract (C…) sources only exist on the RPC, so they read from it
+ * directly. For a classic (G…) source the authoritative sequence lives on
+ * Horizon: a user's classic tx — most notably the one-time trustline a seller
+ * signs right before `create_auction` — is submitted through Horizon, which
+ * reflects the consumed sequence before the Soroban RPC's account view catches
+ * up (the same lag as {@link isLaggingLedgerError} / {@link waitForRpcSequence}).
+ * Reading the source straight from the RPC there can pick up the already-consumed
+ * sequence and be rejected on submit with txBadSeq. So wait for the RPC to catch
+ * up to Horizon, and if it never does, build on Horizon's (newer) sequence.
+ *
+ * Issuer Soroban ops run the other way round — they're submitted via the RPC, so
+ * the RPC is the one that's ahead. There the `>= horizonSeq` check passes on the
+ * first poll and the RPC account is returned unchanged, so this is a no-op for
+ * the issuer flow.
+ */
+async function loadBuildSource(source: string) {
+  if (isContractAddress(source)) return rpcServer.getAccount(source);
+  let horizonAccount;
+  try {
+    horizonAccount = await horizon.loadAccount(source);
+  } catch {
+    // Not indexed by Horizon yet; the RPC is all we have to build on.
+    return rpcServer.getAccount(source);
+  }
+  const horizonSeq = BigInt(horizonAccount.sequenceNumber());
+  for (let i = 0; i < 20; i++) {
+    try {
+      const account = await rpcServer.getAccount(source);
+      if (BigInt(account.sequenceNumber()) >= horizonSeq) return account;
+    } catch {
+      // RPC may not have indexed the account yet; keep polling until it does.
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return horizonAccount;
+}
+
 /** Build, simulate, and assemble a contract-call tx; return unsigned XDR. */
 export async function buildContractTx(source: string, operation: xdr.Operation): Promise<string> {
   // Retry on a lagging-ledger error so the RPC can catch up to the state Horizon
@@ -83,7 +122,7 @@ export async function buildContractTx(source: string, operation: xdr.Operation):
   // account for a current sequence number.
   for (let attempt = 0; ; attempt++) {
     try {
-      const account = await rpcServer.getAccount(source);
+      const account = await loadBuildSource(source);
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
         networkPassphrase: env.stellar.networkPassphrase,
@@ -387,11 +426,38 @@ export async function buildPathPaymentTx(
   return tx.toXDR();
 }
 
+/**
+ * After Horizon accepts a classic tx, the Soroban RPC's account view can still
+ * report the pre-tx sequence for a ledger or two — the same lag documented in
+ * {@link isLaggingLedgerError}. Any contract build that follows reads its source
+ * sequence from the RPC (`buildContractTx` → `getAccount`), so a `buy_now` built
+ * right after a pay-with-asset conversion — or any build after a trustline — can
+ * pick up the already-consumed sequence and be rejected on submit with txBadSeq.
+ * Poll until the RPC reflects the consumed sequence so the next build is fresh.
+ */
+async function waitForRpcSequence(source: string, consumedSeq: bigint): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    try {
+      const account = await rpcServer.getAccount(source);
+      if (BigInt(account.sequenceNumber()) >= consumedSeq) return;
+    } catch {
+      // RPC may not have indexed the account yet; keep polling until it does.
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 /** Submit a wallet-signed classic tx via Horizon (used for trustlines). */
 export async function submitClassicTx(signedXdr: string): Promise<string> {
   const tx = TransactionBuilder.fromXDR(signedXdr, env.stellar.networkPassphrase);
   try {
     const res = await horizon.submitTransaction(tx);
+    // Don't return until the RPC reflects this tx's consumed sequence, so a
+    // follow-on contract build (conversion → buy_now, trustline → settle) reads
+    // a fresh sequence instead of being rejected later with txBadSeq.
+    if ('sequence' in tx) {
+      await waitForRpcSequence(tx.source, BigInt(tx.sequence));
+    }
     return res.hash;
   } catch (err) {
     // Classic trustline txs carry the same 180s window, so an expired or
@@ -429,6 +495,45 @@ export async function getAssetBalance(account: string, asset: Asset): Promise<st
   const bal = findBalance(await balances(account), asset);
   return bal?.balance ?? '0';
 }
+
+/** Get both XLM and USDC balances and trustline status for an account (classic or contract). */
+export async function getAccountBalances(account: string): Promise<{ usdc: string; xlm: string; usdcTrustline: boolean }> {
+  const usdcAsset = new Asset(env.usdc.code, env.usdc.issuer);
+  let usdc = '0';
+  let xlm = '0';
+  let usdcTrustline = false;
+
+  if (isContractAddress(account)) {
+    // Contract accounts are funded via smart contracts directly, they don't need a classic trustline.
+    usdcTrustline = true;
+    try {
+      const stroops = await smartWalletUsdcStroops(account);
+      if (stroops != null) {
+        usdc = (Number(stroops) / 10_000_000).toFixed(7);
+      }
+    } catch (err) {
+      // Contract might not exist or be deployed yet
+    }
+  } else {
+    try {
+      const list = await balances(account);
+      const usdcBal = findBalance(list, usdcAsset);
+      if (usdcBal) {
+        usdc = usdcBal.balance;
+        usdcTrustline = true;
+      }
+      const xlmBal = findBalance(list, Asset.native());
+      if (xlmBal) {
+        xlm = xlmBal.balance;
+      }
+    } catch {
+      // Account doesn't exist on-chain or not funded
+    }
+  }
+
+  return { usdc, xlm, usdcTrustline };
+}
+
 
 /**
  * Filter `cards` down to those `account` actually holds on-chain. "Holding" a

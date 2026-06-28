@@ -4,7 +4,7 @@ import { useEffect, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useTopDeck, PAY_ASSETS, type PayAssetId } from '@/components/topdeck/TopDeckProvider';
 import { type TopCard, money, fmtLeft, fmtAgo, mapBid, rarityMeta, rarityArt, mapRarity, increment } from '@/components/topdeck/lib';
-import { useAuctionBids, useToggleWatch, useWatchlist, useCardReviews, useSubmitCardReview, useDeleteCardReview, useCardComments, usePostCardComment, useDeleteCardComment } from '@/lib/queries';
+import { useAuctionBids, useToggleWatch, useWatchlist, useCardReviews, useCardReviewEligibility, useSubmitCardReview, useDeleteCardReview, useCardComments, usePostCardComment, useDeleteCardComment } from '@/lib/queries';
 import { ReviewForm } from '@/components/topdeck/shared/ReviewForm';
 import { ReviewList } from '@/components/topdeck/shared/ReviewList';
 import { CommentInput } from '@/components/topdeck/shared/CommentInput';
@@ -139,6 +139,9 @@ export default function CardDetailPage() {
   const submitReview = useSubmitCardReview(cardId ?? '', address);
   const deleteReview = useDeleteCardReview(cardId ?? '', address);
   const myReview = reviewsData?.reviews.find((r) => r.authorAddress === address);
+  const { data: eligibility } = useCardReviewEligibility(cardId ?? '', address);
+  // Show the form to wallets that may review (owned/traded the card) or already have one.
+  const canReview = !!myReview || !!eligibility?.eligible;
   const { data: comments = [] } = useCardComments(cardId ?? '');
   const postComment = usePostCardComment(cardId ?? '', address);
   const deleteComment = useDeleteCardComment(cardId ?? '', address);
@@ -158,7 +161,7 @@ export default function CardDetailPage() {
         <div style={{ background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16, padding: '60px 40px', textAlign: 'center' }}>
           <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 24, marginBottom: 16 }}>Listing not found or ended</div>
           <div
-            onClick={td.goHome}
+            onClick={td.goBrowse}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 14, fontWeight: 800, cursor: 'pointer', padding: '10px 20px', background: INK, color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: `2px 2px 0 ${INK}`, fontFamily: DISPLAY }}
           >
             Back to auctions
@@ -202,7 +205,7 @@ export default function CardDetailPage() {
 
   return (
     <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '24px 32px 90px' }}>
-      <div onClick={td.goHome} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 20, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← All auctions</div>
+      <div onClick={td.goBrowse} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 20, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← All auctions</div>
 
       <div className="stack" style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: 40, alignItems: 'start' }}>
         <div className="m-unstick" style={{ position: 'sticky', top: 90 }}>
@@ -267,9 +270,27 @@ export default function CardDetailPage() {
                 <div onClick={st.bidBusy ? undefined : () => td.settleAuction(c.id)} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: st.bidBusy ? 'rgba(26,19,5,.35)' : INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.bidBusy ? 'default' : 'pointer', fontFamily: DISPLAY }}>{st.bidBusy ? 'Settling…' : 'Settle Auction'}</div>
               )}
               {c.buyNow > 0 && (
-                <div onClick={td.buyNow} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer', fontFamily: DISPLAY }}>Buy now · {money(c.buyNow)}</div>
+                <div onClick={st.paying ? undefined : td.buyNow} style={{ flex: 1, textAlign: 'center', fontSize: 15, fontWeight: 800, padding: 15, background: st.paying ? 'rgba(26,19,5,.35)' : '#13c06a', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}>{st.paying ? 'Completing purchase…' : `Buy now · ${money(c.buyNow)}`}</div>
               )}
             </div>
+            {st.payResidual && (
+              <div style={{ marginTop: 12, padding: 14, background: '#fff4e6', border: `2.5px solid ${INK}`, borderRadius: 12 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: INK }}>
+                  {st.payResidual.retry ? 'Settlement didn’t complete' : 'This card was just taken'}
+                </div>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.65)', marginTop: 5 }}>
+                  Your conversion went through — you’re holding ${st.payResidual.usdc} USDC. {st.payResidual.retry
+                    ? 'No need to convert again; you can retry the purchase.'
+                    : 'Apply it to another card whenever you like.'}
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  {st.payResidual.retry && (
+                    <div onClick={st.paying ? undefined : td.retryBuyNow} style={{ flex: 1, textAlign: 'center', fontSize: 13, fontWeight: 800, padding: 11, background: st.paying ? 'rgba(26,19,5,.35)' : '#13c06a', color: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, cursor: st.paying ? 'default' : 'pointer', fontFamily: DISPLAY }}>{st.paying ? 'Retrying…' : 'Retry purchase'}</div>
+                  )}
+                  <div onClick={st.payResidual.retry ? td.dismissResidual : td.goBrowse} style={{ flex: 1, textAlign: 'center', fontSize: 13, fontWeight: 800, padding: 11, background: '#fff', color: INK, border: `2.5px solid ${INK}`, borderRadius: 10, cursor: 'pointer', fontFamily: DISPLAY }}>{st.payResidual.retry ? 'Dismiss' : 'Browse other cards'}</div>
+                </div>
+              </div>
+            )}
             {c.isAuction && c.auctionStatus === 'open' && c.sellerAddress === address && c.bids.length === 0 && apiBids.length === 0 && (
               <div onClick={st.bidBusy ? undefined : () => td.cancelAuction(c.id)} style={{ textAlign: 'center', fontSize: 13, fontWeight: 700, padding: 12, marginTop: 12, background: '#fff', color: INK, border: `2.5px solid ${INK}`, borderRadius: 11, cursor: st.bidBusy ? 'default' : 'pointer' }}>Cancel auction &amp; reclaim card</div>
             )}
@@ -368,7 +389,14 @@ export default function CardDetailPage() {
                   deleting={deleteReview.isPending}
                   now={st.now}
                 />
-                {address ? (
+                {!address ? (
+                  <div
+                    onClick={connect}
+                    style={{ marginTop: 12, padding: '12px 16px', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 10, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)', cursor: 'pointer', textAlign: 'center' }}
+                  >
+                    Connect wallet to leave a review
+                  </div>
+                ) : canReview ? (
                   <ReviewForm
                     onSubmit={(stars, body) =>
                       submitReview.mutate({ authorAddress: address, stars, body: body || null })
@@ -378,10 +406,9 @@ export default function CardDetailPage() {
                   />
                 ) : (
                   <div
-                    onClick={connect}
-                    style={{ marginTop: 12, padding: '12px 16px', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 10, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)', cursor: 'pointer', textAlign: 'center' }}
+                    style={{ marginTop: 12, padding: '12px 16px', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 10, fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)', textAlign: 'center' }}
                   >
-                    Connect wallet to leave a review
+                    Only owners or traders of this card can leave a review
                   </div>
                 )}
               </div>

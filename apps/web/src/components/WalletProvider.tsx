@@ -6,7 +6,7 @@
  * trade action goes through one place.
  */
 
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   Card,
   FulfillmentMode,
@@ -16,7 +16,8 @@ import type {
   TradeAction,
 } from '@cardmkt/shared';
 import { ApiRequestError, api, type ProposeSwapBody, type SwapAction } from '@/lib/api';
-import { connectWallet, signXdr } from '@/lib/wallet';
+import { connectWallet, setActiveWallet, signXdr } from '@/lib/wallet';
+import { clearSession, loadSession, saveSession } from '@/lib/wallet-session';
 import {
   connectPasskey,
   disconnectPasskey,
@@ -120,9 +121,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const connect = useCallback(async () => {
     setConnecting(true);
     try {
-      setAddress(await connectWallet());
+      const { address: addr, walletId } = await connectWallet();
+      setAddress(addr);
       setWalletKind('classic');
       smartWallet.current = null;
+      saveSession({ kind: 'classic', address: addr, walletId });
     } finally {
       setConnecting(false);
     }
@@ -139,6 +142,12 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       smartWallet.current = { contractId: wallet.contractId, keyId: wallet.keyId };
       setAddress(wallet.contractId);
       setWalletKind('passkey');
+      saveSession({
+        kind: 'passkey',
+        address: wallet.contractId,
+        contractId: wallet.contractId,
+        keyId: wallet.keyId,
+      });
       // Fund a freshly created wallet with test USDC (dev only) so the first
       // purchase has funds. Best-effort: the route is testnet-gated and absent
       // in production, so ignore failures.
@@ -160,7 +169,58 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     smartWallet.current = null;
     setWalletKind(null);
     setAddress(null);
+    clearSession();
   }, [walletKind]);
+
+  // Rehydrate a persisted connection on mount so a reload keeps the wallet
+  // connected (up to the session's 1-day TTL). Classic wallets re-point the kit
+  // at the saved wallet so signing still targets it; passkey wallets restore the
+  // smart-wallet handle — the biometric prompt only fires later, on first sign.
+  useEffect(() => {
+    const session = loadSession();
+    if (!session) return;
+    if (session.kind === 'classic') {
+      try {
+        setActiveWallet(session.walletId);
+      } catch (err) {
+        console.warn('[wallet] failed to restore classic session:', (err as Error).message);
+        clearSession();
+        return;
+      }
+      smartWallet.current = null;
+      setAddress(session.address);
+      setWalletKind('classic');
+    } else {
+      smartWallet.current = { contractId: session.contractId, keyId: session.keyId };
+      setAddress(session.address);
+      setWalletKind('passkey');
+    }
+    // Run once on mount; rehydration should not re-fire as state settles.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * If a build failed only because the account lacks a USDC trustline, the API
+   * attaches a ready-to-sign `change_trust` XDR. Sign + submit it and return true
+   * so the caller can retry the original build; return false for any other error
+   * so it propagates. Classic wallets only (passkey accounts manage USDC differently).
+   */
+  const recoverMissingTrustline = useCallback(
+    async (err: unknown): Promise<boolean> => {
+      if (
+        !address ||
+        !(err instanceof ApiRequestError) ||
+        err.code !== 'MISSING_TRUSTLINE' ||
+        typeof err.details?.xdr !== 'string'
+      ) {
+        return false;
+      }
+      const ctSigned = await signXdr(err.details.xdr, address, String(err.details.networkPassphrase));
+      await api.submitClassic(ctSigned);
+      return true;
+    },
+    [address],
+  );
 
   const passkeyBuyNow = useCallback(
     async (listingId: string, contractListingId: number): Promise<string> => {
@@ -225,12 +285,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         return hash;
       }
       if (!address) throw new Error('Connect a wallet first');
-      const built = await api.build('purchase_escrow', { listingId, buyer: address });
+      let built;
+      try {
+        built = await api.build('purchase_escrow', { listingId, buyer: address });
+      } catch (err) {
+        // Missing USDC trustline: establish it from the recovery XDR, then retry.
+        if (!(await recoverMissingTrustline(err))) throw err;
+        built = await api.build('purchase_escrow', { listingId, buyer: address });
+      }
       const signed = await signXdr(built.xdr, address, built.networkPassphrase);
       const { hash } = await api.submit(signed, 'purchase_escrow', built.refId);
       return hash;
     },
-    [address, walletKind],
+    [address, walletKind, recoverMissingTrustline],
   );
 
   /** A participant action on an existing escrow order (classic or passkey). */
@@ -270,12 +337,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const runAction = useCallback(
     async (action: TradeAction, body: Record<string, unknown>): Promise<string> => {
       if (!address) throw new Error('Connect a wallet first');
-      const built = await api.build(action, body);
+      let built;
+      try {
+        built = await api.build(action, body);
+      } catch (err) {
+        // Missing USDC trustline: establish it from the recovery XDR, then retry.
+        if (!(await recoverMissingTrustline(err))) throw err;
+        built = await api.build(action, body);
+      }
       const signed = await signXdr(built.xdr, address, built.networkPassphrase);
       const { hash } = await api.submit(signed, action, built.refId);
       return hash;
     },
-    [address],
+    [address, recoverMissingTrustline],
   );
 
   /** Sign + submit a classic changeTrust so the buyer can receive a card. */
@@ -355,28 +429,15 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       try {
         built = await api.pathPayment(buildBody);
       } catch (err) {
-        // Missing USDC trustline: sign the returned change_trust, then retry.
-        if (
-          err instanceof ApiRequestError &&
-          err.code === 'MISSING_TRUSTLINE' &&
-          typeof err.details?.xdr === 'string'
-        ) {
-          const ctSigned = await signXdr(
-            err.details.xdr,
-            address,
-            String(err.details.networkPassphrase),
-          );
-          await api.submitClassic(ctSigned);
-          built = await api.pathPayment(buildBody);
-        } else {
-          throw err;
-        }
+        // Missing USDC trustline: establish it from the recovery XDR, then retry.
+        if (!(await recoverMissingTrustline(err))) throw err;
+        built = await api.pathPayment(buildBody);
       }
       const signed = await signXdr(built.xdr, address, built.networkPassphrase);
       const { hash } = await api.submitClassic(signed);
       return hash;
     },
-    [address],
+    [address, recoverMissingTrustline],
   );
 
   const value = useMemo(

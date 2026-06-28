@@ -9,6 +9,7 @@
 import { Router } from 'express';
 import { desc, eq, or } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
+import { sweepAbandonedOrders } from '../data/orders.js';
 
 export const ordersRouter: Router = Router();
 
@@ -62,6 +63,9 @@ ordersRouter.get('/', async (req, res, next) => {
       res.status(400).json({ error: 'Invalid or missing account', code: 'INVALID_ACCOUNT' });
       return;
     }
+    // Clear abandoned pre-inserted orders so the buyer's list never shows a
+    // permanently `funded` row that has no on-chain counterpart.
+    await sweepAbandonedOrders();
     const rows = await db
       .select(orderSelect)
       .from(orders)

@@ -48,6 +48,7 @@ export function WalletMenu({ address }: { address: string }) {
             {action(copied ? '✓ Copied' : 'Copy', td.copyAddress)}
             {action('Explorer ↗', () => window.open(td.explorerAddress(address), '_blank', 'noopener,noreferrer'))}
           </div>
+          {action('USDC Faucet', td.goFaucet)}
           {action('Disconnect', td.disconnectWallet, true)}
         </div>
       </div>
