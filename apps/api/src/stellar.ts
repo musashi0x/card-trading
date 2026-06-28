@@ -387,11 +387,38 @@ export async function buildPathPaymentTx(
   return tx.toXDR();
 }
 
+/**
+ * After Horizon accepts a classic tx, the Soroban RPC's account view can still
+ * report the pre-tx sequence for a ledger or two — the same lag documented in
+ * {@link isLaggingLedgerError}. Any contract build that follows reads its source
+ * sequence from the RPC (`buildContractTx` → `getAccount`), so a `buy_now` built
+ * right after a pay-with-asset conversion — or any build after a trustline — can
+ * pick up the already-consumed sequence and be rejected on submit with txBadSeq.
+ * Poll until the RPC reflects the consumed sequence so the next build is fresh.
+ */
+async function waitForRpcSequence(source: string, consumedSeq: bigint): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    try {
+      const account = await rpcServer.getAccount(source);
+      if (BigInt(account.sequenceNumber()) >= consumedSeq) return;
+    } catch {
+      // RPC may not have indexed the account yet; keep polling until it does.
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 /** Submit a wallet-signed classic tx via Horizon (used for trustlines). */
 export async function submitClassicTx(signedXdr: string): Promise<string> {
   const tx = TransactionBuilder.fromXDR(signedXdr, env.stellar.networkPassphrase);
   try {
     const res = await horizon.submitTransaction(tx);
+    // Don't return until the RPC reflects this tx's consumed sequence, so a
+    // follow-on contract build (conversion → buy_now, trustline → settle) reads
+    // a fresh sequence instead of being rejected later with txBadSeq.
+    if ('sequence' in tx) {
+      await waitForRpcSequence(tx.source, BigInt(tx.sequence));
+    }
     return res.hash;
   } catch (err) {
     // Classic trustline txs carry the same 180s window, so an expired or

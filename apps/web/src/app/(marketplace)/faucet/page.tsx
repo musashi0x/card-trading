@@ -291,7 +291,7 @@ export default function FaucetPage() {
                   Successfully credited to {shorten(successTx.address)}.
                 </div>
                 <a
-                  href={td.explorerAddress(successTx.hash)}
+                  href={td.explorerTx(successTx.hash)}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{ display: 'inline-block', fontSize: 12, fontWeight: 700, color: '#2d5bff', textDecoration: 'underline', marginTop: 8 }}

@@ -6,7 +6,7 @@
  * trade action goes through one place.
  */
 
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   Card,
   FulfillmentMode,
@@ -16,7 +16,8 @@ import type {
   TradeAction,
 } from '@cardmkt/shared';
 import { ApiRequestError, api, type ProposeSwapBody, type SwapAction } from '@/lib/api';
-import { connectWallet, signXdr } from '@/lib/wallet';
+import { connectWallet, setActiveWallet, signXdr } from '@/lib/wallet';
+import { clearSession, loadSession, saveSession } from '@/lib/wallet-session';
 import {
   connectPasskey,
   disconnectPasskey,
@@ -120,9 +121,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const connect = useCallback(async () => {
     setConnecting(true);
     try {
-      setAddress(await connectWallet());
+      const { address: addr, walletId } = await connectWallet();
+      setAddress(addr);
       setWalletKind('classic');
       smartWallet.current = null;
+      saveSession({ kind: 'classic', address: addr, walletId });
     } finally {
       setConnecting(false);
     }
@@ -139,6 +142,12 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       smartWallet.current = { contractId: wallet.contractId, keyId: wallet.keyId };
       setAddress(wallet.contractId);
       setWalletKind('passkey');
+      saveSession({
+        kind: 'passkey',
+        address: wallet.contractId,
+        contractId: wallet.contractId,
+        keyId: wallet.keyId,
+      });
       // Fund a freshly created wallet with test USDC (dev only) so the first
       // purchase has funds. Best-effort: the route is testnet-gated and absent
       // in production, so ignore failures.
@@ -160,7 +169,35 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     smartWallet.current = null;
     setWalletKind(null);
     setAddress(null);
+    clearSession();
   }, [walletKind]);
+
+  // Rehydrate a persisted connection on mount so a reload keeps the wallet
+  // connected (up to the session's 1-day TTL). Classic wallets re-point the kit
+  // at the saved wallet so signing still targets it; passkey wallets restore the
+  // smart-wallet handle — the biometric prompt only fires later, on first sign.
+  useEffect(() => {
+    const session = loadSession();
+    if (!session) return;
+    if (session.kind === 'classic') {
+      try {
+        setActiveWallet(session.walletId);
+      } catch (err) {
+        console.warn('[wallet] failed to restore classic session:', (err as Error).message);
+        clearSession();
+        return;
+      }
+      smartWallet.current = null;
+      setAddress(session.address);
+      setWalletKind('classic');
+    } else {
+      smartWallet.current = { contractId: session.contractId, keyId: session.keyId };
+      setAddress(session.address);
+      setWalletKind('passkey');
+    }
+    // Run once on mount; rehydration should not re-fire as state settles.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * If a build failed only because the account lacks a USDC trustline, the API

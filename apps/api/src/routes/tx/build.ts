@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import type { Asset } from '@stellar/stellar-sdk';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 import {
@@ -78,6 +79,28 @@ async function requireUsdcBalance(account: string, amount: string): Promise<void
   await requireBalance(account, usdc, amount);
 }
 
+/**
+ * Ensure a buyer/bidder trusts the card asset so settlement can deliver the card
+ * to them. Like {@link requireUsdcBalance}, when the trustline is missing, attach
+ * a ready-to-sign `change_trust` XDR to the `MISSING_TRUSTLINE` error so the
+ * client can establish it and retry in one flow. The account is the same one that
+ * signs the build, so it can self-heal — unlike a counterparty's trustline.
+ */
+async function requireBuyerCardTrustline(account: string, asset: Asset): Promise<void> {
+  if (await hasTrustline(account, asset)) return;
+  const xdr = await buildChangeTrustTx(account, asset);
+  throw new PreflightError(
+    `Account must establish a trustline to ${asset.getCode()} before this action`,
+    'MISSING_TRUSTLINE',
+    {
+      assetCode: asset.getCode(),
+      assetIssuer: asset.getIssuer(),
+      xdr,
+      networkPassphrase: env.stellar.networkPassphrase,
+    },
+  );
+}
+
 // --- build: list ---
 buildRouter.post('/list', async (req, res, next) => {
   try {
@@ -137,7 +160,7 @@ buildRouter.post('/make-offer', async (req, res, next) => {
     const cid = needContractId(listing.contractListingId, 'Listing');
     // Buyer needs USDC to escrow now, and a card trustline so settlement can deliver.
     await requireUsdcBalance(input.buyer, input.amountUsdc);
-    await requireTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
+    await requireBuyerCardTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
 
     const op = contract.makeOffer(input.buyer, cid, toStroops(input.amountUsdc));
     const xdr = await buildContractTx(input.buyer, op);
@@ -198,7 +221,7 @@ buildRouter.post('/buy-now', async (req, res, next) => {
     const { listing, card } = await listingsRepo.requireOpenListing(input.listingId);
     const cid = needContractId(listing.contractListingId, 'Listing');
     await requireUsdcBalance(input.buyer, listing.priceUsdc);
-    await requireTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
+    await requireBuyerCardTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
     // If a royalty will be paid, the creator must be able to receive the USDC.
     await requireCreatorTrustline(card, listing.seller);
 
@@ -225,7 +248,7 @@ buildRouter.post('/purchase-escrow', async (req, res, next) => {
     // Buyer needs the asking price in USDC and a card trustline so the card can
     // be delivered on release; a royalty payee must be able to receive USDC too.
     await requireUsdcBalance(input.buyer, listing.priceUsdc);
-    await requireTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
+    await requireBuyerCardTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
     await requireCreatorTrustline(card, listing.seller);
 
     const op = contract.purchaseEscrow(input.buyer, cid);
@@ -396,7 +419,7 @@ buildRouter.post('/place-bid', async (req, res, next) => {
     }
     // Bidder needs the USDC to escrow now, and a card trustline so settlement can deliver.
     await requireUsdcBalance(input.bidder, input.amountUsdc);
-    await requireTrustline(input.bidder, cardAsset(card.assetCode, card.issuer));
+    await requireBuyerCardTrustline(input.bidder, cardAsset(card.assetCode, card.issuer));
 
     const op = contract.placeBid(input.bidder, cid, toStroops(input.amountUsdc));
     const xdr = await buildContractTx(input.bidder, op);

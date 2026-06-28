@@ -26,16 +26,22 @@ function getKit(): StellarWalletsKit {
   return kit;
 }
 
-/** Open the wallet picker and return the chosen address. */
-export async function connectWallet(): Promise<string> {
+/** A connected classic wallet: its address plus the kit's wallet id (for reconnect). */
+export interface ClassicConnection {
+  address: string;
+  walletId: string;
+}
+
+/** Open the wallet picker and return the chosen address and wallet id. */
+export async function connectWallet(): Promise<ClassicConnection> {
   const k = getKit();
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<ClassicConnection>((resolve, reject) => {
     k.openModal({
       onWalletSelected: async (option) => {
         try {
           k.setWallet(option.id);
           const { address } = await k.getAddress();
-          resolve(address);
+          resolve({ address, walletId: option.id });
         } catch (err) {
           reject(err);
         }
@@ -43,6 +49,15 @@ export async function connectWallet(): Promise<string> {
       onClosed: () => reject(new Error('Wallet selection cancelled')),
     });
   });
+}
+
+/**
+ * Re-point the kit at a previously selected wallet without opening the picker.
+ * Used to rehydrate a persisted session on reload so signing targets the same
+ * wallet the user originally connected.
+ */
+export function setActiveWallet(walletId: string): void {
+  getKit().setWallet(walletId);
 }
 
 /** Sign an unsigned transaction XDR with the connected wallet. */
