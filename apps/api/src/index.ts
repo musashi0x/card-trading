@@ -36,7 +36,7 @@ const app = express();
 // are multiple proxy hops.)
 app.set('trust proxy', 1);
 
-app.use(cors({ origin: env.webOrigin }));
+app.use(cors({ origin: env.webOrigins }));
 // Generous limit so a card's uploaded photo can ride along as a data URL.
 app.use(express.json({ limit: '10mb' }));
 

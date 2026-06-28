@@ -54,7 +54,15 @@ export const env = {
   feeBps: Number(process.env.FEE_BPS ?? 200),
   /** Default slippage tolerance (bps) baked into a pay-with-any-asset `sendMax`. */
   pathPaymentSlippageBps: Number(process.env.PATH_PAYMENT_SLIPPAGE_BPS ?? 50),
-  webOrigin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
+  /**
+   * Allowed browser origins for CORS. Accepts a comma-separated list so the
+   * Railway-provided domain and any custom domains can be permitted together
+   * (e.g. "https://app.example.com,https://web-production.up.railway.app").
+   */
+  webOrigins: (process.env.WEB_ORIGIN ?? 'http://localhost:3000')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
   /**
    * Passkey smart-wallet config. The relay (OpenZeppelin Channels by default,
    * Launchtube as the legacy fallback) sponsors fees so consumers need no XLM.
