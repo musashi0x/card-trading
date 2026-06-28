@@ -177,6 +177,13 @@ export interface TopDeckState {
   quoteErr: string | null;
   paying: boolean;
   payErr: string | null;
+  /**
+   * Set when a pay-with-any-asset conversion confirmed but the `buy_now`
+   * settlement did not. The buyer holds `usdc` already; `retry` is true when the
+   * failure was transient (same listing still buyable) and false when terminal
+   * (listing gone — apply the USDC elsewhere). `cardId`/`listingId` anchor a retry.
+   */
+  payResidual: { usdc: string; cardId: string; listingId: string; retry: boolean } | null;
   walletMenuOpen: boolean;
   navMenuOpen: boolean;
   filtersOpen: boolean;
@@ -196,7 +203,7 @@ function makeInitialState(seed: TopCard[]): TopDeckState {
     cards: seed,
     refreshing: false,
     payAsset: 'USDC', quote: null, quoting: false, quoteErr: null,
-    paying: false, payErr: null,
+    paying: false, payErr: null, payResidual: null,
     orderBusy: null, ordersArbiter: false,
     walletMenuOpen: false, navMenuOpen: false, filtersOpen: false, addressCopied: false,
     guideOpen: false,
@@ -219,6 +226,7 @@ export interface TopDeckContext {
   // navigation
   open: (id: string) => void;
   goHome: () => void;
+  goBrowse: () => void;
   goMyBids: () => void;
   goSell: () => void;
   goLeaderboard: () => void;
@@ -267,6 +275,10 @@ export interface TopDeckContext {
   buyNow: () => Promise<void>;
   payWithPasskey: () => Promise<void>;
   escrowBuy: () => Promise<void>;
+  /** Retry the settlement after a transient post-conversion failure (no re-convert). */
+  retryBuyNow: () => Promise<void>;
+  /** Dismiss the residual-USDC notice after a post-conversion failure. */
+  dismissResidual: () => void;
 
   // orders
   doOrderAction: (action: OrderAction, o: OrderWithCard) => Promise<void>;
@@ -402,6 +414,7 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     router.push(`/card/${id}`);
   };
   const goHome = () => router.push('/');
+  const goBrowse = () => router.push('/browse');
   const goMyBids = () => router.push('/my-bids');
   const goSell = () => {
     setState({ sellStep: 1, mintedCard: null });
@@ -455,8 +468,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
   // ----- search -----
   const setQuery = (e: ChangeEvent<HTMLInputElement>) => {
     setState({ page: 1, query: e.target.value });
-    // Typing in search from a detail/sell screen jumps back to the grid.
-    if (pathname.startsWith('/card/') || pathname === '/sell') router.push('/');
+    // Typing in search from another screen jumps back to the browse grid.
+    if (pathname.startsWith('/card/') || pathname === '/sell' || pathname === '/') {
+      router.push('/browse');
+    }
   };
   const clearQuery = () => setState({ page: 1, query: '' });
 
@@ -618,6 +633,23 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
       });
   };
 
+  /** Message for a failed buy/settlement attempt. */
+  const buyError = (err: unknown) =>
+    err instanceof ApiRequestError ? err.message : 'Purchase failed — try again';
+
+  /**
+   * A settlement failure is terminal for THIS listing (no point retrying) when
+   * the listing is closed or the contract rejected it as un-buyable; anything
+   * else (network, RPC) is transient and safe to retry without re-converting.
+   */
+  const isTerminalBuyError = (err: unknown) =>
+    err instanceof ApiRequestError &&
+    (err.code === 'LISTING_CLOSED' || /NotOpen|SelfTrade|WrongFulfillment/i.test(err.message));
+
+  /** Build → sign → submit a real `buy_now` settlement for a card. */
+  const settleBuyNow = (listingId: string, buyer: string) =>
+    wallet.runAction('buy_now', { listingId, buyer });
+
   const buyNow = async () => {
     const c = getCard(ref.current.selectedId);
     if (!c) return;
@@ -628,29 +660,112 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
       connect();
       return;
     }
-
+    // Only a real, contract-backed digital listing can settle on-chain.
+    if (!c.real || c.contractListingId == null || !c.listingId) {
+      showToast('This listing is not available to buy', 'outbid');
+      return;
+    }
+    const listingId = c.listingId;
     const def = PAY_ASSETS.find((a) => a.id === ref.current.payAsset);
+    setState({ paying: true, payErr: null, payResidual: null });
+
+    // USDC: settle directly, no conversion.
     if (!def?.asset) {
-      setState((s) => ({ status: { ...s.status, [c.id]: 'won' } }));
-      showToast('Purchased! ' + c.name + ' is yours 🎉', 'win');
+      try {
+        const hash = await settleBuyNow(listingId, address);
+        setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, paying: false, lastHash: hash }));
+        showToast(`Purchased! ${c.name} is yours 🎉`, 'win');
+      } catch (err) {
+        const msg = buyError(err);
+        setState({ paying: false, payErr: msg });
+        showToast(msg, 'outbid');
+      }
       return;
     }
 
+    // Non-USDC: recheck open → convert (irreversible) → settle.
     const quote = ref.current.quote;
     if (!quote) {
+      setState({ paying: false });
       showToast('Fetching a quote — try again in a moment', 'outbid');
       return;
     }
-    setState({ quoting: true, quoteErr: null });
+    try {
+      const fresh = await api.listing(listingId);
+      if (fresh.status !== 'open') {
+        setState({ paying: false, payErr: 'This card is no longer available' });
+        showToast('This card was just bought by someone else', 'outbid');
+        return;
+      }
+    } catch {
+      setState({ paying: false, payErr: 'Could not verify the listing — try again' });
+      showToast('Could not verify the listing — try again', 'outbid');
+      return;
+    }
+
+    // The conversion is irreversible once it confirms; a failure here spends nothing.
     try {
       await payWithAsset(quote);
-      setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, quoting: false }));
+    } catch (err) {
+      const msg = buyError(err);
+      setState({ paying: false, payErr: msg });
+      showToast(msg, 'outbid');
+      return;
+    }
+
+    // Settlement leg — failures here are AFTER the buyer has already paid in USDC.
+    try {
+      const hash = await settleBuyNow(listingId, address);
+      setState((s) => ({ status: { ...s.status, [c.id]: 'won' }, paying: false, lastHash: hash }));
       showToast(`Paid with ${def.label} — ${c.name} is yours 🎉`, 'win');
     } catch (err) {
-      setState({ quoting: false, quoteErr: quoteError(err) });
-      showToast(quoteError(err), 'outbid');
+      const retry = !isTerminalBuyError(err);
+      setState({
+        paying: false,
+        payErr: buyError(err),
+        payResidual: { usdc: quote.destUsdc, cardId: c.id, listingId, retry },
+      });
+      showToast(
+        retry
+          ? 'Settlement failed — your USDC is safe, you can retry'
+          : 'That card was taken — your converted USDC is in your wallet',
+        'outbid',
+      );
     }
   };
+
+  /** Retry settlement after a transient post-conversion failure — no re-convert. */
+  const retryBuyNow = async () => {
+    const res = ref.current.payResidual;
+    const { address } = wallet;
+    if (!res || !address) return;
+    setState({ paying: true, payErr: null });
+    try {
+      const hash = await settleBuyNow(res.listingId, address);
+      setState((s) => ({
+        status: { ...s.status, [res.cardId]: 'won' },
+        paying: false,
+        payResidual: null,
+        lastHash: hash,
+      }));
+      showToast('Settled — the card is yours 🎉', 'win');
+    } catch (err) {
+      const retry = !isTerminalBuyError(err);
+      setState((s) => ({
+        paying: false,
+        payErr: buyError(err),
+        payResidual: s.payResidual ? { ...s.payResidual, retry } : null,
+      }));
+      showToast(
+        retry
+          ? 'Still failing — your USDC is safe, try again shortly'
+          : 'That card was taken — your USDC remains in your wallet',
+        'outbid',
+      );
+    }
+  };
+
+  const dismissResidual = () => setState({ payResidual: null, payErr: null });
 
   const payWithPasskey = async () => {
     const c = getCard(ref.current.selectedId);
@@ -930,13 +1045,13 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     explorerTx,
     explorerAddress: explorerAccount,
     getCard,
-    open, goHome, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goTrades, goProfile, goStore, openOrders, openGuide, closeGuide, viewCard,
+    open, goHome, goBrowse, goMyBids, goSell, goLeaderboard, goPortfolio, goTrade, goTrades, goProfile, goStore, openOrders, openGuide, closeGuide, viewCard,
     refresh,
     setPage, toggleCat, toggleRarity, toggleFlag, setPrice, setSort, clearFilters, setQuery, clearQuery,
     toggleFilters, closeFilters,
     setMyBidsTab,
     openBid, openBidFor, closeBid, onBidInput, setBid, placeBid, settleAuction, cancelAuction,
-    selectPayAsset, buyNow, payWithPasskey, escrowBuy,
+    selectPayAsset, buyNow, payWithPasskey, escrowBuy, retryBuyNow, dismissResidual,
     doOrderAction, resolveDispute, setOrdersArbiter,
     setSellMode, setForm, readImageFile, onPickImage, onDropImage, setDragOver, selectCatalogCard,
     sellNext, sellBack, listAnother, publishListing,

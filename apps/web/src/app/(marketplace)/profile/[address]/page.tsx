@@ -21,7 +21,7 @@ export default function SellerStorePage() {
       <div className="m-pad" style={{ maxWidth: 1080, margin: '0 auto', padding: '60px 32px 90px' }}>
         <div style={{ textAlign: 'center', background: '#fff', border: `3px dashed ${INK}`, borderRadius: 16, padding: '60px 40px' }}>
           <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 24 }}>Store not found</div>
-          <div onClick={td.goHome} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 24px', background: INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Back to auctions</div>
+          <div onClick={td.goBrowse} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '12px 24px', background: INK, color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Back to auctions</div>
         </div>
       </div>
     );

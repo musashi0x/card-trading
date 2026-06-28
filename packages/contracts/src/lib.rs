@@ -25,8 +25,8 @@
 //! Cards and USDC are both SAC tokens, moved through the standard token client.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, Env,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    Env, Symbol, Vec,
 };
 
 /// One card unit, in stroops (classic assets use 7 decimals).
@@ -304,6 +304,19 @@ impl Marketplace {
         env.events().publish((Symbol::new(&env, "paused"),), paused);
     }
 
+    /// Admin swaps the contract's code for a freshly uploaded WASM, keeping this
+    /// contract id and all of its stored state (listings, offers, orders,
+    /// auctions, royalties). `new_wasm_hash` is the sha-256 hash returned by
+    /// `stellar contract upload`. This is how new entrypoints (e.g. a feature
+    /// added after the original deploy) reach an already-live contract without a
+    /// state-losing redeploy. The new code must keep `DataKey` layout compatible.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        require_init(&env);
+        admin(&env).require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish((Symbol::new(&env, "upgraded"),), ());
+    }
+
     // --- royalty registry ---
 
     /// Admin registers (or updates) the creator royalty for a card. Rejected if
@@ -337,7 +350,13 @@ impl Marketplace {
 
     /// Seller locks one card into escrow at `price` (USDC stroops) under the
     /// given `fulfillment` mode (0 = digital, 1 = physical). Returns the listing id.
-    pub fn list(env: Env, seller: Address, card_token: Address, price: i128, fulfillment: u32) -> u32 {
+    pub fn list(
+        env: Env,
+        seller: Address,
+        card_token: Address,
+        price: i128,
+        fulfillment: u32,
+    ) -> u32 {
         require_init(&env);
         require_not_paused(&env);
         seller.require_auth();
@@ -378,8 +397,10 @@ impl Marketplace {
         };
         put_listing(&env, id, &listing);
 
-        env.events()
-            .publish((Symbol::new(&env, "list"), id), (seller, price, fulfillment));
+        env.events().publish(
+            (Symbol::new(&env, "list"), id),
+            (seller, price, fulfillment),
+        );
         id
     }
 
@@ -907,10 +928,8 @@ impl Marketplace {
         }
         usdc(&env).transfer(&env.current_contract_address(), &bidder, &amount);
         set_bid(&env, auction_id, &bidder, 0);
-        env.events().publish(
-            (Symbol::new(&env, "refund"), auction_id),
-            (bidder, amount),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "refund"), auction_id), (bidder, amount));
     }
 
     // --- barter swap: propose / execute / cancel / decline ---
@@ -995,7 +1014,11 @@ impl Marketplace {
         }
         // Proposer's escrowed give-side cards are released to the counterparty.
         for token_addr in proposal.give_tokens.iter() {
-            token::TokenClient::new(&env, &token_addr).transfer(&contract, &counterparty, &ONE_CARD);
+            token::TokenClient::new(&env, &token_addr).transfer(
+                &contract,
+                &counterparty,
+                &ONE_CARD,
+            );
         }
         // USDC sweetener (if any): fee to platform, remainder to the counterparty.
         // Pure card-for-card swaps move no USDC and carry no fee.
@@ -1161,7 +1184,13 @@ fn release_order(env: &Env, order_id: u32, order: &mut Order) {
     put_order(env, order_id, order);
     env.events().publish(
         (Symbol::new(env, "release"), order_id),
-        (order.buyer.clone(), order.seller.clone(), order.amount, fee, royalty),
+        (
+            order.buyer.clone(),
+            order.seller.clone(),
+            order.amount,
+            fee,
+            royalty,
+        ),
     );
 }
 
@@ -1225,7 +1254,11 @@ fn settle_funds(
 fn refund_to_buyer(env: &Env, listing: &Listing, buyer: &Address, amount: i128) {
     let contract = env.current_contract_address();
     usdc(env).transfer(&contract, buyer, &amount);
-    token::TokenClient::new(env, &listing.card_token).transfer(&contract, &listing.seller, &ONE_CARD);
+    token::TokenClient::new(env, &listing.card_token).transfer(
+        &contract,
+        &listing.seller,
+        &ONE_CARD,
+    );
 }
 
 fn usdc(env: &Env) -> token::TokenClient<'_> {

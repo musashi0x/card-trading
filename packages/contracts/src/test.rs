@@ -54,7 +54,14 @@ fn setup() -> Fixture {
 
     let contract_id = env.register(Marketplace, ());
     let client = MarketplaceClient::new(&env, &contract_id);
-    client.init(&admin, &platform, &arbiter, &usdc, &FEE_BPS, &MAX_ROYALTY_BPS);
+    client.init(
+        &admin,
+        &platform,
+        &arbiter,
+        &usdc,
+        &FEE_BPS,
+        &MAX_ROYALTY_BPS,
+    );
 
     Fixture {
         card_token: token::TokenClient::new(&env, &card),
@@ -331,7 +338,11 @@ fn physical_purchase_then_confirm_releases_to_seller() {
 
     let order_id = f.client.purchase_escrow(&f.buyer, &listing_id);
     // Funds locked in custody; card still in custody (not yet delivered).
-    assert_eq!(f.usdc_token.balance(&f.client.address), price, "USDC escrowed");
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        price,
+        "USDC escrowed"
+    );
     assert_eq!(
         f.card_token.balance(&f.buyer),
         0,
@@ -387,7 +398,11 @@ fn dispute_then_resolve_refund_returns_funds_and_card() {
     // Arbiter rules for the buyer: full refund, card back to seller.
     f.client.resolve(&order_id, &true);
 
-    assert_eq!(f.usdc_token.balance(&f.buyer), before, "buyer fully refunded");
+    assert_eq!(
+        f.usdc_token.balance(&f.buyer),
+        before,
+        "buyer fully refunded"
+    );
     assert_eq!(f.usdc_token.balance(&f.seller), 0, "seller paid nothing");
     assert_eq!(
         f.card_token.balance(&f.seller),
@@ -481,7 +496,9 @@ fn paused_blocks_new_trades_but_allows_exits() {
 
     f.client.set_paused(&true);
     // New trades blocked.
-    let l2 = f.client.try_list(&f.seller, &f.card, &(10 * USDC), &DIGITAL);
+    let l2 = f
+        .client
+        .try_list(&f.seller, &f.card, &(10 * USDC), &DIGITAL);
     assert!(l2.is_err(), "listing blocked while paused");
     // Exit path still works: buyer can confirm and drain the escrow.
     f.client.confirm_receipt(&f.buyer, &order_id);
@@ -513,7 +530,11 @@ fn test_create_auction_success() {
         .create_auction(&f.seller, &f.card, &(10 * USDC), &(20 * USDC), &3600);
 
     // Card escrowed, auction recorded open with no bids.
-    assert_eq!(f.card_token.balance(&f.client.address), ONE_CARD, "card escrowed");
+    assert_eq!(
+        f.card_token.balance(&f.client.address),
+        ONE_CARD,
+        "card escrowed"
+    );
     assert_eq!(f.card_token.balance(&f.seller), before - ONE_CARD);
     let auction = f.client.get_auction_view(&id);
     assert_eq!(auction.status, AUCTION_OPEN);
@@ -530,7 +551,10 @@ fn test_create_auction_no_card() {
     let res = f
         .client
         .try_create_auction(&stranger, &f.card, &(10 * USDC), &(20 * USDC), &3600);
-    assert!(res.is_err(), "seller without the card cannot create an auction");
+    assert!(
+        res.is_err(),
+        "seller without the card cannot create an auction"
+    );
 }
 
 #[test]
@@ -543,8 +567,16 @@ fn test_place_bid_first() {
     let before = f.usdc_token.balance(&f.buyer);
     f.client.place_bid(&f.buyer, &id, &(15 * USDC));
 
-    assert_eq!(f.usdc_token.balance(&f.buyer), before - 15 * USDC, "bid escrowed from bidder");
-    assert_eq!(f.usdc_token.balance(&f.client.address), 15 * USDC, "USDC in custody");
+    assert_eq!(
+        f.usdc_token.balance(&f.buyer),
+        before - 15 * USDC,
+        "bid escrowed from bidder"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        15 * USDC,
+        "USDC in custody"
+    );
     let auction = f.client.get_auction_view(&id);
     assert_eq!(auction.high_bid, 15 * USDC);
     assert_eq!(auction.high_bidder, Some(f.buyer.clone()));
@@ -563,8 +595,16 @@ fn test_place_bid_outbid() {
     f.client.place_bid(&bidder2, &id, &(20 * USDC));
 
     // Previous high bidder refunded in full; only the new bid sits in custody.
-    assert_eq!(f.usdc_token.balance(&f.buyer), b1_before, "previous bidder refunded");
-    assert_eq!(f.usdc_token.balance(&f.client.address), 20 * USDC, "only new bid escrowed");
+    assert_eq!(
+        f.usdc_token.balance(&f.buyer),
+        b1_before,
+        "previous bidder refunded"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        20 * USDC,
+        "only new bid escrowed"
+    );
     let auction = f.client.get_auction_view(&id);
     assert_eq!(auction.high_bid, 20 * USDC);
     assert_eq!(auction.high_bidder, Some(bidder2));
@@ -591,7 +631,9 @@ fn test_place_bid_self_trade() {
         .client
         .create_auction(&f.seller, &f.card, &(10 * USDC), &(10 * USDC), &3600);
     assert!(
-        f.client.try_place_bid(&f.seller, &id, &(15 * USDC)).is_err(),
+        f.client
+            .try_place_bid(&f.seller, &id, &(15 * USDC))
+            .is_err(),
         "seller cannot bid on their own auction"
     );
 }
@@ -646,7 +688,11 @@ fn test_settle_auction_winner() {
     let fee = bid * (FEE_BPS as i128) / 10_000;
     let royalty = bid * (ROYALTY_BPS as i128) / 10_000;
     assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD, "winner gets card");
-    assert_eq!(f.usdc_token.balance(&f.seller), bid - fee - royalty, "seller net");
+    assert_eq!(
+        f.usdc_token.balance(&f.seller),
+        bid - fee - royalty,
+        "seller net"
+    );
     assert_eq!(f.usdc_token.balance(&f.platform), fee, "platform fee");
     assert_eq!(f.usdc_token.balance(&f.creator), royalty, "creator royalty");
     assert_eq!(f.usdc_token.balance(&f.client.address), 0, "escrow drained");
@@ -669,7 +715,11 @@ fn test_settle_auction_no_reserve() {
         .set_timestamp(f.client.get_auction_view(&id).ends_at + 1);
     f.client.settle_auction(&id);
 
-    assert_eq!(f.card_token.balance(&f.seller), seller_card_before, "card returned to seller");
+    assert_eq!(
+        f.card_token.balance(&f.seller),
+        seller_card_before,
+        "card returned to seller"
+    );
     assert_eq!(f.usdc_token.balance(&f.buyer), buyer_before, "bid refunded");
     assert_eq!(f.usdc_token.balance(&f.client.address), 0, "escrow drained");
     assert_eq!(f.client.get_auction_view(&id).status, AUCTION_NO_WINNER);
@@ -726,7 +776,11 @@ fn test_claim_refund() {
     f.client.place_bid(&bidder2, &id, &(20 * USDC));
     // Auto-refund already returned the funds, so a claim is a safe no-op.
     f.client.claim_refund(&f.buyer, &id);
-    assert_eq!(f.usdc_token.balance(&f.buyer), b1_before, "balance whole, claim is a no-op");
+    assert_eq!(
+        f.usdc_token.balance(&f.buyer),
+        b1_before,
+        "balance whole, claim is a no-op"
+    );
 
     // The current high bidder cannot claim while the auction is still open.
     assert!(
@@ -765,7 +819,11 @@ fn test_propose_swap_locks_cards() {
     let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &0);
 
     // Alice's give-side card moved into contract custody.
-    assert_eq!(f.card_token.balance(&f.client.address), ONE_CARD, "card escrowed");
+    assert_eq!(
+        f.card_token.balance(&f.client.address),
+        ONE_CARD,
+        "card escrowed"
+    );
     assert_eq!(f.card_token.balance(&f.seller), seller_before - ONE_CARD);
 
     let view = f.client.get_swap_view(&id);
@@ -789,7 +847,9 @@ fn test_execute_swap_atomic() {
     let give = vec![&f.env, f.card.clone()];
     let get = vec![&f.env, card_b.clone()];
     let buyer_usdc_before = f.usdc_token.balance(&f.buyer);
-    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &sweetener);
+    let id = f
+        .client
+        .propose_swap(&f.seller, &f.buyer, &give, &get, &sweetener);
 
     // Custody holds Alice's card + her sweetener until Bob accepts.
     assert_eq!(f.card_token.balance(&f.client.address), ONE_CARD);
@@ -798,9 +858,17 @@ fn test_execute_swap_atomic() {
     f.client.execute_swap(&f.buyer, &id);
 
     let fee = sweetener * (FEE_BPS as i128) / 10_000; // 2 USDC
-    // Cards crossed: Bob gets card A, Alice gets card B.
-    assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD, "Bob receives card A");
-    assert_eq!(card_b_token.balance(&f.seller), ONE_CARD, "Alice receives card B");
+                                                      // Cards crossed: Bob gets card A, Alice gets card B.
+    assert_eq!(
+        f.card_token.balance(&f.buyer),
+        ONE_CARD,
+        "Bob receives card A"
+    );
+    assert_eq!(
+        card_b_token.balance(&f.seller),
+        ONE_CARD,
+        "Alice receives card B"
+    );
     // USDC sweetener split: platform fee + remainder to Bob.
     assert_eq!(f.usdc_token.balance(&f.platform), fee, "platform fee");
     assert_eq!(
@@ -826,10 +894,26 @@ fn test_execute_swap_no_usdc_no_fee() {
     f.client.execute_swap(&f.buyer, &id);
 
     // Pure card-for-card: cards cross, no USDC moves anywhere, no fee.
-    assert_eq!(f.card_token.balance(&f.buyer), ONE_CARD, "Bob receives card A");
-    assert_eq!(card_b_token.balance(&f.seller), ONE_CARD, "Alice receives card B");
-    assert_eq!(f.usdc_token.balance(&f.platform), 0, "no fee on a pure card swap");
-    assert_eq!(f.usdc_token.balance(&f.client.address), 0, "no USDC in custody");
+    assert_eq!(
+        f.card_token.balance(&f.buyer),
+        ONE_CARD,
+        "Bob receives card A"
+    );
+    assert_eq!(
+        card_b_token.balance(&f.seller),
+        ONE_CARD,
+        "Alice receives card B"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.platform),
+        0,
+        "no fee on a pure card swap"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        0,
+        "no USDC in custody"
+    );
     assert_eq!(f.client.get_swap_view(&id).usdc_amount, 0);
 }
 
@@ -844,14 +928,28 @@ fn test_cancel_swap_returns_cards() {
     let usdc_before = f.usdc_token.balance(&f.seller);
     let give = vec![&f.env, f.card.clone()];
     let get = vec![&f.env, card_b.clone()];
-    let id = f.client.propose_swap(&f.seller, &f.buyer, &give, &get, &sweetener);
+    let id = f
+        .client
+        .propose_swap(&f.seller, &f.buyer, &give, &get, &sweetener);
 
     f.client.cancel_swap(&f.seller, &id);
 
     // Both the escrowed card and the sweetener return to Alice.
-    assert_eq!(f.card_token.balance(&f.seller), card_before, "card returned");
-    assert_eq!(f.usdc_token.balance(&f.seller), usdc_before, "sweetener returned");
-    assert_eq!(f.card_token.balance(&f.client.address), 0, "custody drained");
+    assert_eq!(
+        f.card_token.balance(&f.seller),
+        card_before,
+        "card returned"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.seller),
+        usdc_before,
+        "sweetener returned"
+    );
+    assert_eq!(
+        f.card_token.balance(&f.client.address),
+        0,
+        "custody drained"
+    );
     assert_eq!(f.client.get_swap_view(&id).status, SWAP_CANCELLED);
 }
 
@@ -867,8 +965,16 @@ fn test_decline_swap_returns_cards() {
 
     f.client.decline_swap(&f.buyer, &id);
 
-    assert_eq!(f.card_token.balance(&f.seller), card_before, "card returned to Alice");
-    assert_eq!(f.card_token.balance(&f.client.address), 0, "custody drained");
+    assert_eq!(
+        f.card_token.balance(&f.seller),
+        card_before,
+        "card returned to Alice"
+    );
+    assert_eq!(
+        f.card_token.balance(&f.client.address),
+        0,
+        "custody drained"
+    );
     assert_eq!(f.client.get_swap_view(&id).status, SWAP_DECLINED);
 }
 
@@ -878,7 +984,9 @@ fn test_propose_swap_self_trade_rejected() {
     let give = vec![&f.env, f.card.clone()];
     let get = vec![&f.env, f.card.clone()];
     // Proposer == counterparty must be rejected before anything is escrowed.
-    let res = f.client.try_propose_swap(&f.seller, &f.seller, &give, &get, &0);
+    let res = f
+        .client
+        .try_propose_swap(&f.seller, &f.seller, &give, &get, &0);
     assert!(res.is_err(), "self-trade must be rejected");
 }
 

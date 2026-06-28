@@ -17,7 +17,8 @@
     "db:seed": "pnpm --filter @cardmkt/db run seed",
     "stellar:setup": "pnpm --filter @cardmkt/scripts run setup",
     "contract:build": "pnpm --filter @cardmkt/contracts run build",
-    "contract:deploy": "pnpm --filter @cardmkt/contracts run deploy"
+    "contract:deploy": "pnpm --filter @cardmkt/contracts run deploy",
+    "contract:upgrade": "pnpm --filter @cardmkt/contracts run upgrade"
   },
   "devDependencies": {
     "turbo": "^2.5.0",

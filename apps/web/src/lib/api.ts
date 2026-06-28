@@ -74,15 +74,63 @@ export class ApiRequestError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { 'content-type': 'application/json', ...init?.headers },
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new ApiRequestError(body.error ?? 'Request failed', body.code ?? 'INTERNAL', body.details);
+  const method = init?.method ?? 'GET';
+  const url = `${BASE}${path}`;
+  const start = Date.now();
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers: { 'content-type': 'application/json', ...init?.headers },
+    });
+    const duration = Date.now() - start;
+    const body = await res.json().catch(() => ({}));
+
+    if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
+      const statusColor = res.ok ? '#10b981' : '#ef4444';
+      console.groupCollapsed(
+        `%c[Network Request] %c${method} %c${path} %c- ${res.status} ${res.statusText} (${duration}ms)`,
+        'color: #8b5cf6; font-weight: bold;',
+        'color: #3b82f6; font-weight: bold;',
+        'color: #d1d5db; font-weight: normal;',
+        `color: ${statusColor}; font-weight: bold;`
+      );
+      console.log('%cURL:', 'color: #9ca3af; font-weight: bold;', url);
+      console.log('%cHeaders:', 'color: #9ca3af; font-weight: bold;', {
+        'content-type': 'application/json',
+        ...init?.headers,
+      });
+      if (init?.body) {
+        try {
+          console.log('%cRequest Body:', 'color: #9ca3af; font-weight: bold;', JSON.parse(init.body as string));
+        } catch {
+          console.log('%cRequest Body:', 'color: #9ca3af; font-weight: bold;', init.body);
+        }
+      }
+      console.log('%cResponse Body:', 'color: #9ca3af; font-weight: bold;', body);
+      console.groupEnd();
+    }
+
+    if (!res.ok) {
+      throw new ApiRequestError(body.error ?? 'Request failed', body.code ?? 'INTERNAL', body.details);
+    }
+    return body as T;
+  } catch (error) {
+    const duration = Date.now() - start;
+    if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
+      console.groupCollapsed(
+        `%c[Network Request Failed] %c${method} %c${path} %c- (${duration}ms)`,
+        'color: #ef4444; font-weight: bold;',
+        'color: #3b82f6; font-weight: bold;',
+        'color: #d1d5db; font-weight: normal;',
+        'color: #ef4444; font-weight: bold;'
+      );
+      console.log('%cURL:', 'color: #9ca3af; font-weight: bold;', url);
+      console.error('%cError Details:', 'color: #ef4444; font-weight: bold;', error);
+      console.groupEnd();
+    }
+    throw error;
   }
-  return body as T;
 }
 
 export const api = {
@@ -93,6 +141,8 @@ export const api = {
     const qs = new URLSearchParams(params as Record<string, string>).toString();
     return request<Listing[]>(`/api/listings${qs ? `?${qs}` : ''}`);
   },
+  /** A single listing by id — used to recheck it is still open before buying. */
+  listing: (listingId: string) => request<Listing>(`/api/listings/${listingId}`),
   offers: (listingId: string) => request<Offer[]>(`/api/listings/${listingId}/offers`),
 
   /** Open auctions for the catalog (with joined card metadata). */

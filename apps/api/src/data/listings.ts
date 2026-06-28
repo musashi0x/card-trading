@@ -18,6 +18,22 @@ export async function listingWithCard(listingId: string) {
   return row;
 }
 
+/**
+ * Like `listingWithCard`, but rejects a listing that is not open. Used by the
+ * buy/escrow build endpoints so a buyer never signs a settlement the contract
+ * will reject (the on-chain `STATUS_OPEN` guard remains the authority — this is
+ * a fast-fail that saves a wasted signature and fee).
+ */
+export async function requireOpenListing(listingId: string) {
+  const row = await listingWithCard(listingId);
+  if (row.listing.status !== 'open') {
+    throw new PreflightError('Listing is no longer open', 'LISTING_CLOSED', {
+      status: row.listing.status,
+    });
+  }
+  return row;
+}
+
 export async function markSold(listingId: string): Promise<void> {
   await db
     .update(listings)

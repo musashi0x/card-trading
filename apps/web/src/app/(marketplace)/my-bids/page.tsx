@@ -132,7 +132,7 @@ export default function MyBidsPage() {
             <div style={{ fontSize: 42 }}>🎴</div>
             <div style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 22, marginTop: 10 }}>No bids yet</div>
             <div style={{ fontSize: 13.5, color: 'rgba(26,19,5,.55)', fontWeight: 500, marginTop: 6 }}>Find a card you love and place your first bid.</div>
-            <div onClick={td.goHome} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '13px 24px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Browse auctions</div>
+            <div onClick={td.goBrowse} style={{ display: 'inline-block', marginTop: 18, fontFamily: DISPLAY, fontWeight: 800, fontSize: 14, padding: '13px 24px', background: '#ff4d3d', color: '#fff', border: `3px solid ${INK}`, borderRadius: 12, boxShadow: `3px 3px 0 ${INK}`, cursor: 'pointer' }}>Browse auctions</div>
           </div>
         )}
 

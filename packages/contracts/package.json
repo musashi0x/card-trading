@@ -6,6 +6,7 @@
     "build": "stellar contract build",
     "test": "cargo test",
     "deploy": "tsx scripts/deploy.ts",
+    "upgrade": "tsx scripts/upgrade.ts",
     "lint": "cargo fmt --check || true",
     "typecheck": "echo \"(typecheck) rust crate — see cargo\""
   },

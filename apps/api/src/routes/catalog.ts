@@ -83,6 +83,37 @@ catalogRouter.get('/listings', async (req, res, next) => {
   }
 });
 
+/**
+ * A single listing by id — used by the buyer's pre-conversion recheck so a
+ * pay-with-any-asset flow can confirm the listing is still open before spending
+ * on the irreversible currency conversion.
+ */
+catalogRouter.get('/listings/:id', async (req, res, next) => {
+  try {
+    const [row] = await db
+      .select({
+        id: listings.id,
+        cardId: listings.cardId,
+        seller: listings.seller,
+        priceUsdc: listings.priceUsdc,
+        status: listings.status,
+        fulfillment: listings.fulfillment,
+        contractListingId: listings.contractListingId,
+        escrowTxHash: listings.escrowTxHash,
+        createdAt: listings.createdAt,
+      })
+      .from(listings)
+      .where(eq(listings.id, req.params.id));
+    if (!row) {
+      res.status(404).json({ error: 'Listing not found', code: 'NOT_FOUND' });
+      return;
+    }
+    res.json(row);
+  } catch (err) {
+    next(err);
+  }
+});
+
 /** Offers for a listing — used by the seller's accept view. */
 catalogRouter.get('/listings/:id/offers', async (req, res, next) => {
   try {

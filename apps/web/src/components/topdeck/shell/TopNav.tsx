@@ -26,11 +26,11 @@ export function TopNav() {
   const wallet = td.wallet;
   const pathname = usePathname();
 
-  const onAuctions = pathname === '/' || pathname.startsWith('/card/') || pathname === '/sell';
+  const onAuctions = pathname === '/browse' || pathname.startsWith('/card/') || pathname === '/sell';
   const onProfile = pathname === '/profile' || pathname === '/profile/edit';
 
   const navItems: NavItem[] = [
-    { label: 'Auctions', active: onAuctions, onClick: td.goHome },
+    { label: 'Auctions', active: onAuctions, onClick: td.goBrowse },
     { label: 'My bids', active: pathname === '/my-bids', onClick: td.goMyBids },
     { label: 'Leaderboard', active: pathname === '/leaderboard', onClick: td.goLeaderboard },
     { label: 'Portfolio', active: pathname === '/portfolio', onClick: td.goPortfolio },

@@ -1,11 +1,35 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull, lt } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 import { PreflightError } from '../stellar.js';
 
 const { orders, listings, cards } = schema;
 
+/** Default age before an unsubmitted `funded` order is considered abandoned. */
+const ABANDONED_ORDER_TTL_MS = 15 * 60 * 1000;
+
 function notFound(what: string): never {
   throw new PreflightError(`${what} not found`, 'NOT_FOUND');
+}
+
+/**
+ * Delete abandoned escrow orders: rows pre-inserted at `purchase_escrow` build
+ * time whose buyer never submitted the transaction. Such rows are `funded` with
+ * no `contractOrderId` AND no `escrowTxHash` (a confirmed-but-unparsed order
+ * still carries its hash, so it is preserved). Bounded by a TTL so an in-flight
+ * signature is never swept.
+ */
+export async function sweepAbandonedOrders(ttlMs = ABANDONED_ORDER_TTL_MS): Promise<void> {
+  const cutoff = new Date(Date.now() - ttlMs);
+  await db
+    .delete(orders)
+    .where(
+      and(
+        eq(orders.status, 'funded'),
+        isNull(orders.contractOrderId),
+        isNull(orders.escrowTxHash),
+        lt(orders.createdAt, cutoff),
+      ),
+    );
 }
 
 export async function orderWithListingCard(orderId: string) {

@@ -170,7 +170,7 @@ buildRouter.post('/accept-offer', async (req, res, next) => {
 buildRouter.post('/buy-now', async (req, res, next) => {
   try {
     const input = buyNowSchema.parse(req.body);
-    const { listing, card } = await listingsRepo.listingWithCard(input.listingId);
+    const { listing, card } = await listingsRepo.requireOpenListing(input.listingId);
     const cid = needContractId(listing.contractListingId, 'Listing');
     await requireBalance(input.buyer, usdc, listing.priceUsdc);
     await requireTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
@@ -189,11 +189,14 @@ buildRouter.post('/buy-now', async (req, res, next) => {
 buildRouter.post('/purchase-escrow', async (req, res, next) => {
   try {
     const input = purchaseEscrowSchema.parse(req.body);
-    const { listing, card } = await listingsRepo.listingWithCard(input.listingId);
+    const { listing, card } = await listingsRepo.requireOpenListing(input.listingId);
     const cid = needContractId(listing.contractListingId, 'Listing');
     if (listing.fulfillment !== 'physical') {
       throw new PreflightError('Listing is not a physical (escrow) listing', 'WRONG_FULFILLMENT');
     }
+    // Drop any abandoned funded rows (signed but never submitted) so a stale
+    // pre-insert from a cancelled checkout never blocks this listing.
+    await ordersRepo.sweepAbandonedOrders();
     // Buyer needs the asking price in USDC and a card trustline so the card can
     // be delivered on release; a royalty payee must be able to receive USDC too.
     await requireBalance(input.buyer, usdc, listing.priceUsdc);
