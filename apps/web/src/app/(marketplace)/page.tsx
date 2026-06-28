@@ -6,6 +6,7 @@ import { CardTile, chipStyle } from '@/components/topdeck/shared/CardTile';
 import { Pagination } from '@/components/topdeck/shared/Pagination';
 import { type Rarity, type TopCard } from '@/components/topdeck/lib';
 import { DISPLAY, INK, PAGE_SIZE } from '@/components/topdeck/theme';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import TuneIcon from '@mui/icons-material/Tune';
 import CloseIcon from '@mui/icons-material/Close';
 import SearchOffIcon from '@mui/icons-material/SearchOff';
@@ -83,6 +84,14 @@ export default function BrowsePage() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(26,19,5,.55)' }}>{list.length} of {st.cards.length} lots</div>
+          <div
+            onClick={st.refreshing ? undefined : td.refresh}
+            title="Refresh listings"
+            aria-label="Refresh listings"
+            style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 800, padding: '9px 15px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: `2px 2px 0 ${INK}`, cursor: st.refreshing ? 'default' : 'pointer', opacity: st.refreshing ? 0.6 : 1 }}
+          >
+            <RefreshIcon sx={{ fontSize: 18, animation: st.refreshing ? 'spin 0.8s linear infinite' : 'none' }} />
+          </div>
           <div onClick={td.toggleFilters} className="filters-trigger" style={{ alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 800, padding: '9px 15px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 10, boxShadow: `2px 2px 0 ${INK}`, cursor: 'pointer' }}>
             <TuneIcon sx={{ fontSize: 18 }} />
             {activeCount > 0 && <span style={{ fontSize: 11, fontWeight: 800, minWidth: 18, height: 18, padding: '0 5px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: '#ff4d3d', color: '#fff', border: `2px solid ${INK}`, borderRadius: 999 }}>{activeCount}</span>}

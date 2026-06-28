@@ -9,6 +9,7 @@ import { WalletMenu } from './WalletMenu';
 import SearchIcon from '@mui/icons-material/Search';
 import CloseIcon from '@mui/icons-material/Close';
 import BoltIcon from '@mui/icons-material/Bolt';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
 
 /** A top-nav text link with the design's underline active-state. */
 function NavLink({ label, active, onClick }: NavItem) {
@@ -84,6 +85,9 @@ export function TopNav() {
           {wallet.address && <span style={{ fontSize: 9, marginLeft: -2, transform: st.walletMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>▾</span>}
         </div>
         {wallet.address && st.walletMenuOpen && <WalletMenu address={wallet.address} />}
+      </div>
+      <div onClick={td.openGuide} title="View introduction guide" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 34, height: 34, borderRadius: 9, background: '#fff', border: `2.5px solid ${INK}`, cursor: 'pointer', boxShadow: `2px 2px 0 ${INK}`, flexShrink: 0 }}>
+        <HelpOutlineIcon sx={{ fontSize: 18 }} />
       </div>
       <div onClick={td.goProfile} title="Profile" style={{ width: 34, height: 34, borderRadius: 9, background: 'linear-gradient(135deg,#ff4d3d,#ffb83d)', border: `2.5px solid ${INK}`, cursor: 'pointer', boxShadow: onProfile ? '0 0 0 3px #ff4d3d' : 'none' }} />
     </div>

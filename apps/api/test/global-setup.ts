@@ -14,7 +14,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 
 const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5433/cardmkt_test';
+  process.env.TEST_DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/cardmkt_test';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const migrationsFolder = resolve(here, '../../../packages/db/drizzle');

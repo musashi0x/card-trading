@@ -24,6 +24,8 @@ import { watchlistRouter } from './routes/watchlist.js';
 import { profilesRouter } from './routes/profiles.js';
 import { portfolioRouter } from './routes/portfolio.js';
 import { devRouter } from './routes/dev.js';
+import { cardReviewsRouter } from './routes/card-reviews.js';
+import { cardCommentsRouter } from './routes/card-comments.js';
 import { startIndexer } from './indexer.js';
 
 const app = express();
@@ -100,6 +102,8 @@ app.use('/api/leaderboard', leaderboardRouter);
 app.use('/api/watchlist', watchlistRouter);
 app.use('/api/profiles', profilesRouter);
 app.use('/api/portfolio', portfolioRouter);
+app.use('/api/catalog/:id/reviews', cardReviewsRouter);
+app.use('/api/catalog/:id/comments', cardCommentsRouter);
 // Dev-only conveniences (e.g. funding a smart wallet with test USDC).
 if (env.stellar.network !== 'mainnet') app.use('/api/dev', devRouter);
 // Card minting issues assets with the platform issuer key — never on mainnet.

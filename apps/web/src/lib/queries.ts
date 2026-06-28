@@ -6,12 +6,14 @@
  */
 
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import type { LeaderboardBoard, TradeProposalStatus, WatchlistEntry } from '@cardmkt/shared';
+import type { CardComment, CardReview, CardReviewBody, LeaderboardBoard, TradeProposalStatus, WatchlistEntry } from '@cardmkt/shared';
 import { api, type OrderWithCard } from '@/lib/api';
 
 type ListingFilters = { q?: string; set?: string; rarity?: string };
 
 export const queryKeys = {
+  cardReviews: (cardId: string) => ['cardReviews', cardId] as const,
+  cardComments: (cardId: string) => ['cardComments', cardId] as const,
   cards: (owner?: string) => ['cards', owner ?? 'all'] as const,
   listings: (filters?: ListingFilters) => ['listings', filters ?? {}] as const,
   offers: (listingId: string) => ['offers', listingId] as const,
@@ -216,6 +218,80 @@ export function useWatchlist(account: string | null) {
     queryKey: queryKeys.watchlist(account ?? ''),
     queryFn: () => api.watchlist(account as string),
     enabled: !!account,
+  });
+}
+
+/** Reviews (list + aggregate) for a card. Always enabled — no wallet required. */
+export function useCardReviews(cardId: string) {
+  return useQuery({
+    queryKey: queryKeys.cardReviews(cardId),
+    queryFn: () => api.cardReviews(cardId),
+    enabled: !!cardId,
+  });
+}
+
+/** Submit or update a card review with optimistic update on success. */
+export function useSubmitCardReview(cardId: string, address: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CardReviewBody) => api.submitCardReview(cardId, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.cardReviews(cardId) });
+    },
+  });
+}
+
+/** Delete a card review with cache invalidation. */
+export function useDeleteCardReview(cardId: string, address: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (reviewId: string) => api.deleteCardReview(cardId, reviewId, address!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.cardReviews(cardId) });
+    },
+  });
+}
+
+/** Public comments for a card (oldest first). Always enabled — no wallet required. */
+export function useCardComments(cardId: string) {
+  return useQuery({
+    queryKey: queryKeys.cardComments(cardId),
+    queryFn: () => api.cardComments(cardId),
+    enabled: !!cardId,
+  });
+}
+
+/** Post a comment with optimistic prepend. */
+export function usePostCardComment(cardId: string, address: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: string) =>
+      api.postCardComment(cardId, { authorAddress: address!, body }),
+    onSuccess: (newComment) => {
+      queryClient.setQueryData<CardComment[]>(
+        queryKeys.cardComments(cardId),
+        (old = []) => [...old, newComment],
+      );
+    },
+  });
+}
+
+/** Soft-delete a comment with optimistic inline redaction. */
+export function useDeleteCardComment(cardId: string, address: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (commentId: string) => api.deleteCardComment(cardId, commentId, address!),
+    onSuccess: (_data, commentId) => {
+      queryClient.setQueryData<CardComment[]>(
+        queryKeys.cardComments(cardId),
+        (old = []) =>
+          old.map((c) =>
+            c.id === commentId
+              ? { ...c, body: '[comment removed]', authorAddress: null, deletedAt: new Date().toISOString() }
+              : c,
+          ),
+      );
+    },
   });
 }
 
