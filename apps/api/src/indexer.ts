@@ -9,12 +9,13 @@
  */
 
 import { and, eq, inArray, isNotNull, isNull, lt, ne } from 'drizzle-orm';
-import { TransactionBuilder, BASE_FEE, rpc, scValToNative, type xdr } from '@stellar/stellar-sdk';
 import { db, schema } from '@cardmkt/db';
 import { MarketplaceContract, fromStroops } from '@cardmkt/shared';
 import { env } from './env.js';
 import { logger } from './logger.js';
-import { rpcServer } from './stellar.js';
+import { simulateContractView, transactionCreatedId } from './stellar.js';
+import { sweepAbandonedOrders } from './data/orders.js';
+import { sweepAbandonedBuildRows } from './data/sweep.js';
 
 const contract = new MarketplaceContract(env.contractId);
 const { listings, offers, orders, auctions, bids, watchlist, tradeProposals, trades } = schema;
@@ -38,25 +39,6 @@ const SWAP_STATUS: Record<number, 'proposed' | 'accepted' | 'cancelled' | 'decli
   13: 'declined',
 };
 
-async function readView(op: xdr.Operation): Promise<Record<string, unknown> | null> {
-  try {
-    const account = await rpcServer.getAccount(env.platformIssuer);
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: env.stellar.networkPassphrase,
-    })
-      .addOperation(op)
-      .setTimeout(30)
-      .build();
-    const sim = await rpcServer.simulateTransaction(tx);
-    if (rpc.Api.isSimulationSuccess(sim) && sim.result?.retval) {
-      return scValToNative(sim.result.retval) as Record<string, unknown>;
-    }
-  } catch {
-    // Best-effort reconciliation; ignore transient RPC errors.
-  }
-  return null;
-}
 
 async function reconcileListings(): Promise<void> {
   const rows = await db
@@ -64,9 +46,16 @@ async function reconcileListings(): Promise<void> {
     .from(listings)
     .where(and(eq(listings.status, 'open'), isNotNull(listings.contractListingId)));
   for (const row of rows) {
-    const view = await readView(contract.getListingView(row.contractListingId!));
-    const code = Number(view?.status ?? 0);
-    const status = LISTING_STATUS[code];
+    const view = await simulateContractView(contract.getListingView(row.contractListingId!));
+    // A definitive on-chain "missing" (entry from a prior deploy, or archived)
+    // retires the phantom row; a successful read maps the contract status code.
+    // An unverifiable RPC read leaves the row untouched for the next pass.
+    let status: (typeof LISTING_STATUS)[number] | undefined;
+    if (view.kind === 'missing') {
+      status = 'cancelled';
+    } else if (view.kind === 'ok') {
+      status = LISTING_STATUS[Number(view.value.status ?? 0)];
+    }
     if (status && status !== 'open') {
       // Close the listing and drop any watchlist rows for it in one transaction,
       // so the My-bids Watchlist never shows phantom entries for closed lots.
@@ -84,9 +73,16 @@ async function reconcileOffers(): Promise<void> {
     .from(offers)
     .where(and(eq(offers.status, 'open'), isNotNull(offers.contractOfferId)));
   for (const row of rows) {
-    const view = await readView(contract.getOfferView(row.contractOfferId!));
-    const code = Number(view?.status ?? 0);
-    const status = OFFER_STATUS[code];
+    const view = await simulateContractView(contract.getOfferView(row.contractOfferId!));
+    // A definitive on-chain "missing" (prior deploy / archived entry) retires the
+    // phantom offer as withdrawn; a successful read maps the contract status code.
+    // An unverifiable RPC read leaves the row untouched for the next pass.
+    let status: (typeof OFFER_STATUS)[number] | undefined;
+    if (view.kind === 'missing') {
+      status = 'withdrawn';
+    } else if (view.kind === 'ok') {
+      status = OFFER_STATUS[Number(view.value.status ?? 0)];
+    }
     if (status && status !== 'open') {
       await db.update(offers).set({ status }).where(eq(offers.id, row.id));
     }
@@ -104,10 +100,17 @@ async function reconcileOrders(): Promise<void> {
       ),
     );
   for (const row of rows) {
-    const view = await readView(contract.getOrderView(row.contractOrderId!));
-    if (!view) continue;
-    const status = ORDER_STATUS[Number(view.status ?? 0)];
-    const deadline = view.confirm_deadline != null ? Number(view.confirm_deadline) : null;
+    const view = await simulateContractView(contract.getOrderView(row.contractOrderId!));
+    if (view.kind === 'unknown') continue; // transient — retry on the next pass
+    if (view.kind === 'missing') {
+      // Orders are never removed on-chain (always written with a terminal status),
+      // so a definitive "missing" is a phantom from a prior deploy / archived
+      // entry. Retire it as refunded (no settlement occurred on this deployment).
+      await db.update(orders).set({ status: 'refunded' }).where(eq(orders.id, row.id));
+      continue;
+    }
+    const status = ORDER_STATUS[Number(view.value.status ?? 0)];
+    const deadline = view.value.confirm_deadline != null ? Number(view.value.confirm_deadline) : null;
     if (status && status !== row.status) {
       await db.update(orders).set({ status }).where(eq(orders.id, row.id));
     }
@@ -130,12 +133,18 @@ async function reconcileAuctions(): Promise<void> {
     .from(auctions)
     .where(and(eq(auctions.status, 'open'), isNotNull(auctions.contractAuctionId)));
   for (const row of rows) {
-    const view = await readView(contract.getAuctionView(row.contractAuctionId!));
-    if (!view) continue;
-    const status = AUCTION_STATUS[Number(view.status ?? 0)];
-    const highBidder = (view.high_bidder as string | undefined) ?? null;
-    const highBidUsdc = view.high_bid != null ? fromStroops(BigInt(view.high_bid as never)) : '0';
-    const endsAt = view.ends_at != null ? new Date(Number(view.ends_at) * 1000) : null;
+    const view = await simulateContractView(contract.getAuctionView(row.contractAuctionId!));
+    if (view.kind === 'unknown') continue; // transient — retry on the next pass
+    if (view.kind === 'missing') {
+      // Entry gone on-chain (prior deploy / archived): retire the phantom auction.
+      await db.update(auctions).set({ status: 'cancelled' }).where(eq(auctions.id, row.id));
+      continue;
+    }
+    const v = view.value;
+    const status = AUCTION_STATUS[Number(v.status ?? 0)];
+    const highBidder = (v.high_bidder as string | undefined) ?? null;
+    const highBidUsdc = v.high_bid != null ? fromStroops(BigInt(v.high_bid as never)) : '0';
+    const endsAt = v.ends_at != null ? new Date(Number(v.ends_at) * 1000) : null;
 
     const patch: Partial<typeof auctions.$inferInsert> = {};
     if (highBidder !== row.highBidder) patch.highBidder = highBidder;
@@ -196,9 +205,16 @@ export async function reconcileSwaps(): Promise<void> {
     .from(tradeProposals)
     .where(and(eq(tradeProposals.status, 'proposed'), isNotNull(tradeProposals.contractSwapId)));
   for (const row of pending) {
-    const view = await readView(contract.getSwapView(row.contractSwapId!));
-    if (!view) continue;
-    const status = SWAP_STATUS[Number(view.status ?? 0)];
+    const view = await simulateContractView(contract.getSwapView(row.contractSwapId!));
+    if (view.kind === 'unknown') continue; // transient — retry on the next pass
+    if (view.kind === 'missing') {
+      // Swaps are never removed on-chain (always written with a terminal status),
+      // so a definitive "missing" is a phantom from a prior deploy / archived
+      // entry. Retire it as cancelled (locked assets returned, no swap occurred).
+      await db.update(tradeProposals).set({ status: 'cancelled' }).where(eq(tradeProposals.id, row.id));
+      continue;
+    }
+    const status = SWAP_STATUS[Number(view.value.status ?? 0)];
     if (status && status !== 'proposed') {
       await db.update(tradeProposals).set({ status }).where(eq(tradeProposals.id, row.id));
     }
@@ -231,7 +247,71 @@ async function sweepExpiredProposals(): Promise<void> {
   }
 }
 
+/**
+ * Recover contract ids the submit path failed to parse. `list`/`make_offer`/
+ * `purchase_escrow`/`create_auction` store their row's tx hash even when the
+ * return value couldn't be read, leaving `contractXId = null` — which would
+ * otherwise exclude the row from every reconciler above forever. Re-fetch the
+ * settled tx by hash and backfill the id; a still-unreadable result is retried on
+ * the next pass. Bounded per table so a backlog never stalls a tick.
+ */
+async function backfillContractIds(): Promise<void> {
+  const recover = async (
+    rows: { id: string; hash: string | null }[],
+    apply: (rowId: string, contractId: number) => Promise<unknown>,
+  ): Promise<void> => {
+    await Promise.all(
+      rows.map(async (r) => {
+        if (!r.hash) return;
+        const id = await transactionCreatedId(r.hash);
+        if (id != null) await apply(r.id, id);
+      }),
+    );
+  };
+
+  const [listingRows, offerRows, orderRows, auctionRows] = await Promise.all([
+    db
+      .select({ id: listings.id, hash: listings.escrowTxHash })
+      .from(listings)
+      .where(and(isNull(listings.contractListingId), isNotNull(listings.escrowTxHash)))
+      .limit(50),
+    db
+      .select({ id: offers.id, hash: offers.escrowTxHash })
+      .from(offers)
+      .where(and(isNull(offers.contractOfferId), isNotNull(offers.escrowTxHash)))
+      .limit(50),
+    db
+      .select({ id: orders.id, hash: orders.escrowTxHash })
+      .from(orders)
+      .where(and(isNull(orders.contractOrderId), isNotNull(orders.escrowTxHash)))
+      .limit(50),
+    db
+      .select({ id: auctions.id, hash: auctions.escrowTxHash })
+      .from(auctions)
+      .where(and(isNull(auctions.contractAuctionId), isNotNull(auctions.escrowTxHash)))
+      .limit(50),
+  ]);
+
+  await Promise.all([
+    recover(listingRows, (id, cid) =>
+      db.update(listings).set({ contractListingId: cid }).where(eq(listings.id, id)),
+    ),
+    recover(offerRows, (id, cid) =>
+      db.update(offers).set({ contractOfferId: cid }).where(eq(offers.id, id)),
+    ),
+    recover(orderRows, (id, cid) =>
+      db.update(orders).set({ contractOrderId: cid }).where(eq(orders.id, id)),
+    ),
+    recover(auctionRows, (id, cid) =>
+      db.update(auctions).set({ contractAuctionId: cid }).where(eq(auctions.id, id)),
+    ),
+  ]);
+}
+
 export async function reconcileNow(): Promise<void> {
+  // Backfill missing contract ids first so rows recovered this tick are visible to
+  // the reconcilers below in the same pass.
+  await backfillContractIds();
   await Promise.all([
     reconcileListings(),
     reconcileOffers(),
@@ -239,6 +319,10 @@ export async function reconcileNow(): Promise<void> {
     reconcileAuctions(),
     reconcileSwaps(),
     sweepExpiredProposals(),
+    // Retire build-time rows the user never submitted on-chain, so abandoned
+    // checkouts don't linger in the mirror as phantom open state.
+    sweepAbandonedBuildRows(),
+    sweepAbandonedOrders(),
   ]);
 }
 
@@ -249,6 +333,7 @@ export async function reconcileNow(): Promise<void> {
 export function startIndexer(intervalMs = 15_000): () => void {
   const log = logger.child({ component: 'indexer' });
   const tick = () => reconcileNow().catch((err) => log.error({ err }, 'reconcile failed'));
+  tick(); // reconcile once immediately so the mirror is fresh from startup (no cold window)
   const handle = setInterval(tick, intervalMs);
   log.info({ intervalMs }, 'reconciling on interval');
   return () => clearInterval(handle);

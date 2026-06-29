@@ -294,6 +294,7 @@ export interface TopDeckContext {
   onDropImage: (e: DragEvent<HTMLDivElement>) => void;
   setDragOver: (v: boolean) => void;
   selectCatalogCard: (c: Card) => void;
+  setSellStep: (n: number) => void;
   sellNext: () => void;
   sellBack: () => void;
   listAnother: () => void;
@@ -915,6 +916,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     setState((s) => ({
       form: { ...s.form, cardId: c.id, title: c.name, setLine: c.set, rarity: mapRarity(c.rarity), image: c.imageUrl, category: 'Other' },
     }));
+  const setSellStep = (n: number) => {
+    setState({ sellStep: Math.min(3, Math.max(1, n)) });
+    window.scrollTo(0, 0);
+  };
   const sellNext = () => {
     setState((s) => ({ sellStep: Math.min(3, s.sellStep + 1) }));
     window.scrollTo(0, 0);
@@ -1093,7 +1098,7 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     selectPayAsset, buyNow, payWithPasskey, escrowBuy, retryBuyNow, dismissResidual,
     doOrderAction, resolveDispute, setOrdersArbiter,
     setSellMode, setForm, readImageFile, onPickImage, onDropImage, setDragOver, selectCatalogCard,
-    sellNext, sellBack, listAnother, publishListing,
+    setSellStep, sellNext, sellBack, listAnother, publishListing,
     setLbTab,
     onWalletClick, closeWalletMenu, toggleNavMenu, closeNavMenu, disconnectWallet, copyAddress,
     showToast,

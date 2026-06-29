@@ -20,10 +20,10 @@ import { db, schema } from '@cardmkt/db';
 vi.mock('../../env.js', () => ({
   env: {
     contractId: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
-    platformIssuer: 'GPLATFORMISSUER',
+    platformIssuer: 'GCNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVD4R',
     feeBps: 200,
     logLevel: 'silent',
-    usdc: { code: 'USDC', issuer: 'GUSDCISSUER' },
+    usdc: { code: 'USDC', issuer: 'GAKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRL26G' },
     stellar: { networkPassphrase: 'Test SDF Network ; September 2015' },
   },
 }));
@@ -52,28 +52,17 @@ vi.mock('../../stellar.js', () => ({
   requireBalance: vi.fn(async () => {}),
   requireSourceBalance: vi.fn(async () => {}),
   requireTrustline: vi.fn(async () => {}),
+  // On-chain reads default to "open" so happy paths proceed; the place-bid auction
+  // guard relies on this. Drift behavior for auctions is covered elsewhere.
+  simulateContractView: vi.fn(async () => ({ kind: 'ok', value: { status: 0 } })),
   withSlippage: (x: string) => x,
 }));
 
-// The contract client + helpers; each op is opaque to buildContractTx.
-vi.mock('./shared.js', () => ({
-  contract: {
-    placeBid: vi.fn(() => ({ op: 'place_bid' })),
-    settleAuction: vi.fn(() => ({ op: 'settle_auction' })),
-    cancelAuction: vi.fn(() => ({ op: 'cancel_auction' })),
-  },
-  usdc: { getCode: () => 'USDC', getIssuer: () => 'GUSDCISSUER' },
-  notFound: (what: string) => {
-    throw new PreflightError(`${what} not found`, 'NOT_FOUND');
-  },
-  needContractId: (value: number | null, what: string) => {
-    if (value == null) throw new PreflightError(`${what} not confirmed`, 'NOT_CONFIRMED');
-    return value;
-  },
-  requireCreatorTrustline: vi.fn(async () => {}),
-}));
+// NOTE: ./shared.js is intentionally NOT mocked — its guards build in-memory contract
+// ops and delegate the network read to the mocked `simulateContractView` above.
 
 const { buildRouter } = await import('./build.js');
+const { simulateContractView } = await import('../../stellar.js');
 
 const { cards, auctions, bids } = schema;
 const SELLER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0x5e));
@@ -199,6 +188,17 @@ describe('POST /api/tx/place-bid pre-flight', () => {
       .send({ auctionId, bidder: BIDDER, amountUsdc: '50' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('BID_TOO_LOW');
+  });
+
+  it('rejects a bid when the auction is gone on-chain despite an open mirror (drift)', async () => {
+    // DB row reads open + live, but the chain has no such auction.
+    vi.mocked(simulateContractView).mockResolvedValueOnce({ kind: 'missing' });
+    const auctionId = await makeAuction({});
+    const res = await request(app)
+      .post('/api/tx/place-bid')
+      .send({ auctionId, bidder: BIDDER, amountUsdc: '150' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('AUCTION_CLOSED');
   });
 });
 

@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { shorten } from '@/components/topdeck/lib';
 import { INK, DISPLAY } from '@/components/topdeck/theme';
 import { useProfile, useProfileReviews, useProfileStats } from '@/lib/queries';
+import { explorerAccount } from '@/lib/explorer';
 import ShieldIcon from '@mui/icons-material/Shield';
 import LocationOnIcon from '@mui/icons-material/LocationOn';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
@@ -56,10 +57,16 @@ export function ProfileView({ address, isOwner }: { address: string; isOwner: bo
           <div style={{ flex: 1, minWidth: 200, paddingTop: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
               <h1 style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 30, letterSpacing: '-.02em', margin: 0, lineHeight: 1 }}>{name}</h1>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 7, background: '#cfe0ff', border: `2.5px solid ${INK}`, whiteSpace: 'nowrap' }}>
+              <a
+                href={explorerAccount(address)}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="View account on Stellar explorer"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 7, background: '#cfe0ff', border: `2.5px solid ${INK}`, whiteSpace: 'nowrap', color: INK, textDecoration: 'none', cursor: 'pointer' }}
+              >
                 <ShieldIcon sx={{ fontSize: 13 }} />
                 <span>{shorten(address)}</span>
-              </span>
+              </a>
             </div>
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.55)', marginTop: 9 }}>
               {profile?.location && (

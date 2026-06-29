@@ -10,6 +10,7 @@ import { and, avg, count, desc, eq, sql, sum } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, schema } from '@cardmkt/db';
 import type { Achievement, ProfileResponse, ProfileStatsResponse } from '@cardmkt/shared';
+import { accountCreatedAt } from '../stellar.js';
 
 export const profilesRouter: Router = Router();
 
@@ -38,7 +39,10 @@ function requireAddress(value: string, res: import('express').Response): boolean
   return false;
 }
 
-function toProfile(row: typeof users.$inferSelect): ProfileResponse {
+async function toProfile(row: typeof users.$inferSelect): Promise<ProfileResponse> {
+  // Prefer the real on-chain account creation time; fall back to the users-row
+  // timestamp for contract accounts or when Horizon can't resolve it.
+  const onChainCreated = await accountCreatedAt(row.stellarAddress);
   return {
     address: row.stellarAddress,
     displayName: row.displayName,
@@ -46,7 +50,7 @@ function toProfile(row: typeof users.$inferSelect): ProfileResponse {
     location: row.location,
     website: row.website,
     avatarUrl: row.avatarUrl,
-    memberSince: row.createdAt.toISOString(),
+    memberSince: onChainCreated ?? row.createdAt.toISOString(),
   };
 }
 
@@ -82,7 +86,7 @@ async function ensureUser(address: string): Promise<typeof users.$inferSelect> {
 profilesRouter.get('/:address', async (req, res, next) => {
   try {
     if (!requireAddress(req.params.address, res)) return;
-    res.json(toProfile(await ensureUser(req.params.address)));
+    res.json(await toProfile(await ensureUser(req.params.address)));
   } catch (err) {
     next(err);
   }
@@ -99,7 +103,7 @@ profilesRouter.put('/:address', async (req, res, next) => {
       .set(body)
       .where(eq(users.stellarAddress, req.params.address))
       .returning();
-    res.json(toProfile(updated ?? (await ensureUser(req.params.address))));
+    res.json(await toProfile(updated ?? (await ensureUser(req.params.address))));
   } catch (err) {
     next(err);
   }

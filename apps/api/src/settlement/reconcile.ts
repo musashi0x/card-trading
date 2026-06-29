@@ -1,9 +1,13 @@
-import type { TradeAction } from '@cardmkt/shared';
+import { MarketplaceContract, fromStroops, type TradeAction } from '@cardmkt/shared';
+import { env } from '../env.js';
+import { simulateContractView } from '../stellar.js';
 import * as listings from '../data/listings.js';
 import * as offers from '../data/offers.js';
 import * as orders from '../data/orders.js';
 import * as trades from '../data/trades.js';
 import * as auctions from '../data/auctions.js';
+
+const contract = new MarketplaceContract(env.contractId);
 
 export interface ReconcileCtx {
   refId: string;        // listing/offer/order row id created at build time
@@ -105,12 +109,29 @@ const reconcilers: Record<TradeAction, (c: ReconcileCtx) => Promise<void>> = {
   settle_auction: async (c) => {
     const { auction, card } = await auctions.auctionWithCard(c.refId);
     if (auction.status !== 'open') return;
-    const reserveMet =
+    // The chain is authoritative for the final outcome — a bid placed outside this
+    // app may have changed the winner/high bid since the mirror last synced. Read
+    // the settled auction view and trust its status/high bid over local state;
+    // fall back to the mirror only if the view is unreadable (the periodic indexer
+    // re-syncs regardless).
+    let highBidder = auction.highBidder;
+    let highBidUsdc = auction.highBidUsdc;
+    let settled =
       auction.highBidder != null &&
       Number(auction.highBidUsdc) >= Number(auction.reservePriceUsdc);
-    if (reserveMet) {
+    if (auction.contractAuctionId != null) {
+      const view = await simulateContractView(contract.getAuctionView(auction.contractAuctionId));
+      if (view.kind === 'ok') {
+        // Contract AUCTION_* codes: 1 = settled (reserve met + winner); else no winner.
+        settled = Number(view.value.status ?? 0) === 1;
+        highBidder = (view.value.high_bidder as string | undefined) ?? null;
+        highBidUsdc =
+          view.value.high_bid != null ? fromStroops(BigInt(view.value.high_bid as never)) : '0';
+      }
+    }
+    if (settled) {
       await auctions.markSettled(c.refId, c.hash);
-      await trades.recordAuctionTrade(auction, card, c.hash);
+      await trades.recordAuctionTrade({ seller: auction.seller, highBidder, highBidUsdc }, card, c.hash);
     } else {
       await auctions.markClosed(c.refId, 'no_winner', c.hash);
     }

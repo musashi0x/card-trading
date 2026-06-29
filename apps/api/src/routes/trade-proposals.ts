@@ -30,6 +30,7 @@ import { buildContractTx, filterHeldCards, isContractAddress, PreflightError } f
 import * as settle from '../settlement/settle.js';
 import { feeFor } from '../data/trades.js';
 import { reconcileSwaps } from '../indexer.js';
+import { requireOnChainProposedSwap } from './tx/shared.js';
 
 export const tradeProposalsRouter: Router = Router();
 
@@ -243,6 +244,9 @@ tradeProposalsRouter.post('/:id/accept', async (req, res, next) => {
     if (row.contractSwapId == null) {
       throw new PreflightError('Proposal is not yet confirmed on-chain', 'NOT_CONFIRMED');
     }
+    // Confirm the proposal is still `proposed` on-chain before building/relaying —
+    // it may have been executed, declined, or cancelled via another path.
+    await requireOnChainProposedSwap(row.contractSwapId);
 
     const signedXdr = signedXdrOf(req.body);
     if (!signedXdr) {
@@ -278,6 +282,9 @@ tradeProposalsRouter.post('/:id/decline', async (req, res, next) => {
     if (row.contractSwapId == null) {
       throw new PreflightError('Proposal is not yet confirmed on-chain', 'NOT_CONFIRMED');
     }
+    // Confirm the proposal is still `proposed` on-chain before building/relaying —
+    // it may have been executed, declined, or cancelled via another path.
+    await requireOnChainProposedSwap(row.contractSwapId);
 
     const signedXdr = signedXdrOf(req.body);
     if (!signedXdr) {
@@ -316,6 +323,9 @@ tradeProposalsRouter.post('/:id/cancel', async (req, res, next) => {
     if (row.contractSwapId == null) {
       throw new PreflightError('Proposal is not yet confirmed on-chain', 'NOT_CONFIRMED');
     }
+    // Confirm the proposal is still `proposed` on-chain before building/relaying —
+    // it may have been executed, declined, or cancelled via another path.
+    await requireOnChainProposedSwap(row.contractSwapId);
 
     const signedXdr = signedXdrOf(req.body);
     if (!signedXdr) {

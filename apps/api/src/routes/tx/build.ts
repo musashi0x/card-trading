@@ -48,6 +48,10 @@ import {
   notFound,
   needContractId,
   requireCreatorTrustline,
+  requireOnChainOpenListing,
+  requireOnChainOpenOffer,
+  requireOnChainOpenAuction,
+  requireOnChainActiveOrder,
 } from './shared.js';
 
 export const buildRouter: Router = Router();
@@ -144,6 +148,7 @@ buildRouter.post('/cancel', async (req, res, next) => {
     const input = cancelListingSchema.parse(req.body);
     const { listing } = await listingsRepo.listingWithCard(input.listingId);
     const cid = needContractId(listing.contractListingId, 'Listing');
+    await requireOnChainOpenListing(listing.id, cid);
     const op = contract.cancelListing(input.seller, cid);
     const xdr = await buildContractTx(input.seller, op);
     res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: listing.id });
@@ -158,6 +163,7 @@ buildRouter.post('/make-offer', async (req, res, next) => {
     const input = makeOfferSchema.parse(req.body);
     const { listing, card } = await listingsRepo.listingWithCard(input.listingId);
     const cid = needContractId(listing.contractListingId, 'Listing');
+    await requireOnChainOpenListing(listing.id, cid);
     // Buyer needs USDC to escrow now, and a card trustline so settlement can deliver.
     await requireUsdcBalance(input.buyer, input.amountUsdc);
     await requireBuyerCardTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
@@ -188,6 +194,7 @@ buildRouter.post('/withdraw-offer', async (req, res, next) => {
     const [offer] = await db.select().from(offers).where(eq(offers.id, input.offerId));
     if (!offer) notFound('Offer');
     const oid = needContractId(offer.contractOfferId, 'Offer');
+    await requireOnChainOpenOffer(offer.id, oid);
     const op = contract.withdrawOffer(input.buyer, oid);
     const xdr = await buildContractTx(input.buyer, op);
     res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: offer.id });
@@ -203,6 +210,7 @@ buildRouter.post('/accept-offer', async (req, res, next) => {
     const [offer] = await db.select().from(offers).where(eq(offers.id, input.offerId));
     if (!offer) notFound('Offer');
     const oid = needContractId(offer.contractOfferId, 'Offer');
+    await requireOnChainOpenOffer(offer.id, oid);
     // If a royalty will be paid, the creator must be able to receive the USDC.
     const { card } = await listingsRepo.listingWithCard(offer.listingId);
     await requireCreatorTrustline(card, input.seller);
@@ -220,6 +228,7 @@ buildRouter.post('/buy-now', async (req, res, next) => {
     const input = buyNowSchema.parse(req.body);
     const { listing, card } = await listingsRepo.requireOpenListing(input.listingId);
     const cid = needContractId(listing.contractListingId, 'Listing');
+    await requireOnChainOpenListing(listing.id, cid);
     await requireUsdcBalance(input.buyer, listing.priceUsdc);
     await requireBuyerCardTrustline(input.buyer, cardAsset(card.assetCode, card.issuer));
     // If a royalty will be paid, the creator must be able to receive the USDC.
@@ -242,6 +251,7 @@ buildRouter.post('/purchase-escrow', async (req, res, next) => {
     if (listing.fulfillment !== 'physical') {
       throw new PreflightError('Listing is not a physical (escrow) listing', 'WRONG_FULFILLMENT');
     }
+    await requireOnChainOpenListing(listing.id, cid);
     // Drop any abandoned funded rows (signed but never submitted) so a stale
     // pre-insert from a cancelled checkout never blocks this listing.
     await ordersRepo.sweepAbandonedOrders();
@@ -279,6 +289,7 @@ buildRouter.post('/mark-shipped', async (req, res, next) => {
       typeof req.body.trackingRef === 'string' ? req.body.trackingRef.trim() : undefined;
     const { order } = await ordersRepo.orderWithListingCard(input.orderId);
     const oid = needContractId(order.contractOrderId, 'Order');
+    await requireOnChainActiveOrder(oid);
     if (order.seller !== input.account) {
       throw new PreflightError('Only the seller can mark an order shipped', 'NOT_SELLER');
     }
@@ -302,6 +313,7 @@ buildRouter.post('/confirm-receipt', async (req, res, next) => {
     const input = orderActionSchema.parse(req.body);
     const { order } = await ordersRepo.orderWithListingCard(input.orderId);
     const oid = needContractId(order.contractOrderId, 'Order');
+    await requireOnChainActiveOrder(oid);
     if (order.buyer !== input.account) {
       throw new PreflightError('Only the buyer can confirm receipt', 'NOT_BUYER');
     }
@@ -322,6 +334,7 @@ buildRouter.post('/dispute', async (req, res, next) => {
     const input = orderActionSchema.parse(req.body);
     const { order } = await ordersRepo.orderWithListingCard(input.orderId);
     const oid = needContractId(order.contractOrderId, 'Order');
+    await requireOnChainActiveOrder(oid);
     if (order.buyer !== input.account && order.seller !== input.account) {
       throw new PreflightError('Only the buyer or seller can dispute an order', 'NOT_PARTICIPANT');
     }
@@ -342,6 +355,7 @@ buildRouter.post('/claim-timeout', async (req, res, next) => {
     const input = orderActionSchema.parse(req.body);
     const { order } = await ordersRepo.orderWithListingCard(input.orderId);
     const oid = needContractId(order.contractOrderId, 'Order');
+    await requireOnChainActiveOrder(oid);
     if (order.status !== 'funded' && order.status !== 'shipped') {
       throw new PreflightError(`Order cannot be timed out from status "${order.status}"`, 'BAD_STATE');
     }
@@ -425,6 +439,9 @@ buildRouter.post('/place-bid', async (req, res, next) => {
         startPriceUsdc: auction.startPriceUsdc,
       });
     }
+    // The DB checks above are a fast pre-filter; confirm against the chain that the
+    // auction is still open before the bidder escrows USDC into a doomed bid.
+    await requireOnChainOpenAuction(cid);
     // Bidder needs the USDC to escrow now, and a card trustline so settlement can deliver.
     await requireUsdcBalance(input.bidder, input.amountUsdc);
     await requireBuyerCardTrustline(input.bidder, cardAsset(card.assetCode, card.issuer));
@@ -457,6 +474,8 @@ buildRouter.post('/settle-auction', async (req, res, next) => {
     if (Date.now() < new Date(auction.endsAt).getTime()) {
       throw new PreflightError('Auction is still live', 'AUCTION_LIVE');
     }
+    // The mirror may lag a settle that already landed on-chain; confirm still open.
+    await requireOnChainOpenAuction(cid);
     // If a royalty will be paid to the winner's settlement, the creator must be
     // able to receive the USDC.
     await requireCreatorTrustline(card, auction.seller);
@@ -485,6 +504,7 @@ buildRouter.post('/cancel-auction', async (req, res, next) => {
     if (Number(auction.highBidUsdc) > 0) {
       throw new PreflightError('Auction with bids cannot be cancelled', 'AUCTION_HAS_BIDS');
     }
+    await requireOnChainOpenAuction(cid);
     const op = contract.cancelAuction(input.seller, cid);
     const xdr = await buildContractTx(input.seller, op);
     res.json({ xdr, networkPassphrase: env.stellar.networkPassphrase, refId: auction.id });
