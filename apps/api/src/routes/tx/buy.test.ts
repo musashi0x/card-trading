@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import express from 'express';
 import request from 'supertest';
 import { ZodError } from 'zod';
@@ -19,10 +19,10 @@ import { db, schema } from '@cardmkt/db';
 vi.mock('../../env.js', () => ({
   env: {
     contractId: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
-    platformIssuer: 'GPLATFORMISSUER',
+    platformIssuer: 'GCNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVD4R',
     feeBps: 200,
     logLevel: 'silent',
-    usdc: { code: 'USDC', issuer: 'GUSDCISSUER' },
+    usdc: { code: 'USDC', issuer: 'GAKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRL26G' },
     stellar: { networkPassphrase: 'Test SDF Network ; September 2015' },
   },
 }));
@@ -51,25 +51,18 @@ vi.mock('../../stellar.js', () => ({
   requireBalance: vi.fn(async () => {}),
   requireSourceBalance: vi.fn(async () => {}),
   requireTrustline: vi.fn(async () => {}),
+  // On-chain listing read defaults to "open" so the happy path proceeds; cases
+  // that exercise drift override this per-test.
+  simulateContractView: vi.fn(async () => ({ kind: 'ok', value: { status: 0 } })),
   withSlippage: (x: string) => x,
 }));
 
-// The contract client + helpers; the op itself is opaque to buildContractTx.
-vi.mock('./shared.js', () => ({
-  contract: { buyNow: vi.fn(() => ({ op: 'buy_now' })) },
-  usdc: { getCode: () => 'USDC', getIssuer: () => 'GUSDCISSUER' },
-  notFound: (what: string) => {
-    throw new PreflightError(`${what} not found`, 'NOT_FOUND');
-  },
-  needContractId: (value: number | null, what: string) => {
-    if (value == null) throw new PreflightError(`${what} not confirmed`, 'NOT_CONFIRMED');
-    return value;
-  },
-  requireCreatorTrustline: vi.fn(async () => {}),
-}));
+// NOTE: ./shared.js is intentionally NOT mocked — its guards (requireOnChainOpenListing
+// etc.) are under test. They only build in-memory contract ops and delegate the
+// network read to the mocked `simulateContractView` above, so the real module is safe.
 
 const { buildRouter } = await import('./build.js');
-const { hasTrustline } = await import('../../stellar.js');
+const { hasTrustline, simulateContractView } = await import('../../stellar.js');
 
 const { cards, listings, orders } = schema;
 const BUYER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0xb1));
@@ -159,6 +152,35 @@ describe('POST /api/tx/buy-now pre-flight', () => {
     const res = await request(app).post('/api/tx/buy-now').send({ listingId, buyer: BUYER });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('LISTING_CLOSED');
+  });
+
+  it('rejects with LISTING_UNAVAILABLE when the contract has no such listing (drifted mirror)', async () => {
+    vi.mocked(simulateContractView).mockResolvedValueOnce({ kind: 'missing' });
+    const listingId = await makeListing('open');
+    const res = await request(app).post('/api/tx/buy-now').send({ listingId, buyer: BUYER });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('LISTING_UNAVAILABLE');
+    // The phantom row is retired so it stops being offered.
+    const [row] = await db.select().from(listings).where(eq(listings.id, listingId));
+    expect(row!.status).toBe('cancelled');
+  });
+
+  it('rejects with LISTING_CLOSED when the on-chain listing is already sold', async () => {
+    vi.mocked(simulateContractView).mockResolvedValueOnce({ kind: 'ok', value: { status: 1 } });
+    const listingId = await makeListing('open');
+    const res = await request(app).post('/api/tx/buy-now').send({ listingId, buyer: BUYER });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('LISTING_CLOSED');
+    const [row] = await db.select().from(listings).where(eq(listings.id, listingId));
+    expect(row!.status).toBe('sold');
+  });
+
+  it('proceeds when the on-chain read is unverifiable (transient RPC), deferring to the contract', async () => {
+    vi.mocked(simulateContractView).mockResolvedValueOnce({ kind: 'unknown' });
+    const listingId = await makeListing('open');
+    const res = await request(app).post('/api/tx/buy-now').send({ listingId, buyer: BUYER });
+    expect(res.status).toBe(200);
+    expect(res.body.xdr).toBe('UNSIGNED_XDR');
   });
 
   it('returns a change_trust recovery XDR when the buyer lacks a USDC trustline', async () => {

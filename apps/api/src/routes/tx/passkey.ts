@@ -13,7 +13,12 @@ import * as settle from '../../settlement/settle.js';
 import { reconcile } from '../../settlement/reconcile.js';
 import * as listingsRepo from '../../data/listings.js';
 import * as ordersRepo from '../../data/orders.js';
-import { needContractId, notFound } from './shared.js';
+import {
+  needContractId,
+  notFound,
+  requireOnChainActiveOrder,
+  requireOnChainOpenListing,
+} from './shared.js';
 
 export const passkeyRouter: Router = Router();
 
@@ -118,10 +123,13 @@ passkeyRouter.post('/passkey-order', async (req, res, next) => {
         throw new PreflightError('listingId is required for purchase_escrow', 'BAD_REQUEST');
       }
       const { listing } = await listingsRepo.listingWithCard(input.listingId);
-      needContractId(listing.contractListingId, 'Listing');
+      const cid = needContractId(listing.contractListingId, 'Listing');
       if (listing.fulfillment !== 'physical') {
         throw new PreflightError('Listing is not a physical (escrow) listing', 'WRONG_FULFILLMENT');
       }
+      // Mirror the classic /purchase-escrow guard: confirm on-chain the listing is
+      // still open before the smart wallet locks USDC into a doomed escrow.
+      await requireOnChainOpenListing(listing.id, cid);
       await requireSmartWalletUsdc(input.account, listing.priceUsdc);
 
       const [order] = await db
@@ -152,7 +160,8 @@ passkeyRouter.post('/passkey-order', async (req, res, next) => {
       throw new PreflightError('orderId is required for this action', 'BAD_REQUEST');
     }
     const { order } = await ordersRepo.orderWithListingCard(input.orderId);
-    needContractId(order.contractOrderId, 'Order');
+    const oid = needContractId(order.contractOrderId, 'Order');
+    await requireOnChainActiveOrder(oid);
 
     const result = await settle.relayed(input.signedXdr);
     await reconcile(input.action, {

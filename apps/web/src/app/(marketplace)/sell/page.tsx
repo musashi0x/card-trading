@@ -76,24 +76,37 @@ export default function SellPage() {
     );
   }
 
-  const stepDot = (n: number) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <div style={{ width: 24, height: 24, borderRadius: '50%', border: `2.5px solid ${INK}`, background: st.sellStep >= n ? '#ff4d3d' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: st.sellStep >= n && n === 1 ? '#fff' : INK }}>{n}</div>
-      <span style={{ fontSize: 13, fontWeight: 700, color: st.sellStep >= n ? INK : 'rgba(26,19,5,.4)' }}>{['Details', 'Pricing', 'Review'][n - 1]}</span>
-    </div>
-  );
+  // The three sell-flow steps, rendered as a tab bar. A tab unlocks only once the
+  // earlier steps validate, so buyers can jump back freely but never skip ahead.
+  const TABS: Array<[number, string]> = [[1, 'Details'], [2, 'Pricing'], [3, 'Review']];
+  const tabUnlocked = (n: number) =>
+    n === 1 || (n === 2 && step1Valid) || (n === 3 && step1Valid && step2Valid);
+
+  const stepTab = (n: number, label: string, last: boolean) => {
+    const active = st.sellStep === n;
+    const done = st.sellStep > n;
+    const unlocked = tabUnlocked(n);
+    return (
+      <div
+        key={n}
+        onClick={() => unlocked && td.setSellStep(n)}
+        title={unlocked ? undefined : 'Finish the previous step to unlock this one'}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 9, fontSize: 13.5, fontWeight: 800, padding: '11px 22px', cursor: unlocked ? 'pointer' : 'not-allowed', background: active ? INK : '#fff', color: active ? '#fff' : unlocked ? INK : 'rgba(26,19,5,.32)', borderRight: last ? 'none' : `3px solid ${INK}`, transition: 'background .12s' }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 21, height: 21, flex: 'none', borderRadius: '50%', fontSize: 11, fontWeight: 800, border: `2px solid ${active ? '#fff' : done ? '#13c06a' : 'currentColor'}`, background: active ? '#ff4d3d' : done ? '#13c06a' : 'transparent', color: active || done ? '#fff' : 'inherit' }}>{done ? '✓' : n}</span>
+        {label}
+      </div>
+    );
+  };
 
   return (
     <div className="m-pad" style={{ maxWidth: 1060, margin: '0 auto', padding: '24px 32px 90px' }}>
       <div onClick={td.goBrowse} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 700, cursor: 'pointer', marginBottom: 18, padding: '7px 14px', background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 9, boxShadow: `2px 2px 0 ${INK}` }}>← Cancel</div>
       <h1 className="m-h1" style={{ fontFamily: DISPLAY, fontWeight: 800, fontSize: 34, letterSpacing: '-.02em', margin: 0 }}>List a card for auction</h1>
+      <div style={{ fontSize: 14, color: 'rgba(26,19,5,.55)', marginTop: 6, fontWeight: 500 }}>List a card you hold or mint a brand-new one — in three quick steps.</div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0 26px' }}>
-        {stepDot(1)}
-        <div style={{ flex: 'none', width: 30, height: 2.5, background: INK }} />
-        {stepDot(2)}
-        <div style={{ flex: 'none', width: 30, height: 2.5, background: INK }} />
-        {stepDot(3)}
+      <div style={{ display: 'inline-flex', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', margin: '20px 0 26px', boxShadow: `3px 3px 0 ${INK}` }}>
+        {TABS.map(([n, label], i) => stepTab(n, label, i === TABS.length - 1))}
       </div>
 
       <div className="stack" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 40, alignItems: 'start' }}>
@@ -102,7 +115,7 @@ export default function SellPage() {
           {st.sellStep === 1 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
               {/* mode: list a held card vs. mint a brand-new one */}
-              <div style={{ display: 'inline-flex', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', boxShadow: `3px 3px 0 ${INK}` }}>
+              <div style={{ display: 'inline-flex', alignSelf: 'flex-start', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', boxShadow: `3px 3px 0 ${INK}` }}>
                 <div onClick={() => td.setSellMode('hold')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'hold' ? INK : '#fff', color: st.sellMode === 'hold' ? '#fff' : INK, borderRight: `3px solid ${INK}` }}>A card I hold</div>
                 <div onClick={() => td.setSellMode('mint')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'mint' ? INK : '#fff', color: st.sellMode === 'mint' ? '#fff' : INK }}>✨ Mint a new card</div>
               </div>

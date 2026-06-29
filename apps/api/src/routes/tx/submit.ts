@@ -6,7 +6,7 @@ import * as settle from '../../settlement/settle.js';
 import { reconcile } from '../../settlement/reconcile.js';
 import * as ordersRepo from '../../data/orders.js';
 import * as tradesRepo from '../../data/trades.js';
-import { contract, needContractId } from './shared.js';
+import { contract, needContractId, requireOnChainActiveOrder } from './shared.js';
 
 export const submitRouter: Router = Router();
 
@@ -58,6 +58,9 @@ submitRouter.post('/resolve', async (req, res, next) => {
         status: order.status,
       });
     }
+    // Confirm on-chain the order hasn't already been settled (released/refunded)
+    // before the arbiter signs a resolution that would otherwise trap.
+    await requireOnChainActiveOrder(oid);
 
     const result = await signAndSubmitAs(env.arbiterSecret, contract.resolve(oid, input.refund));
     if (!result.successful) {

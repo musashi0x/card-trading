@@ -294,6 +294,7 @@ export interface TopDeckContext {
   onDropImage: (e: DragEvent<HTMLDivElement>) => void;
   setDragOver: (v: boolean) => void;
   selectCatalogCard: (c: Card) => void;
+  setSellStep: (n: number) => void;
   sellNext: () => void;
   sellBack: () => void;
   listAnother: () => void;
@@ -521,6 +522,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
       showToast('You cannot bid on your own auction', 'outbid');
       return;
     }
+    if (ref.current.now >= c.endsAt) {
+      showToast('This auction has ended', 'outbid');
+      return;
+    }
     setState({ bidBusy: true });
     try {
       const hash = await runAction('place_bid', {
@@ -565,6 +570,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
       connect();
       return;
     }
+    if (ref.current.now < c.endsAt) {
+      showToast('Auction is still live — settle once it ends', 'outbid');
+      return;
+    }
     setState({ bidBusy: true });
     try {
       const hash = await runAction('settle_auction', { auctionId: c.auctionId, account: address });
@@ -584,6 +593,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     if (!address) {
       showToast('Connect your wallet to cancel', 'outbid');
       connect();
+      return;
+    }
+    if (c.highBidder) {
+      showToast("Auctions with bids can't be cancelled", 'outbid');
       return;
     }
     setState({ bidBusy: true });
@@ -903,6 +916,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     setState((s) => ({
       form: { ...s.form, cardId: c.id, title: c.name, setLine: c.set, rarity: mapRarity(c.rarity), image: c.imageUrl, category: 'Other' },
     }));
+  const setSellStep = (n: number) => {
+    setState({ sellStep: Math.min(3, Math.max(1, n)) });
+    window.scrollTo(0, 0);
+  };
   const sellNext = () => {
     setState((s) => ({ sellStep: Math.min(3, s.sellStep + 1) }));
     window.scrollTo(0, 0);
@@ -967,6 +984,28 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     try {
       let cardId = f.cardId;
       let sacAddress = ref.current.mintedCard?.sacAddress ?? null;
+
+      // Pre-flight: confirm the seller actually holds this card on-chain before
+      // asking the contract to escrow it. Listing escrows ONE copy (create_auction
+      // /list both pull the card into custody), so a card the seller doesn't own —
+      // or already has tied up in another listing — traps the contract with a
+      // cryptic balance error. A freshly minted card is just issued to the seller,
+      // so only an existing catalog pick needs the check. `api.cards(address)`
+      // returns just the cards that wallet holds; if the lookup itself fails we
+      // defer to the server/on-chain guard rather than block on a transient error.
+      if (!isMint) {
+        let held: Card[] | null = null;
+        try {
+          held = await api.cards(address);
+        } catch {
+          held = null;
+        }
+        if (held && !held.some((c) => c.id === cardId)) {
+          setState({ publishing: false });
+          return showToast("You don't hold this card on-chain — it may already be listed", 'outbid');
+        }
+      }
+
       if (isMint && !ref.current.mintedCard) {
         const minted = await mintCard({
           name: f.title.trim(),
@@ -1059,7 +1098,7 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     selectPayAsset, buyNow, payWithPasskey, escrowBuy, retryBuyNow, dismissResidual,
     doOrderAction, resolveDispute, setOrdersArbiter,
     setSellMode, setForm, readImageFile, onPickImage, onDropImage, setDragOver, selectCatalogCard,
-    sellNext, sellBack, listAnother, publishListing,
+    setSellStep, sellNext, sellBack, listAnother, publishListing,
     setLbTab,
     onWalletClick, closeWalletMenu, toggleNavMenu, closeNavMenu, disconnectWallet, copyAddress,
     showToast,

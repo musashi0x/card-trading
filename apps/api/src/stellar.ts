@@ -345,6 +345,27 @@ export async function transactionReturnValue(hash: string): Promise<unknown> {
   return null;
 }
 
+/**
+ * Single-shot recovery of a settled transaction's numeric return value — the id
+ * of a created listing/offer/order/auction — for the indexer's id-backfill of
+ * rows whose original parse came back null (a transient miss when the submit path
+ * read the result before its meta was fully available). No polling: the tx
+ * already settled (we hold its hash), so a still-`NOT_FOUND` or unparsable result
+ * simply yields `null` and is retried on the next reconcile pass.
+ */
+export async function transactionCreatedId(hash: string): Promise<number | null> {
+  const result = await rpcServer.getTransaction(hash);
+  if (result.status === 'SUCCESS' && 'returnValue' in result && result.returnValue) {
+    try {
+      const id = Number(scValToNative(result.returnValue));
+      return Number.isFinite(id) ? id : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 /** Build an unsigned classic `changeTrust` tx so `account` trusts `asset`. */
 export async function buildChangeTrustTx(account: string, asset: Asset): Promise<string> {
   const source = await horizon.loadAccount(account);
@@ -532,6 +553,23 @@ export async function getAccountBalances(account: string): Promise<{ usdc: strin
   }
 
   return { usdc, xlm, usdcTrustline };
+}
+
+/**
+ * The ISO timestamp of when a classic account was created on-chain, read from
+ * its first Horizon operation (the `create_account`). Returns `null` for
+ * contract (`C…`) accounts — whose creation isn't a classic operation — or when
+ * the account/operation can't be resolved, so callers can fall back to their own
+ * timestamp.
+ */
+export async function accountCreatedAt(account: string): Promise<string | null> {
+  if (isContractAddress(account)) return null;
+  try {
+    const ops = await horizon.operations().forAccount(account).order('asc').limit(1).call();
+    return ops.records[0]?.created_at ?? null;
+  } catch {
+    return null;
+  }
 }
 
 
@@ -824,6 +862,50 @@ async function smartWalletTokenStroops(
     // not hard-fail pre-flight (deploy-on-first-use).
   }
   return null;
+}
+
+/**
+ * The outcome of a read-only contract view simulation (e.g. `get_listing_view`),
+ * separating the cases a drifted Postgres mirror can otherwise hide:
+ *  - `ok`      → the view returned; `value` is the decoded struct.
+ *  - `missing` → the contract reverted during simulation (e.g. `NotFound`): the
+ *                entry does not exist on this deployment, so the mirror has
+ *                drifted (a stale id from a prior deploy, or an archived entry).
+ *  - `unknown` → the RPC was unreachable/unexpected; callers should tolerate this
+ *                rather than block a valid action on a transient error.
+ */
+export type ViewRead =
+  | { kind: 'ok'; value: Record<string, unknown> }
+  | { kind: 'missing' }
+  | { kind: 'unknown' };
+
+/**
+ * Simulate a read-only contract view and classify the result. Unlike the
+ * indexer's best-effort reader, this distinguishes a definitive on-chain
+ * "missing" (the contract panicked) from an unverifiable RPC failure, so a build
+ * pre-flight can safely reject a doomed action without false-failing on a hiccup.
+ */
+export async function simulateContractView(op: xdr.Operation): Promise<ViewRead> {
+  try {
+    const account = await rpcServer.getAccount(env.platformIssuer);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: env.stellar.networkPassphrase,
+    })
+      .addOperation(op)
+      .setTimeout(30)
+      .build();
+    const sim = await rpcServer.simulateTransaction(tx);
+    if (rpc.Api.isSimulationError(sim)) {
+      return { kind: 'missing' };
+    }
+    if (rpc.Api.isSimulationSuccess(sim) && sim.result?.retval) {
+      return { kind: 'ok', value: scValToNative(sim.result.retval) as Record<string, unknown> };
+    }
+  } catch {
+    // RPC unreachable / unexpected — unverifiable; let the chain be the backstop.
+  }
+  return { kind: 'unknown' };
 }
 
 /**

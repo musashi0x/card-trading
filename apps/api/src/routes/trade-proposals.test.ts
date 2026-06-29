@@ -23,9 +23,10 @@ import { db, schema } from '@cardmkt/db';
 vi.mock('../env.js', () => ({
   env: {
     contractId: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
-    platformIssuer: 'GPLATFORMISSUER',
+    platformIssuer: 'GCNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVD4R',
     feeBps: 200,
     logLevel: 'silent',
+    usdc: { code: 'USDC', issuer: 'GAKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRKFIVCUKRL26G' },
     stellar: { networkPassphrase: 'Test SDF Network ; September 2015' },
   },
 }));
@@ -43,6 +44,9 @@ vi.mock('../stellar.js', () => ({
   // The proposer holds every give-side card by default.
   filterHeldCards: vi.fn(async (_owner: string, cards: unknown[]) => cards),
   isContractAddress: (a: string) => a.startsWith('C'),
+  // Swap actions guard on the on-chain proposal still being `proposed` (code 10).
+  simulateContractView: vi.fn(async () => ({ kind: 'ok', value: { status: 10 } })),
+  requireTrustline: vi.fn(async () => {}),
   rpcServer: { getAccount: vi.fn().mockRejectedValue(new Error('no rpc in tests')) },
   PreflightError: class PreflightError extends Error {
     status = 400;
@@ -58,6 +62,7 @@ vi.mock('../stellar.js', () => ({
 
 // Imported after the mocks so the route picks up the mocked modules.
 const { tradeProposalsRouter } = await import('./trade-proposals.js');
+const { simulateContractView } = await import('../stellar.js');
 
 const { cards, listings, trades, tradeProposals } = schema;
 
@@ -212,6 +217,28 @@ describe('barter trade proposals (e2e)', () => {
     expect(tradeRows[0]!.listingId).toBeNull();
     expect(Number(tradeRows[0]!.priceUsdc)).toBe(100);
     expect(Number(tradeRows[0]!.feeUsdc)).toBe(2);
+  });
+
+  // On-chain drift: the proposal already moved past `proposed` (e.g. executed via
+  // another path), so accept must fast-fail before relaying a doomed swap.
+  it('rejects accepting a proposal no longer proposed on-chain with SWAP_CLOSED', async () => {
+    vi.mocked(simulateContractView).mockResolvedValueOnce({ kind: 'ok', value: { status: 11 } });
+    const cardA = await makeCard();
+    const cardB = await makeCard();
+    const p = await seedProposal({
+      proposer: ALICE,
+      counterparty: BOB,
+      giveCardIds: [cardA],
+      getCardIds: [cardB],
+    });
+    const res = await request(app)
+      .post(`/api/trade-proposals/${p.id}/accept`)
+      .send({ account: BOB, signedXdr: 'SIGNED' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('SWAP_CLOSED');
+    // The proposal row is untouched (still proposed) — no settlement happened.
+    const [row] = await db.select().from(tradeProposals).where(eq(tradeProposals.id, p.id));
+    expect(row!.status).toBe('proposed');
   });
 
   // 9.3 — Alice proposes then cancels; status→cancelled.

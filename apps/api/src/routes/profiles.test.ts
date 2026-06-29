@@ -55,6 +55,12 @@ vi.mock('@cardmkt/db', () => {
   };
 });
 
+// Keep profile reads network-free: with no on-chain creation time, `memberSince`
+// falls back to the users-row timestamp asserted below.
+vi.mock('../stellar.js', () => ({
+  accountCreatedAt: vi.fn().mockResolvedValue(null),
+}));
+
 import express from 'express';
 import request from 'supertest';
 import { profilesRouter } from './profiles.js';

@@ -5,12 +5,15 @@
 import { Router } from 'express';
 import { and, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
-import { listingsQuerySchema } from '@cardmkt/shared';
-import { filterHeldCards } from '../stellar.js';
+import { MarketplaceContract, listingsQuerySchema } from '@cardmkt/shared';
+import { env } from '../env.js';
+import { filterHeldCards, simulateContractView } from '../stellar.js';
 
 export const catalogRouter: Router = Router();
 
 const { cards, listings } = schema;
+
+const contract = new MarketplaceContract(env.contractId);
 
 const STELLAR_ADDRESS = /^[GC][A-Z2-7]{55}$/;
 
@@ -107,6 +110,25 @@ catalogRouter.get('/listings/:id', async (req, res, next) => {
     if (!row) {
       res.status(404).json({ error: 'Listing not found', code: 'NOT_FOUND' });
       return;
+    }
+    // This endpoint gates an irreversible asset conversion, so it must reflect the
+    // CHAIN, not just the (possibly lagging) mirror. If the row reads open, confirm
+    // on-chain; on a definitive drift, sync the row and return the true status so
+    // the buyer's recheck never green-lights a conversion for a closed listing. An
+    // unverifiable RPC read leaves the mirror value as-is (tolerate the transient).
+    if (row.status === 'open' && row.contractListingId != null) {
+      const view = await simulateContractView(contract.getListingView(row.contractListingId));
+      if (view.kind === 'missing') {
+        await db.update(listings).set({ status: 'cancelled' }).where(eq(listings.id, row.id));
+        row.status = 'cancelled';
+      } else if (view.kind === 'ok') {
+        // Contract STATUS_* codes: 0 = open, 1 = sold, 2 = cancelled.
+        const code = Number(view.value.status ?? 0);
+        if (code !== 0) {
+          row.status = code === 1 ? 'sold' : 'cancelled';
+          await db.update(listings).set({ status: row.status }).where(eq(listings.id, row.id));
+        }
+      }
     }
     res.json(row);
   } catch (err) {
