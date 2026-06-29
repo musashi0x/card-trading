@@ -967,6 +967,28 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     try {
       let cardId = f.cardId;
       let sacAddress = ref.current.mintedCard?.sacAddress ?? null;
+
+      // Pre-flight: confirm the seller actually holds this card on-chain before
+      // asking the contract to escrow it. Listing escrows ONE copy (create_auction
+      // /list both pull the card into custody), so a card the seller doesn't own —
+      // or already has tied up in another listing — traps the contract with a
+      // cryptic balance error. A freshly minted card is just issued to the seller,
+      // so only an existing catalog pick needs the check. `api.cards(address)`
+      // returns just the cards that wallet holds; if the lookup itself fails we
+      // defer to the server/on-chain guard rather than block on a transient error.
+      if (!isMint) {
+        let held: Card[] | null = null;
+        try {
+          held = await api.cards(address);
+        } catch {
+          held = null;
+        }
+        if (held && !held.some((c) => c.id === cardId)) {
+          setState({ publishing: false });
+          return showToast("You don't hold this card on-chain — it may already be listed", 'outbid');
+        }
+      }
+
       if (isMint && !ref.current.mintedCard) {
         const minted = await mintCard({
           name: f.title.trim(),
