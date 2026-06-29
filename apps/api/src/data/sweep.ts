@@ -1,7 +1,7 @@
-import { and, eq, isNull, lt } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 
-const { listings, offers, auctions, bids } = schema;
+const { listings, offers, auctions, bids, watchlist } = schema;
 
 /** Age before an unsubmitted build-time row is considered abandoned. */
 const ABANDONED_TTL_MS = 15 * 60 * 1000;
@@ -17,24 +17,31 @@ const ABANDONED_TTL_MS = 15 * 60 * 1000;
  * whose signature is still in flight. Mirrors {@link sweepAbandonedOrders}.
  *
  * Bids are deleted first so an abandoned auction with a stray (also-abandoned)
- * bid never trips the bids→auctions foreign key.
+ * bid never trips the bids→auctions foreign key. For the same reason, watchlist
+ * rows pointing at an abandoned listing are cleared before the listing itself, so
+ * a watched phantom never trips the watchlist→listings foreign key.
  */
 export async function sweepAbandonedBuildRows(ttlMs = ABANDONED_TTL_MS): Promise<void> {
   const cutoff = new Date(Date.now() - ttlMs);
   await db
     .delete(bids)
     .where(and(isNull(bids.escrowTxHash), lt(bids.createdAt, cutoff)));
-  await Promise.all([
-    db
-      .delete(listings)
-      .where(
-        and(
-          eq(listings.status, 'open'),
-          isNull(listings.contractListingId),
-          isNull(listings.escrowTxHash),
-          lt(listings.createdAt, cutoff),
-        ),
+  const abandonedListings = and(
+    eq(listings.status, 'open'),
+    isNull(listings.contractListingId),
+    isNull(listings.escrowTxHash),
+    lt(listings.createdAt, cutoff),
+  );
+  await db
+    .delete(watchlist)
+    .where(
+      inArray(
+        watchlist.listingId,
+        db.select({ id: listings.id }).from(listings).where(abandonedListings),
       ),
+    );
+  await Promise.all([
+    db.delete(listings).where(abandonedListings),
     db
       .delete(offers)
       .where(
