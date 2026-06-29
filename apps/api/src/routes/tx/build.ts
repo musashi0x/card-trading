@@ -407,6 +407,14 @@ buildRouter.post('/place-bid', async (req, res, next) => {
     if (auction.status !== 'open') {
       throw new PreflightError('Auction is not open for bids', 'AUCTION_CLOSED');
     }
+    // Bids close the instant the auction ends; the contract traps `AuctionExpired`.
+    if (Date.now() >= new Date(auction.endsAt).getTime()) {
+      throw new PreflightError('Auction has ended', 'AUCTION_EXPIRED');
+    }
+    // A seller cannot bid on their own auction (contract: `SelfTrade`).
+    if (auction.seller === input.bidder) {
+      throw new PreflightError('You cannot bid on your own auction', 'SELF_TRADE');
+    }
     // Bid must beat the current high bid and meet the start price.
     if (
       Number(input.amountUsdc) <= Number(auction.highBidUsdc) ||
@@ -445,6 +453,10 @@ buildRouter.post('/settle-auction', async (req, res, next) => {
     if (auction.status !== 'open') {
       throw new PreflightError('Auction is already settled', 'AUCTION_CLOSED');
     }
+    // Settlement is only valid once the auction has ended (contract: `AuctionLive`).
+    if (Date.now() < new Date(auction.endsAt).getTime()) {
+      throw new PreflightError('Auction is still live', 'AUCTION_LIVE');
+    }
     // If a royalty will be paid to the winner's settlement, the creator must be
     // able to receive the USDC.
     await requireCreatorTrustline(card, auction.seller);
@@ -464,6 +476,9 @@ buildRouter.post('/cancel-auction', async (req, res, next) => {
     const auction = await auctionsRepo.auctionLookup(input.auctionId);
     if (!auction) notFound('Auction');
     const cid = needContractId(auction.contractAuctionId, 'Auction');
+    if (auction.status !== 'open') {
+      throw new PreflightError('Auction is not open', 'AUCTION_CLOSED');
+    }
     if (auction.seller !== input.seller) {
       throw new PreflightError('Only the seller can cancel an auction', 'NOT_SELLER');
     }

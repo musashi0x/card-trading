@@ -521,6 +521,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
       showToast('You cannot bid on your own auction', 'outbid');
       return;
     }
+    if (ref.current.now >= c.endsAt) {
+      showToast('This auction has ended', 'outbid');
+      return;
+    }
     setState({ bidBusy: true });
     try {
       const hash = await runAction('place_bid', {
@@ -565,6 +569,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
       connect();
       return;
     }
+    if (ref.current.now < c.endsAt) {
+      showToast('Auction is still live — settle once it ends', 'outbid');
+      return;
+    }
     setState({ bidBusy: true });
     try {
       const hash = await runAction('settle_auction', { auctionId: c.auctionId, account: address });
@@ -584,6 +592,10 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     if (!address) {
       showToast('Connect your wallet to cancel', 'outbid');
       connect();
+      return;
+    }
+    if (c.highBidder) {
+      showToast("Auctions with bids can't be cancelled", 'outbid');
       return;
     }
     setState({ bidBusy: true });
