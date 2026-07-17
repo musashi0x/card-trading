@@ -198,7 +198,7 @@ function makeInitialState(seed: TopCard[]): TopDeckState {
     facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
     bidOpen: false, bidAmount: '', bidBusy: false, toast: null, toastKind: 'win',
     status: {}, myMax: {},
-    sellStep: 1, sellMode: 'hold', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
+    sellStep: 1, sellMode: 'mint', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
     form: { ...EMPTY_FORM },
     cards: seed,
     refreshing: false,
