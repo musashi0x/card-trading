@@ -11,7 +11,7 @@ import { db, schema } from '@cardmkt/db';
 
 export const watchlistRouter: Router = Router();
 
-const { cards, listings, watchlist } = schema;
+const { cards, cardCopies, listings, watchlist } = schema;
 
 const STELLAR_ADDRESS = /^[GC][A-Z2-7]{55}$/;
 
@@ -32,6 +32,7 @@ watchlistRouter.get('/', async (req, res, next) => {
       .select({
         id: listings.id,
         cardId: listings.cardId,
+        cardCopyId: listings.cardCopyId,
         seller: listings.seller,
         priceUsdc: listings.priceUsdc,
         status: listings.status,
@@ -43,9 +44,6 @@ watchlistRouter.get('/', async (req, res, next) => {
         watchedAt: watchlist.createdAt,
         card: {
           id: cards.id,
-          assetCode: cards.assetCode,
-          issuer: cards.issuer,
-          sacAddress: cards.sacAddress,
           name: cards.name,
           set: cards.set,
           rarity: cards.rarity,
@@ -54,10 +52,18 @@ watchlistRouter.get('/', async (req, res, next) => {
           creatorAccount: cards.creatorAccount,
           royaltyBps: cards.royaltyBps,
         },
+        copy: {
+          id: cardCopies.id,
+          cardId: cardCopies.cardId,
+          tokenId: cardCopies.tokenId,
+          serial: cardCopies.serial,
+          owner: cardCopies.owner,
+        },
       })
       .from(watchlist)
       .innerJoin(listings, eq(watchlist.listingId, listings.id))
       .innerJoin(cards, eq(listings.cardId, cards.id))
+      .innerJoin(cardCopies, eq(listings.cardCopyId, cardCopies.id))
       .where(and(eq(watchlist.account, account), eq(listings.status, 'open')))
       .orderBy(desc(watchlist.createdAt));
     res.json(rows);

@@ -6,6 +6,7 @@ import * as settle from '../../settlement/settle.js';
 import { reconcile } from '../../settlement/reconcile.js';
 import * as ordersRepo from '../../data/orders.js';
 import * as tradesRepo from '../../data/trades.js';
+import * as cardCopiesRepo from '../../data/card-copies.js';
 import { contract, needContractId, requireOnChainActiveOrder } from './shared.js';
 
 export const submitRouter: Router = Router();
@@ -51,7 +52,7 @@ submitRouter.post('/resolve', async (req, res, next) => {
       e.status = 501;
       throw e;
     }
-    const { order, card } = await ordersRepo.orderWithListingCard(input.orderId);
+    const { order, card, copy } = await ordersRepo.orderWithListingCard(input.orderId);
     const oid = needContractId(order.contractOrderId, 'Order');
     if (order.status !== 'disputed') {
       throw new PreflightError('Only a disputed order can be resolved', 'BAD_STATE', {
@@ -73,6 +74,9 @@ submitRouter.post('/resolve', async (req, res, next) => {
       await ordersRepo.markRefunded(order.id, result.hash);
     } else {
       await ordersRepo.markReleased(order.id, result.hash);
+      // The arbiter's release path bypasses the generic reconciler, so the
+      // ownership mirror must be synced here directly.
+      await cardCopiesRepo.setOwner(copy.id, order.buyer);
       await tradesRepo.recordOrderTrade(order, card, result.hash);
     }
 

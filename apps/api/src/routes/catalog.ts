@@ -3,15 +3,15 @@
  */
 
 import { Router } from 'express';
-import { and, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, or, type SQL } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 import { MarketplaceContract, listingsQuerySchema } from '@cardmkt/shared';
 import { env } from '../env.js';
-import { filterHeldCards, simulateContractView } from '../stellar.js';
+import { simulateContractView } from '../stellar.js';
 
 export const catalogRouter: Router = Router();
 
-const { cards, listings } = schema;
+const { cards, cardCopies, listings } = schema;
 
 const contract = new MarketplaceContract(env.contractId);
 
@@ -22,17 +22,26 @@ const STELLAR_ADDRESS = /^[GC][A-Z2-7]{55}$/;
 // picker). Without `owner` this stays the unfiltered catalog.
 catalogRouter.get('/cards', async (req, res, next) => {
   try {
-    const rows = await db.select().from(cards);
     const owner = typeof req.query.owner === 'string' ? req.query.owner.trim() : '';
     if (!owner) {
-      res.json(rows);
+      res.json(await db.select().from(cards));
       return;
     }
     if (!STELLAR_ADDRESS.test(owner)) {
       res.status(400).json({ error: 'Invalid owner address', code: 'INVALID_OWNER' });
       return;
     }
-    res.json(await filterHeldCards(owner, rows));
+    // "Cards I hold": any card with at least one copy owned by this wallet, per
+    // the `card_copies.owner` mirror (kept in sync at settlement time).
+    const owned = await db
+      .selectDistinct({ cardId: cardCopies.cardId })
+      .from(cardCopies)
+      .where(eq(cardCopies.owner, owner));
+    const cardIds = owned.map((r) => r.cardId);
+    const rows = cardIds.length
+      ? await db.select().from(cards).where(inArray(cards.id, cardIds))
+      : [];
+    res.json(rows);
   } catch (err) {
     next(err);
   }
@@ -54,6 +63,7 @@ catalogRouter.get('/listings', async (req, res, next) => {
       .select({
         id: listings.id,
         cardId: listings.cardId,
+        cardCopyId: listings.cardCopyId,
         seller: listings.seller,
         priceUsdc: listings.priceUsdc,
         status: listings.status,
@@ -63,9 +73,6 @@ catalogRouter.get('/listings', async (req, res, next) => {
         createdAt: listings.createdAt,
         card: {
           id: cards.id,
-          assetCode: cards.assetCode,
-          issuer: cards.issuer,
-          sacAddress: cards.sacAddress,
           name: cards.name,
           set: cards.set,
           rarity: cards.rarity,
@@ -74,9 +81,17 @@ catalogRouter.get('/listings', async (req, res, next) => {
           creatorAccount: cards.creatorAccount,
           royaltyBps: cards.royaltyBps,
         },
+        copy: {
+          id: cardCopies.id,
+          cardId: cardCopies.cardId,
+          tokenId: cardCopies.tokenId,
+          serial: cardCopies.serial,
+          owner: cardCopies.owner,
+        },
       })
       .from(listings)
       .innerJoin(cards, eq(listings.cardId, cards.id))
+      .innerJoin(cardCopies, eq(listings.cardCopyId, cardCopies.id))
       .where(and(...filters))
       .orderBy(desc(listings.createdAt));
 

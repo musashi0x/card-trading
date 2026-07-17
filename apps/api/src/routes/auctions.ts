@@ -15,12 +15,13 @@ import type {
   Bid,
   BidListResponse,
   Card,
+  CardCopy,
   MyBidsResponse,
 } from '@cardmkt/shared';
 
 export const auctionsRouter: Router = Router();
 
-const { auctions, bids, cards } = schema;
+const { auctions, bids, cards, cardCopies } = schema;
 
 const STELLAR_ADDRESS = /^[GC][A-Z2-7]{55}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,13 +29,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type AuctionRow = typeof auctions.$inferSelect;
 type BidRow = typeof bids.$inferSelect;
 type CardRow = typeof cards.$inferSelect;
+type CardCopyRow = typeof cardCopies.$inferSelect;
 
 function toCard(row: CardRow): Card {
   return {
     id: row.id,
-    assetCode: row.assetCode,
-    issuer: row.issuer,
-    sacAddress: row.sacAddress,
     name: row.name,
     set: row.set,
     rarity: row.rarity,
@@ -45,11 +44,23 @@ function toCard(row: CardRow): Card {
   };
 }
 
-function toAuction(row: AuctionRow, card?: CardRow): Auction {
+function toCardCopy(row: CardCopyRow): CardCopy {
+  return {
+    id: row.id,
+    cardId: row.cardId,
+    tokenId: row.tokenId,
+    serial: row.serial,
+    owner: row.owner,
+  };
+}
+
+function toAuction(row: AuctionRow, card?: CardRow, copy?: CardCopyRow): Auction {
   return {
     id: row.id,
     cardId: row.cardId,
     card: card ? toCard(card) : undefined,
+    cardCopyId: row.cardCopyId,
+    copy: copy ? toCardCopy(copy) : undefined,
     contractAuctionId: row.contractAuctionId,
     seller: row.seller,
     startPriceUsdc: row.startPriceUsdc,
@@ -82,13 +93,14 @@ auctionsRouter.get('/', async (req, res, next) => {
   try {
     const status = typeof req.query.status === 'string' ? req.query.status : 'open';
     const rows = await db
-      .select({ auction: auctions, card: cards })
+      .select({ auction: auctions, card: cards, copy: cardCopies })
       .from(auctions)
       .innerJoin(cards, eq(auctions.cardId, cards.id))
+      .innerJoin(cardCopies, eq(auctions.cardCopyId, cardCopies.id))
       .where(eq(auctions.status, status as AuctionRow['status']))
       .orderBy(desc(auctions.createdAt));
     const body: AuctionListResponse = {
-      auctions: rows.map((r) => toAuction(r.auction, r.card)),
+      auctions: rows.map((r) => toAuction(r.auction, r.card, r.copy)),
     };
     res.json(body);
   } catch (err) {
@@ -106,16 +118,17 @@ auctionsRouter.get('/bids', async (req, res, next) => {
       return;
     }
     const rows = await db
-      .select({ bid: bids, auction: auctions, card: cards })
+      .select({ bid: bids, auction: auctions, card: cards, copy: cardCopies })
       .from(bids)
       .innerJoin(auctions, eq(bids.auctionId, auctions.id))
       .innerJoin(cards, eq(auctions.cardId, cards.id))
+      .innerJoin(cardCopies, eq(auctions.cardCopyId, cardCopies.id))
       .where(eq(bids.bidder, bidder))
       .orderBy(desc(bids.createdAt));
     const body: MyBidsResponse = {
       bids: rows.map((r) => ({
         ...toBid(r.bid),
-        auction: toAuction(r.auction, r.card),
+        auction: toAuction(r.auction, r.card, r.copy),
         isHighBidder: r.auction.highBidder === bidder,
       })),
     };
@@ -134,15 +147,16 @@ auctionsRouter.get('/:auctionId', async (req, res, next) => {
       return;
     }
     const [row] = await db
-      .select({ auction: auctions, card: cards })
+      .select({ auction: auctions, card: cards, copy: cardCopies })
       .from(auctions)
       .innerJoin(cards, eq(auctions.cardId, cards.id))
+      .innerJoin(cardCopies, eq(auctions.cardCopyId, cardCopies.id))
       .where(eq(auctions.id, auctionId));
     if (!row) {
       res.status(404).json({ error: 'Auction not found', code: 'NOT_FOUND' });
       return;
     }
-    res.json(toAuction(row.auction, row.card));
+    res.json(toAuction(row.auction, row.card, row.copy));
   } catch (err) {
     next(err);
   }

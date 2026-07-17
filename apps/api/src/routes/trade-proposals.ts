@@ -26,16 +26,17 @@ import {
   type TradeProposal,
 } from '@cardmkt/shared';
 import { env } from '../env.js';
-import { buildContractTx, filterHeldCards, isContractAddress, PreflightError } from '../stellar.js';
+import { buildContractTx, isContractAddress, PreflightError } from '../stellar.js';
 import * as settle from '../settlement/settle.js';
 import { feeFor } from '../data/trades.js';
 import { reconcileSwaps } from '../indexer.js';
-import { requireOnChainProposedSwap } from './tx/shared.js';
+import * as cardCopiesRepo from '../data/card-copies.js';
+import { requireCopyOwnership, requireOnChainProposedSwap } from './tx/shared.js';
 
 export const tradeProposalsRouter: Router = Router();
 
 const contract = new MarketplaceContract(env.contractId);
-const { cards, tradeProposals } = schema;
+const { cards, cardCopies, tradeProposals } = schema;
 
 /** Proposals expire 7 days after creation (enforced by the API, not the contract). */
 const EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
@@ -62,34 +63,34 @@ function requireClassicSource(actor: string): void {
   }
 }
 
-/** Load cards by id, preserving the requested order; throws if any is missing. */
-async function loadCardsInOrder(ids: string[]): Promise<(typeof cards.$inferSelect)[]> {
+/**
+ * Load card copies by id, preserving the requested order and joining parent card
+ * metadata; throws if any copy is missing.
+ */
+async function loadCopiesInOrder(
+  ids: string[],
+): Promise<{ copy: typeof cardCopies.$inferSelect; card: typeof cards.$inferSelect }[]> {
   if (ids.length === 0) return [];
-  const rows = await db.select().from(cards).where(inArray(cards.id, ids));
-  const byId = new Map(rows.map((c) => [c.id, c]));
+  const rows = await db
+    .select({ copy: cardCopies, card: cards })
+    .from(cardCopies)
+    .innerJoin(cards, eq(cardCopies.cardId, cards.id))
+    .where(inArray(cardCopies.id, ids));
+  const byId = new Map(rows.map((r) => [r.copy.id, r]));
   return ids.map((id) => {
-    const card = byId.get(id);
-    if (!card) throw new PreflightError(`Card ${id} not found`, 'CARD_NOT_FOUND', { cardId: id });
-    return card;
+    const row = byId.get(id);
+    if (!row) {
+      throw new PreflightError(`Card copy ${id} not found`, 'CARD_COPY_NOT_FOUND', {
+        cardCopyId: id,
+      });
+    }
+    return row;
   });
-}
-
-/** The on-chain card token (SAC) for a card, or an actionable error if undeployed. */
-function tokenOf(card: { id: string; sacAddress: string | null }): string {
-  if (!card.sacAddress) {
-    throw new PreflightError('Card asset contract not deployed', 'CARD_SAC_MISSING', {
-      cardId: card.id,
-    });
-  }
-  return card.sacAddress;
 }
 
 function toCardDto(c: typeof cards.$inferSelect): Card {
   return {
     id: c.id,
-    assetCode: c.assetCode,
-    issuer: c.issuer,
-    sacAddress: c.sacAddress,
     name: c.name,
     set: c.set,
     rarity: c.rarity,
@@ -100,17 +101,26 @@ function toCardDto(c: typeof cards.$inferSelect): Card {
   };
 }
 
-/** Shape a DB row into the API's `TradeProposal`, attaching joined card metadata. */
-function toDto(row: typeof tradeProposals.$inferSelect, cardsById: Map<string, Card>): TradeProposal {
-  const pick = (ids: string[]) => ids.map((id) => cardsById.get(id)).filter((c): c is Card => !!c);
+/**
+ * Shape a DB row into the API's `TradeProposal`. The `giveCardIds`/`getCardIds`
+ * wire fields (unchanged from the pre-copy `TradeProposal` type) now carry the
+ * *card copy* ids the DB actually stores (`giveCardCopyIds`/`getCardCopyIds`);
+ * `giveCards`/`getCards` are the parent card metadata for each copy, in the same
+ * order (a card can repeat if more than one of its copies is offered).
+ */
+function toDto(
+  row: typeof tradeProposals.$inferSelect,
+  cardByCopyId: Map<string, Card>,
+): TradeProposal {
+  const pick = (ids: string[]) => ids.map((id) => cardByCopyId.get(id)).filter((c): c is Card => !!c);
   return {
     id: row.id,
     proposer: row.proposer,
     counterparty: row.counterparty,
-    giveCardIds: row.giveCardIds,
-    getCardIds: row.getCardIds,
-    giveCards: pick(row.giveCardIds),
-    getCards: pick(row.getCardIds),
+    giveCardIds: row.giveCardCopyIds,
+    getCardIds: row.getCardCopyIds,
+    giveCards: pick(row.giveCardCopyIds),
+    getCards: pick(row.getCardCopyIds),
     cashUsdc: row.cashUsdc,
     feeUsdc: row.feeUsdc,
     status: row.status,
@@ -146,14 +156,20 @@ tradeProposalsRouter.get('/', async (req, res, next) => {
       .where(where)
       .orderBy(desc(tradeProposals.createdAt));
 
-    // Join card metadata for every referenced card in one query.
-    const cardIds = [...new Set(rows.flatMap((r) => [...r.giveCardIds, ...r.getCardIds]))];
-    const cardRows = cardIds.length
-      ? await db.select().from(cards).where(inArray(cards.id, cardIds))
+    // Join card metadata for every referenced copy in one query.
+    const copyIds = [
+      ...new Set(rows.flatMap((r) => [...r.giveCardCopyIds, ...r.getCardCopyIds])),
+    ];
+    const copyRows = copyIds.length
+      ? await db
+          .select({ copy: cardCopies, card: cards })
+          .from(cardCopies)
+          .innerJoin(cards, eq(cardCopies.cardId, cards.id))
+          .where(inArray(cardCopies.id, copyIds))
       : [];
-    const cardsById = new Map(cardRows.map((c) => [c.id, toCardDto(c)]));
+    const cardByCopyId = new Map(copyRows.map((r) => [r.copy.id, toCardDto(r.card)]));
 
-    res.json(rows.map((r) => toDto(r, cardsById)));
+    res.json(rows.map((r) => toDto(r, cardByCopyId)));
   } catch (err) {
     next(err);
   }
@@ -190,25 +206,20 @@ tradeProposalsRouter.post('/', async (req, res, next) => {
     const input = proposeSwapSchema.parse(req.body);
     requireClassicSource(input.proposer);
 
-    const giveCards = await loadCardsInOrder(input.giveCardIds);
-    const getCards = await loadCardsInOrder(input.getCardIds);
+    const giveCopies = await loadCopiesInOrder(input.giveCardCopyIds);
+    const getCopies = await loadCopiesInOrder(input.getCardCopyIds);
 
-    // The proposer must actually hold every give-side card on-chain.
-    const held = await filterHeldCards(input.proposer, giveCards);
-    if (held.length !== giveCards.length) {
-      const heldIds = new Set(held.map((c) => c.id));
-      const missing = giveCards.filter((c) => !heldIds.has(c.id)).map((c) => c.id);
-      throw new PreflightError('Proposer does not hold all give-side cards', 'MISSING_CARD', {
-        missing,
-      });
+    // The proposer must actually own every give-side copy on-chain.
+    for (const { copy } of giveCopies) {
+      await requireCopyOwnership(input.proposer, copy.tokenId);
     }
 
     const cashUsdc = input.cashUsdc ?? '0';
     const op = contract.proposeSwap(
       input.proposer,
       input.counterparty,
-      giveCards.map(tokenOf),
-      getCards.map(tokenOf),
+      giveCopies.map((r) => r.copy.tokenId),
+      getCopies.map((r) => r.copy.tokenId),
       toStroops(cashUsdc),
     );
     const xdr = await buildContractTx(input.proposer, op);
@@ -218,8 +229,8 @@ tradeProposalsRouter.post('/', async (req, res, next) => {
       .values({
         proposer: input.proposer,
         counterparty: input.counterparty,
-        giveCardIds: input.giveCardIds,
-        getCardIds: input.getCardIds,
+        giveCardCopyIds: input.giveCardCopyIds,
+        getCardCopyIds: input.getCardCopyIds,
         cashUsdc,
         status: 'proposed',
         expiresAt: new Date(Date.now() + EXPIRY_MS),
@@ -261,6 +272,14 @@ tradeProposalsRouter.post('/:id/accept', async (req, res, next) => {
       .update(tradeProposals)
       .set({ status: 'accepted', swapTxHash: result.hash, feeUsdc: feeFor(row.cashUsdc) })
       .where(eq(tradeProposals.id, row.id));
+    // Sync the ownership mirror for both sides of the swap immediately: give-side
+    // copies move from proposer to counterparty, get-side copies the other way.
+    for (const cardCopyId of row.giveCardCopyIds) {
+      await cardCopiesRepo.setOwner(cardCopyId, row.counterparty);
+    }
+    for (const cardCopyId of row.getCardCopyIds) {
+      await cardCopiesRepo.setOwner(cardCopyId, row.proposer);
+    }
     // Reconcile immediately so the settled `trades` row appears without waiting
     // for the next indexer tick.
     await reconcileSwaps().catch(() => {});

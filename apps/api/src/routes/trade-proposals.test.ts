@@ -23,6 +23,7 @@ import { db, schema } from '@cardmkt/db';
 vi.mock('../env.js', () => ({
   env: {
     contractId: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+    collectionContractId: 'CDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBKN4',
     platformIssuer: 'GCNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVD4R',
     feeBps: 200,
     logLevel: 'silent',
@@ -45,7 +46,23 @@ vi.mock('../stellar.js', () => ({
   filterHeldCards: vi.fn(async (_owner: string, cards: unknown[]) => cards),
   isContractAddress: (a: string) => a.startsWith('C'),
   // Swap actions guard on the on-chain proposal still being `proposed` (code 10).
-  simulateContractView: vi.fn(async () => ({ kind: 'ok', value: { status: 10 } })),
+  // Ownership probes (`owner_of`) read as unverifiable, which the preflight
+  // tolerates by design — the contract stays the final guard.
+  simulateContractView: vi.fn(async (op: unknown) => {
+    try {
+      const fn = (op as any)
+        .body()
+        .invokeHostFunctionOp()
+        .hostFunction()
+        .invokeContract()
+        .functionName()
+        .toString();
+      if (fn === 'owner_of') return { kind: 'unknown' };
+    } catch {
+      // Fall through to the swap-view default.
+    }
+    return { kind: 'ok', value: { status: 10 } };
+  }),
   requireTrustline: vi.fn(async () => {}),
   rpcServer: { getAccount: vi.fn().mockRejectedValue(new Error('no rpc in tests')) },
   PreflightError: class PreflightError extends Error {
@@ -64,7 +81,7 @@ vi.mock('../stellar.js', () => ({
 const { tradeProposalsRouter } = await import('./trade-proposals.js');
 const { simulateContractView } = await import('../stellar.js');
 
-const { cards, listings, trades, tradeProposals } = schema;
+const { cards, cardCopies, listings, trades, tradeProposals } = schema;
 
 // Valid ed25519 public keys (checksum-correct strkeys the Address builder accepts).
 const ALICE = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0xa1));
@@ -93,30 +110,37 @@ function makeApp(): express.Express {
 }
 
 let cardSeq = 0;
-async function makeCard(): Promise<string> {
+// Globally unique token ids: `card_copies.token_id` is unique across the DB and
+// vitest runs test files in parallel against the same database.
+function nextTokenId(): number {
+  return Math.floor(Math.random() * 2_000_000_000);
+}
+
+/** Mint a card with one copy owned by `owner`; returns the copy id proposals reference. */
+async function makeCard(owner: string): Promise<string> {
   cardSeq += 1;
   const [row] = await db
     .insert(cards)
     .values({
-      assetCode: `CARD${cardSeq}`,
-      issuer: 'GISSUER',
-      // A valid contract strkey so the swap op builder accepts it as a token.
-      sacAddress: StrKey.encodeContract(Buffer.alloc(32, cardSeq)),
       name: `Card ${cardSeq}`,
       set: 'Base',
       rarity: 'rare',
       imageUrl: 'http://img/x.png',
     })
     .returning({ id: cards.id });
-  return row!.id;
+  const [copy] = await db
+    .insert(cardCopies)
+    .values({ cardId: row!.id, tokenId: nextTokenId(), serial: 1, owner })
+    .returning({ id: cardCopies.id });
+  return copy!.id;
 }
 
 /** Insert a confirmed (`contractSwapId` set) proposal directly, for action tests. */
 async function seedProposal(opts: {
   proposer: string;
   counterparty: string;
-  giveCardIds: string[];
-  getCardIds: string[];
+  giveCardCopyIds: string[];
+  getCardCopyIds: string[];
   cashUsdc?: string;
 }): Promise<typeof tradeProposals.$inferSelect> {
   const [row] = await db
@@ -124,8 +148,8 @@ async function seedProposal(opts: {
     .values({
       proposer: opts.proposer,
       counterparty: opts.counterparty,
-      giveCardIds: opts.giveCardIds,
-      getCardIds: opts.getCardIds,
+      giveCardCopyIds: opts.giveCardCopyIds,
+      getCardCopyIds: opts.getCardCopyIds,
       cashUsdc: opts.cashUsdc ?? '0',
       status: 'proposed',
       contractSwapId: 7,
@@ -150,12 +174,12 @@ afterEach(() => vi.clearAllMocks());
 describe('barter trade proposals (e2e)', () => {
   // 9.1 — Alice proposes [cardA] for [cardB] with a 50 USDC sweetener.
   it('records a proposed row and locks the give-side card on propose', async () => {
-    const cardA = await makeCard();
-    const cardB = await makeCard();
+    const cardA = await makeCard(ALICE);
+    const cardB = await makeCard(BOB);
 
     const res = await request(app)
       .post('/api/trade-proposals')
-      .send({ proposer: ALICE, counterparty: BOB, giveCardIds: [cardA], getCardIds: [cardB], cashUsdc: '50' });
+      .send({ proposer: ALICE, counterparty: BOB, giveCardCopyIds: [cardA], getCardCopyIds: [cardB], cashUsdc: '50' });
 
     expect(res.status).toBe(200);
     expect(res.body.proposalId).toBeTruthy();
@@ -168,7 +192,7 @@ describe('barter trade proposals (e2e)', () => {
     expect(row!.status).toBe('proposed');
     expect(row!.proposer).toBe(ALICE);
     expect(row!.counterparty).toBe(BOB);
-    expect(row!.giveCardIds).toEqual([cardA]);
+    expect(row!.giveCardCopyIds).toEqual([cardA]);
     expect(Number(row!.cashUsdc)).toBe(50);
 
     // Submitting the signed propose_swap captures the on-chain proposal id.
@@ -188,13 +212,13 @@ describe('barter trade proposals (e2e)', () => {
 
   // 9.2 — Bob accepts; status→accepted, a trades row carries swap_tx_hash + fee.
   it('settles an accepted swap and writes a trades row with swap_tx_hash', async () => {
-    const cardA = await makeCard();
-    const cardB = await makeCard();
+    const cardA = await makeCard(ALICE);
+    const cardB = await makeCard(BOB);
     const p = await seedProposal({
       proposer: ALICE,
       counterparty: BOB,
-      giveCardIds: [cardA],
-      getCardIds: [cardB],
+      giveCardCopyIds: [cardA],
+      getCardCopyIds: [cardB],
       cashUsdc: '100',
     });
 
@@ -223,13 +247,13 @@ describe('barter trade proposals (e2e)', () => {
   // another path), so accept must fast-fail before relaying a doomed swap.
   it('rejects accepting a proposal no longer proposed on-chain with SWAP_CLOSED', async () => {
     vi.mocked(simulateContractView).mockResolvedValueOnce({ kind: 'ok', value: { status: 11 } });
-    const cardA = await makeCard();
-    const cardB = await makeCard();
+    const cardA = await makeCard(ALICE);
+    const cardB = await makeCard(BOB);
     const p = await seedProposal({
       proposer: ALICE,
       counterparty: BOB,
-      giveCardIds: [cardA],
-      getCardIds: [cardB],
+      giveCardCopyIds: [cardA],
+      getCardCopyIds: [cardB],
     });
     const res = await request(app)
       .post(`/api/trade-proposals/${p.id}/accept`)
@@ -243,12 +267,12 @@ describe('barter trade proposals (e2e)', () => {
 
   // 9.3 — Alice proposes then cancels; status→cancelled.
   it('cancels a proposal back to the proposer', async () => {
-    const cardA = await makeCard();
+    const cardA = await makeCard(ALICE);
     const p = await seedProposal({
       proposer: ALICE,
       counterparty: BOB,
-      giveCardIds: [cardA],
-      getCardIds: [],
+      giveCardCopyIds: [cardA],
+      getCardCopyIds: [],
     });
 
     const res = await request(app)
@@ -260,7 +284,7 @@ describe('barter trade proposals (e2e)', () => {
     expect(row!.status).toBe('cancelled');
 
     // Only the proposer can cancel.
-    const p2 = await seedProposal({ proposer: ALICE, counterparty: BOB, giveCardIds: [cardA], getCardIds: [] });
+    const p2 = await seedProposal({ proposer: ALICE, counterparty: BOB, giveCardCopyIds: [cardA], getCardCopyIds: [] });
     const denied = await request(app)
       .post(`/api/trade-proposals/${p2.id}/cancel`)
       .send({ account: BOB, signedXdr: 'SIGNED' });
@@ -270,13 +294,13 @@ describe('barter trade proposals (e2e)', () => {
 
   // 9.4 — Pure card-for-card swap (no USDC): fee is zero, no value moves.
   it('charges no fee on a pure card-for-card swap', async () => {
-    const cardA = await makeCard();
-    const cardB = await makeCard();
+    const cardA = await makeCard(ALICE);
+    const cardB = await makeCard(BOB);
     const p = await seedProposal({
       proposer: ALICE,
       counterparty: BOB,
-      giveCardIds: [cardA],
-      getCardIds: [cardB],
+      giveCardCopyIds: [cardA],
+      getCardCopyIds: [cardB],
       cashUsdc: '0',
     });
 
@@ -297,10 +321,10 @@ describe('barter trade proposals (e2e)', () => {
 
   // The self-trade guard rejects before any row or chain build.
   it('rejects a self-trade at validation', async () => {
-    const cardA = await makeCard();
+    const cardA = await makeCard(ALICE);
     const res = await request(app)
       .post('/api/trade-proposals')
-      .send({ proposer: ALICE, counterparty: ALICE, giveCardIds: [cardA], getCardIds: [] });
+      .send({ proposer: ALICE, counterparty: ALICE, giveCardCopyIds: [cardA], getCardCopyIds: [] });
     expect(res.status).toBe(400);
   });
 });

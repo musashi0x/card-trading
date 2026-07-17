@@ -2,7 +2,7 @@ import { and, eq, isNull, lt } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 import { PreflightError } from '../stellar.js';
 
-const { orders, listings, cards } = schema;
+const { orders, listings, cards, cardCopies } = schema;
 
 /** Default age before an unsubmitted `funded` order is considered abandoned. */
 const ABANDONED_ORDER_TTL_MS = 15 * 60 * 1000;
@@ -34,10 +34,11 @@ export async function sweepAbandonedOrders(ttlMs = ABANDONED_ORDER_TTL_MS): Prom
 
 export async function orderWithListingCard(orderId: string) {
   const [row] = await db
-    .select({ order: orders, listing: listings, card: cards })
+    .select({ order: orders, listing: listings, card: cards, copy: cardCopies })
     .from(orders)
     .innerJoin(listings, eq(orders.listingId, listings.id))
     .innerJoin(cards, eq(listings.cardId, cards.id))
+    .innerJoin(cardCopies, eq(listings.cardCopyId, cardCopies.id))
     .where(eq(orders.id, orderId));
   if (!row) notFound('Order');
   return row;

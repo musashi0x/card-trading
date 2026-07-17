@@ -33,6 +33,8 @@ export const env = {
   databaseUrl: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/cardmkt',
   stellar: stellarConfigFromEnv(),
   contractId: required('CONTRACT_ID'),
+  /** The global "TopDeck Cards" NFT collection contract (see adopt-nft-standard). */
+  collectionContractId: required('COLLECTION_CONTRACT_ID'),
   usdc: {
     code: process.env.USDC_ASSET_CODE ?? 'USDC',
     issuer: required('USDC_ISSUER'),
@@ -52,6 +54,18 @@ export const env = {
    */
   usdcIssuerSecret: process.env.PLATFORM_ISSUER_SECRET ?? process.env.USDC_ISSUER_SECRET ?? '',
   feeBps: Number(process.env.FEE_BPS ?? 200),
+  /**
+   * IPFS pinning for card art. `apiUrl` points at a Kubo node's RPC (local
+   * dev via docker-compose); `pinataJwt` selects Pinata when no node is set.
+   * With neither configured, minting stores the uploaded data URL verbatim
+   * (legacy behavior). `gatewayUrl` is where stored `ipfs://` URIs are
+   * resolved for display.
+   */
+  ipfs: {
+    apiUrl: process.env.IPFS_API_URL ?? '',
+    pinataJwt: process.env.PINATA_JWT ?? '',
+    gatewayUrl: (process.env.IPFS_GATEWAY_URL ?? 'http://localhost:8080').replace(/\/$/, ''),
+  },
   /** Default slippage tolerance (bps) baked into a pay-with-any-asset `sendMax`. */
   pathPaymentSlippageBps: Number(process.env.PATH_PAYMENT_SLIPPAGE_BPS ?? 50),
   /**

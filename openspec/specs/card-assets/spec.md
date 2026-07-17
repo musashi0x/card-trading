@@ -13,6 +13,7 @@ The system SHALL represent each tradable card as a Stellar Asset (identified by 
 #### Scenario: Card metadata stored off-chain
 - **WHEN** a card is registered
 - **THEN** its display metadata (name, set, rarity, image URL, supply) SHALL be stored in Postgres
+- **AND** when an IPFS provider is configured, the image URL SHALL be a content-addressed `ipfs://<CID>` reference to the pinned image rather than the image bytes themselves
 - **AND** the on-chain asset SHALL remain the source of truth for ownership
 
 ### Requirement: Card issuance on testnet

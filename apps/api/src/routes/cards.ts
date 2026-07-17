@@ -1,37 +1,28 @@
 /**
- * Card minting — issue a brand-new card asset at runtime.
+ * Card minting — issue a brand-new card as a run of unique NFT copies on the
+ * global "TopDeck Cards" collection contract (adopt-nft-standard).
  *
  * Mounted at `/api/cards` and only when the platform issuer secret is configured
- * (never on mainnet). The platform issues the asset, deploys its Stellar Asset
- * Contract, optionally registers a creator royalty, and distributes copies to the
- * owner. Issuance is signed server-side with the platform issuer secret, so no
- * key ever reaches the browser.
- *
- *  - Smart-wallet (`C…`) owner: copies are minted gaslessly in one call.
- *  - Classic (`G…`) owner without a trustline: `mint` returns a `trustlineXdr`
- *    for the wallet to sign; once submitted, `POST /:id/distribute` delivers the
- *    copies.
+ * (never on mainnet). For each of `supply` copies the platform calls the
+ * collection's owner-only `mint(to, creator, royalty_bps)`, signed server-side
+ * with the platform issuer/admin secret, so no key ever reaches the browser.
+ * NFT ownership needs no trustline, so the flow is identical for classic (`G…`)
+ * and smart-wallet (`C…`) owners — there is no trustline dance and no separate
+ * distribute step.
  */
 
 import { Router } from 'express';
-import { eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, schema } from '@cardmkt/db';
-import { cardAsset, mintAssetCode } from '@cardmkt/shared';
+import type { CardCopy } from '@cardmkt/shared';
 import { env } from '../env.js';
-import {
-  PreflightError,
-  buildChangeTrustTx,
-  deployCardSac,
-  hasTrustline,
-  isContractAddress,
-  mintCardCopies,
-  setCardRoyalty,
-} from '../stellar.js';
+import { dataUrlToBytes, ipfsClient } from '../lib/ipfs.js';
+import { PreflightError, mintCollectionCopy } from '../stellar.js';
 
 export const cardsRouter: Router = Router();
 
-const { cards } = schema;
+const { cards, cardCopies } = schema;
 
 const STELLAR_ADDRESS = /^[GC][A-Z2-7]{55}$/;
 
@@ -39,129 +30,110 @@ const mintSchema = z.object({
   owner: z.string().regex(STELLAR_ADDRESS, 'Must be a valid Stellar address (G… or C…)'),
   name: z.string().trim().min(1).max(80),
   set: z.string().trim().max(80).default(''),
-  rarity: z.enum(['common', 'rare', 'epic', 'legendary']),
+  rarity: z.enum(['common', 'uncommon', 'rare', 'epic', 'legendary']),
   // Accept an http(s) URL or a data: URL from the upload picker. Capped to keep
   // the JSON body (and the cards.image_url column) reasonable.
   imageUrl: z.string().min(1).max(2_000_000),
   supply: z.number().int().min(1).max(1000),
   royaltyBps: z.number().int().min(0).max(1000),
+  // Royalty payee registered on each minted token; defaults to `owner`. Lets a
+  // platform mint to a holder while royalties flow to a separate creator wallet.
+  creatorAccount: z.string().regex(STELLAR_ADDRESS, 'Must be a valid Stellar address (G… or C…)').optional(),
 });
 
-const distributeSchema = z.object({
-  owner: z.string().regex(STELLAR_ADDRESS, 'Must be a valid Stellar address (G… or C…)'),
-});
-
-/** Pick an asset code not already used by an existing card (retry on collision). */
-async function uniqueAssetCode(name: string): Promise<string> {
-  for (let i = 0; i < 8; i++) {
-    const code = mintAssetCode(name);
-    const existing = await db.select({ id: cards.id }).from(cards).where(eq(cards.assetCode, code));
-    if (existing.length === 0) return code;
+/**
+ * Uploaded art (a `data:` URL from the picker) is pinned to IPFS and stored as
+ * `ipfs://<CID>` when a provider is configured; otherwise — no provider, or an
+ * already-hosted http(s) URL — the value is stored verbatim. Runs before any
+ * DB write or on-chain mint so a pin failure aborts the whole request cleanly.
+ */
+async function pinImageIfConfigured(imageUrl: string): Promise<string> {
+  if (!ipfsClient || !imageUrl.startsWith('data:')) return imageUrl;
+  try {
+    const { bytes, mimeType } = dataUrlToBytes(imageUrl);
+    return `ipfs://${await ipfsClient.pin(bytes, mimeType)}`;
+  } catch (err) {
+    throw new PreflightError(
+      `Could not pin card image to IPFS: ${err instanceof Error ? err.message : String(err)}`,
+      'IPFS_PIN_FAILED',
+    );
   }
-  throw new PreflightError('Could not allocate a unique asset code — try again', 'CODE_COLLISION');
 }
 
-// POST /api/cards/mint — issue a new card asset and distribute copies to owner.
+function toCardCopyDto(row: typeof cardCopies.$inferSelect): CardCopy {
+  return {
+    id: row.id,
+    cardId: row.cardId,
+    tokenId: row.tokenId,
+    serial: row.serial,
+    owner: row.owner,
+  };
+}
+
+// POST /api/cards/mint — issue a new card as `supply` unique NFT copies.
 cardsRouter.post('/mint', async (req, res, next) => {
   try {
     if (!env.usdcIssuerSecret) {
       throw new PreflightError('Platform issuer secret not configured', 'NO_ISSUER_SECRET');
     }
     const body = mintSchema.parse(req.body);
-    const issuer = env.platformIssuer;
     const secret = env.usdcIssuerSecret;
 
-    // The platform issuer can't own copies of an asset it issues: an issuer
-    // cannot hold a trustline to its own asset, so the classic flow would build a
-    // self-trustline `changeTrust` that Stellar rejects outright. Fail fast with a
-    // clear error before allocating a code, deploying a SAC, or writing a row.
-    if (body.owner === issuer) {
-      throw new PreflightError(
-        'Cannot mint to the issuer account — an issuer cannot hold a trustline to its own asset',
-        'OWNER_IS_ISSUER',
-      );
-    }
+    // The royalty payee registered on-chain per token; defaults to the owner so
+    // a plain mint (no separate creator) still registers *someone* as payee.
+    const royaltyPayee = body.creatorAccount ?? body.owner;
 
-    // 1. Allocate the asset. A classic owner must be a real, funded account
-    // *before* we deploy a SAC or write a row — `hasTrustline` throws
-    // ACCOUNT_NOT_FOUND for a bogus owner, so this fails fast with no side effects.
-    const assetCode = await uniqueAssetCode(body.name);
-    const asset = cardAsset(assetCode, issuer);
-    const classic = !isContractAddress(body.owner);
-    const ownerTrusts = classic ? await hasTrustline(body.owner, asset) : true;
+    // 1. Pin uploaded art to IPFS (when configured) before any side effects.
+    const imageUrl = await pinImageIfConfigured(body.imageUrl);
 
-    // 2. Issue the asset + deploy its SAC (signed by the platform issuer).
-    const sacAddress = await deployCardSac(asset, secret);
-
-    // 3. Persist the card. Creator royalty only makes sense with a payee.
-    const creatorAccount = body.royaltyBps > 0 ? body.owner : null;
+    // 2. Persist the card. Creator royalty only makes sense with a payee.
     const [card] = await db
       .insert(cards)
       .values({
-        assetCode,
-        issuer,
-        sacAddress,
         name: body.name,
         set: body.set,
         rarity: body.rarity,
-        imageUrl: body.imageUrl,
+        imageUrl,
         supply: body.supply,
-        creatorAccount,
+        creatorAccount: body.royaltyBps > 0 ? royaltyPayee : null,
         royaltyBps: body.royaltyBps,
       })
       .returning();
 
-    // 4. Register the creator royalty on-chain (admin-only), if any.
-    if (body.royaltyBps > 0) {
-      await setCardRoyalty(sacAddress, body.owner, body.royaltyBps, secret);
+    // 3. Mint `supply` unique copies on the collection, one at a time (each
+    // mint is its own server-signed tx; token ids come back via the tx return
+    // value). Serial = mint order within this card.
+    const copies: CardCopy[] = [];
+    for (let serial = 1; serial <= body.supply; serial++) {
+      const tokenId = await mintCollectionCopy(body.owner, royaltyPayee, body.royaltyBps, secret);
+      const [copy] = await db
+        .insert(cardCopies)
+        .values({ cardId: card!.id, tokenId, serial, owner: body.owner })
+        .returning();
+      copies.push(toCardCopyDto(copy!));
     }
 
-    // 5. Distribute copies. A classic owner that doesn't trust the new asset yet
-    // signs the returned trustline, then claims via `distribute`.
-    if (classic && !ownerTrusts) {
-      const trustlineXdr = await buildChangeTrustTx(body.owner, asset);
-      res.json({
-        card,
-        minted: false,
-        trustlineXdr,
-        networkPassphrase: env.stellar.networkPassphrase,
-      });
-      return;
-    }
-    await mintCardCopies(asset, sacAddress, body.owner, body.supply, secret);
-    res.json({ card, minted: true });
+    res.json({ card, copies });
   } catch (err) {
     next(err);
   }
 });
 
-// POST /api/cards/:id/distribute — deliver copies after a classic owner has
-// established the trustline returned by `mint`.
-cardsRouter.post('/:id/distribute', async (req, res, next) => {
+// GET /api/cards/:id/copies[?owner=G…|C…] — a card's minted copies, ordered by
+// serial. With `owner`, narrowed to the copies that wallet currently holds
+// (per the Postgres mirror, kept in sync by the indexer/reconcilers).
+cardsRouter.get('/:id/copies', async (req, res, next) => {
   try {
-    if (!env.usdcIssuerSecret) {
-      throw new PreflightError('Platform issuer secret not configured', 'NO_ISSUER_SECRET');
+    const owner = typeof req.query.owner === 'string' ? req.query.owner.trim() : '';
+    if (owner && !STELLAR_ADDRESS.test(owner)) {
+      res.status(400).json({ error: 'Invalid owner address', code: 'INVALID_OWNER' });
+      return;
     }
-    const { owner } = distributeSchema.parse(req.body);
-    if (owner === env.platformIssuer) {
-      throw new PreflightError(
-        'Cannot distribute to the issuer account — an issuer cannot hold a trustline to its own asset',
-        'OWNER_IS_ISSUER',
-      );
-    }
-    const [card] = await db.select().from(cards).where(eq(cards.id, req.params.id));
-    if (!card) throw new PreflightError('Card not found', 'CARD_NOT_FOUND');
-    if (!card.sacAddress) throw new PreflightError('Card asset contract not deployed', 'NO_SAC');
-
-    const asset = cardAsset(card.assetCode, card.issuer);
-    if (!isContractAddress(owner) && !(await hasTrustline(owner, asset))) {
-      throw new PreflightError('Establish a trustline before claiming copies', 'MISSING_TRUSTLINE', {
-        assetCode: card.assetCode,
-        assetIssuer: card.issuer,
-      });
-    }
-    await mintCardCopies(asset, card.sacAddress, owner, card.supply, env.usdcIssuerSecret);
-    res.json({ card, minted: true });
+    const where = owner
+      ? and(eq(cardCopies.cardId, req.params.id), eq(cardCopies.owner, owner))
+      : eq(cardCopies.cardId, req.params.id);
+    const rows = await db.select().from(cardCopies).where(where).orderBy(asc(cardCopies.serial));
+    res.json(rows.map(toCardCopyDto));
   } catch (err) {
     next(err);
   }

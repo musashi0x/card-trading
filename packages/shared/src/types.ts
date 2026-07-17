@@ -19,12 +19,6 @@ export type OrderStatus = 'funded' | 'shipped' | 'disputed' | 'released' | 'refu
 
 export interface Card {
   id: string;
-  /** Stellar asset code (issued by the platform issuer). */
-  assetCode: string;
-  /** Stellar account that issued the asset. */
-  issuer: string;
-  /** Card token's Stellar Asset Contract address (`C…`), or null if not deployed. */
-  sacAddress: string | null;
   name: string;
   set: string;
   rarity: string;
@@ -37,10 +31,30 @@ export interface Card {
   royaltyBps: number;
 }
 
+/**
+ * One minted copy of a card: a unique token in the global collection
+ * contract. `serial` is the copy's mint order within its card (1-based),
+ * the number collectors price on.
+ */
+export interface CardCopy {
+  id: string;
+  cardId: string;
+  card?: Card;
+  /** Token id inside the collection contract. */
+  tokenId: number;
+  /** 1-based mint order within the card (#serial of card.supply). */
+  serial: number;
+  /** Wallet that currently owns this copy (mirrored from `owner_of`). */
+  owner: string;
+}
+
 export interface Listing {
   id: string;
   cardId: string;
   card?: Card;
+  /** The specific copy this listing sells. */
+  cardCopyId: string;
+  copy?: CardCopy;
   /** Stellar address of the seller. */
   seller: string;
   /** Price in test USDC, as a decimal string to avoid float drift. */
@@ -156,6 +170,9 @@ export interface Auction {
   id: string;
   cardId: string;
   card?: Card;
+  /** The specific copy this auction sells. */
+  cardCopyId: string;
+  copy?: CardCopy;
   /** Auction id inside the settlement contract. */
   contractAuctionId: number | null;
   /** Stellar address of the seller. */
@@ -195,9 +212,9 @@ export interface Bid {
   createdAt: string;
 }
 
-/** Build a `create_auction` transaction (seller escrows a card into an auction). */
+/** Build a `create_auction` transaction (seller escrows a card copy into an auction). */
 export interface CreateAuctionBuildRequest {
-  cardId: string;
+  cardCopyId: string;
   seller: string;
   /** Opening price in test USDC, decimal string. */
   startPriceUsdc: string;
@@ -339,7 +356,6 @@ export interface PortfolioHolding {
   cardId: string;
   name: string;
   rarity: string;
-  assetCode: string;
   imageUrl: string;
   /** Current value in USDC, decimal string; `"0"` when `valuedAt` is null. */
   value: string;
@@ -527,7 +543,8 @@ export interface PasskeySubmitRequest {
  * `signedXdr`. The API relays it rather than using a classic Horizon submit.
  */
 export interface PasskeyListRequest {
-  cardId: string;
+  /** The specific copy being listed; the API resolves its collection token id. */
+  cardCopyId: string;
   /** Smart-wallet contract address (`C…`) acting as seller of record. */
   seller: string;
   /** Asking price in test USDC, as a decimal string. */
@@ -542,9 +559,11 @@ export interface SubmitTxResponse {
 }
 
 /**
- * Mint (issue) a brand-new card asset. The platform issues the asset, deploys
- * its Stellar Asset Contract, distributes `supply` copies to `owner`, and (when
- * `royaltyBps > 0`) registers `owner` as the card's creator royalty payee.
+ * Mint a brand-new card. The platform mints `supply` unique copies (tokens)
+ * on the global collection contract, server-signed, and (when
+ * `royaltyBps > 0`) registers `owner` as each token's creator royalty payee.
+ * NFT ownership needs no trustline, so the flow is identical for classic
+ * (`G…`) and smart-wallet (`C…`) owners.
  */
 export interface MintCardRequest {
   /** Wallet that will own the minted copies — classic `G…` or smart-wallet `C…`. */
@@ -558,21 +577,17 @@ export interface MintCardRequest {
   supply: number;
   /** Creator royalty in basis points (0–maxRoyaltyBps); 0 = no royalty. */
   royaltyBps: number;
+  /**
+   * Royalty payee registered on each minted token; defaults to `owner`.
+   * Lets a platform mint to a holder while royalties flow to the creator.
+   */
+  creatorAccount?: string;
 }
 
-/**
- * Result of a mint. For a smart-wallet (`C…`) owner the copies are minted
- * gaslessly server-side (`minted: true`). For a classic (`G…`) owner that does
- * not yet trust the new asset, `minted` is false and `trustlineXdr` must be
- * signed + submitted before calling `distribute` to receive the copies.
- */
+/** Result of a mint: the card plus its freshly minted copies, owned by `owner`. */
 export interface MintCardResponse {
   card: Card;
-  /** Whether the owner already holds the issued copies. */
-  minted: boolean;
-  /** Set when a classic owner must establish a trustline before distribution. */
-  trustlineXdr?: string;
-  networkPassphrase?: string;
+  copies: CardCopy[];
 }
 
 /** The three ranked leaderboard boards. */

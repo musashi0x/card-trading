@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { eq } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 import {
   submitTxSchema,
@@ -7,22 +6,24 @@ import {
   passkeyListSchema,
   passkeyOrderSchema,
 } from '@cardmkt/shared';
-import { PreflightError, requireSmartWalletCard, requireSmartWalletUsdc } from '../../stellar.js';
+import { PreflightError, requireSmartWalletUsdc } from '../../stellar.js';
 import { relaySubmitter } from '../../relay.js';
 import * as settle from '../../settlement/settle.js';
 import { reconcile } from '../../settlement/reconcile.js';
 import * as listingsRepo from '../../data/listings.js';
 import * as ordersRepo from '../../data/orders.js';
+import * as cardCopiesRepo from '../../data/card-copies.js';
 import {
   needContractId,
   notFound,
+  requireCopyOwnership,
   requireOnChainActiveOrder,
   requireOnChainOpenListing,
 } from './shared.js';
 
 export const passkeyRouter: Router = Router();
 
-const { cards, listings, offers, orders } = schema;
+const { listings, offers, orders } = schema;
 
 // --- submit: passkey smart-wallet deployment (deploy-on-first-use), relay only ---
 passkeyRouter.post('/passkey-deploy', async (req, res, next) => {
@@ -82,17 +83,17 @@ passkeyRouter.post('/passkey-submit', async (req, res, next) => {
 passkeyRouter.post('/passkey-list', async (req, res, next) => {
   try {
     const input = passkeyListSchema.parse(req.body);
-    const [card] = await db.select().from(cards).where(eq(cards.id, input.cardId));
-    if (!card) notFound('Card');
-    if (!card.sacAddress) {
-      throw new PreflightError('Card asset contract not deployed', 'CARD_SAC_MISSING');
-    }
-    await requireSmartWalletCard(input.seller, card.sacAddress);
+    const row = await cardCopiesRepo.copyWithCard(input.cardCopyId);
+    if (!row) notFound('Card copy');
+    const { copy, card } = row;
+    // Seller must actually own this specific copy on-chain.
+    await requireCopyOwnership(input.seller, copy.tokenId);
 
     const [listing] = await db
       .insert(listings)
       .values({
         cardId: card.id,
+        cardCopyId: copy.id,
         seller: input.seller,
         priceUsdc: input.priceUsdc,
         status: 'open',

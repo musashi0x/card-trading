@@ -67,10 +67,6 @@ export const users = pgTable('users', {
 
 export const cards = pgTable('cards', {
   id: uuid('id').defaultRandom().primaryKey(),
-  assetCode: text('asset_code').notNull(),
-  issuer: text('issuer').notNull(),
-  /** Stellar Asset Contract address (filled after deploy), used as the token in contract calls. */
-  sacAddress: text('sac_address'),
   name: text('name').notNull(),
   set: text('set').notNull(),
   rarity: text('rarity').notNull(),
@@ -82,11 +78,42 @@ export const cards = pgTable('cards', {
   royaltyBps: integer('royalty_bps').notNull().default(0),
 });
 
+/**
+ * One minted copy of a card — a unique token in the global collection
+ * contract. `owner` is a mirror of the collection's `owner_of`, kept in sync
+ * by the indexer after settlements; the chain remains the source of truth.
+ */
+export const cardCopies = pgTable(
+  'card_copies',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    cardId: uuid('card_id')
+      .notNull()
+      .references(() => cards.id),
+    /** Token id inside the collection contract. */
+    tokenId: integer('token_id').notNull(),
+    /** 1-based mint order within the card (#serial of card.supply). */
+    serial: integer('serial').notNull(),
+    /** Wallet that currently owns this copy. */
+    owner: text('owner').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tokenIdUnique: uniqueIndex('card_copies_token_id_unique').on(t.tokenId),
+    cardSerialUnique: uniqueIndex('card_copies_card_serial_unique').on(t.cardId, t.serial),
+    ownerIdx: index('card_copies_owner_idx').on(t.owner),
+  }),
+);
+
 export const listings = pgTable('listings', {
   id: uuid('id').defaultRandom().primaryKey(),
   cardId: uuid('card_id')
     .notNull()
     .references(() => cards.id),
+  /** The specific copy this listing sells. */
+  cardCopyId: uuid('card_copy_id')
+    .notNull()
+    .references(() => cardCopies.id),
   seller: text('seller').notNull(),
   priceUsdc: numeric('price_usdc', { precision: 20, scale: 7 }).notNull(),
   status: listingStatus('status').notNull().default('open'),
@@ -151,6 +178,10 @@ export const auctions = pgTable(
     cardId: uuid('card_id')
       .notNull()
       .references(() => cards.id),
+    /** The specific copy this auction sells. */
+    cardCopyId: uuid('card_copy_id')
+      .notNull()
+      .references(() => cardCopies.id),
     seller: text('seller').notNull(),
     startPriceUsdc: numeric('start_price_usdc', { precision: 20, scale: 7 }).notNull(),
     reservePriceUsdc: numeric('reserve_price_usdc', { precision: 20, scale: 7 }).notNull().default('0'),
@@ -238,10 +269,10 @@ export const tradeProposals = pgTable(
     id: uuid('id').defaultRandom().primaryKey(),
     proposer: text('proposer').notNull(),
     counterparty: text('counterparty').notNull(),
-    /** Card ids (cards.id) the proposer gives — locked in contract custody. */
-    giveCardIds: text('give_card_ids').array().notNull(),
-    /** Card ids (cards.id) the proposer wants from the counterparty. */
-    getCardIds: text('get_card_ids').array().notNull(),
+    /** Copy ids (card_copies.id) the proposer gives — locked in contract custody. */
+    giveCardCopyIds: text('give_card_copy_ids').array().notNull(),
+    /** Copy ids (card_copies.id) the proposer wants from the counterparty. */
+    getCardCopyIds: text('get_card_copy_ids').array().notNull(),
     /** One-way USDC sweetener from proposer to counterparty (0 = pure card swap). */
     cashUsdc: numeric('cash_usdc', { precision: 20, scale: 7 }).notNull().default('0'),
     /** Platform fee taken on the USDC sweetener at settlement (0 until accepted). */
@@ -339,6 +370,7 @@ export const watchlist = pgTable(
 );
 
 export type CardRow = typeof cards.$inferSelect;
+export type CardCopyRow = typeof cardCopies.$inferSelect;
 export type ListingRow = typeof listings.$inferSelect;
 export type AuctionRow = typeof auctions.$inferSelect;
 export type BidRow = typeof bids.$inferSelect;

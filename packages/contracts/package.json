@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "stellar contract build",
+    "build": "stellar contract build --package card-collection && stellar contract build --package marketplace-contract",
     "test": "cargo test",
     "deploy": "tsx scripts/deploy.ts",
     "upgrade": "tsx scripts/upgrade.ts",

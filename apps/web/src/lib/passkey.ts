@@ -138,13 +138,13 @@ export async function signMakeOffer(
 /** Build + passkey-sign a `list` with the smart wallet as seller; return XDR. */
 export async function signList(
   wallet: SmartWalletAccount,
-  cardToken: string,
+  tokenId: number,
   priceUsdc: string,
   fulfillment: FulfillmentMode = 'digital',
 ): Promise<string> {
   const op = new MarketplaceContract(CONTRACT_ID).list(
     wallet.contractId,
-    cardToken,
+    tokenId,
     toStroops(priceUsdc),
     FULFILLMENT[fulfillment],
   );

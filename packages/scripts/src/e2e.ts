@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Horizon, Keypair, TransactionBuilder } from '@stellar/stellar-sdk';
+import { CARD_FIXTURES } from '@cardmkt/shared';
 
 const API = process.env.API_URL ?? 'http://localhost:4000';
 const ROOT = resolve(process.cwd(), '../..');
@@ -103,23 +104,11 @@ async function action(
   throw lastErr;
 }
 
-async function trustline(cardId: string, signer: Keypair): Promise<void> {
-  const built = await post('/api/tx/trustline', { account: signer.publicKey(), cardId });
-  const signed = sign(built.xdr, built.networkPassphrase, signer);
-  await post('/api/tx/submit-classic', { signedXdr: signed });
-}
-
 async function usdcBalance(account: string): Promise<number> {
   const acct = await horizon.loadAccount(account);
   const b = acct.balances.find(
     (x: any) => x.asset_code === accounts.usdc.code && x.asset_issuer === accounts.usdc.issuer,
   );
-  return b ? Number(b.balance) : 0;
-}
-
-async function cardBalance(account: string, assetCode: string): Promise<number> {
-  const acct = await horizon.loadAccount(account);
-  const b = acct.balances.find((x: any) => x.asset_code === assetCode);
   return b ? Number(b.balance) : 0;
 }
 
@@ -134,11 +123,41 @@ function assert(cond: boolean, msg: string) {
   console.log(`  ✓ ${msg}`);
 }
 
-async function cardByCode(code: string): Promise<string> {
-  const cards = await get('/api/cards');
-  const card = cards.find((c: any) => c.assetCode === code);
-  if (!card) throw new Error(`card ${code} not found`);
-  return card.id;
+/**
+ * Mint a fresh batch of a fixture's copies through the API (server-signed
+ * collection mint) and return the card + first copy. Each run mints its own
+ * copies so reruns never depend on leftover state. Royaltied cards pay the
+ * demo creator wallet; no trustline is needed to hold or receive an NFT copy.
+ */
+async function mintCard(slug: string, owner: string): Promise<{ cardId: string; copyId: string }> {
+  const fixture = CARD_FIXTURES.find((f) => f.slug === slug);
+  if (!fixture) throw new Error(`fixture ${slug} not found`);
+  const minted = await post('/api/cards/mint', {
+    owner,
+    name: fixture.name,
+    set: fixture.set,
+    rarity: fixture.rarity.toLowerCase(),
+    imageUrl: fixture.imageUrl,
+    supply: 2,
+    royaltyBps: fixture.royaltyBps,
+    creatorAccount:
+      fixture.royaltyBps > 0 ? (accounts.creator.publicKey as string) : undefined,
+  });
+  return { cardId: minted.card.id, copyId: minted.copies[0].id };
+}
+
+/**
+ * Whether `account` owns the copy, per the API's card_copies mirror. Retries
+ * briefly — the mirror updates when settlement reconciles, which can trail
+ * the submit by a moment.
+ */
+async function ownsCopy(cardId: string, copyId: string, account: string): Promise<boolean> {
+  for (let i = 0; i < 6; i++) {
+    const copies = (await get(`/api/cards/${cardId}/copies?owner=${account}`)) as any[];
+    if (copies.some((c: any) => c.id === copyId)) return true;
+    await sleep(1500);
+  }
+  return false;
 }
 
 async function main() {
@@ -146,20 +165,18 @@ async function main() {
 
   console.log('=== A. offer -> accept (hero flow, 3-way split w/ 5% royalty) ===');
   {
-    const cardId = await cardByCode('NOVA');
+    const { cardId, copyId } = await mintCard('NOVA', merchant.publicKey());
     const sellerUsdc0 = await usdcBalance(merchant.publicKey());
     const creatorUsdc0 = await usdcBalance(creatorPk);
 
     const { refId: listingId } = await action(
       '/api/tx/list',
-      { cardId, seller: merchant.publicKey(), priceUsdc: '50' },
+      { cardCopyId: copyId, seller: merchant.publicKey(), priceUsdc: '50' },
       merchant,
       'list',
     );
     console.log('  listed NOVA @ 50');
 
-    await trustline(cardId, consumer);
-    console.log('  consumer trustline -> NOVA');
 
     const { refId: offerId } = await action(
       '/api/tx/make-offer',
@@ -172,7 +189,7 @@ async function main() {
     await action('/api/tx/accept-offer', { offerId, seller: merchant.publicKey() }, merchant, 'accept_offer');
     console.log('  merchant accepted -> atomic settle');
 
-    assert((await cardBalance(consumer.publicKey(), 'NOVA')) >= 1, 'consumer received NOVA');
+    assert(await ownsCopy(cardId, copyId, consumer.publicKey()), 'consumer received NOVA');
     // 40 USDC: 2% fee (0.8) + 5% royalty (2.0) -> seller nets 37.2, creator +2.0.
     const received = (await usdcBalance(merchant.publicKey())) - sellerUsdc0;
     assert(Math.abs(received - 37.2) < 0.001, `seller received 37.2 (40 - 2% fee - 5% royalty), got ${received}`);
@@ -185,18 +202,17 @@ async function main() {
 
   console.log('=== B. buy-now (3-way split w/ 3% royalty) ===');
   {
-    const cardId = await cardByCode('EMBER');
+    const { cardId, copyId } = await mintCard('EMBER', merchant.publicKey());
     const sellerUsdc0 = await usdcBalance(merchant.publicKey());
     const creatorUsdc0 = await usdcBalance(creatorPk);
     const { refId: listingId } = await action(
       '/api/tx/list',
-      { cardId, seller: merchant.publicKey(), priceUsdc: '30' },
+      { cardCopyId: copyId, seller: merchant.publicKey(), priceUsdc: '30' },
       merchant,
       'list',
     );
-    await trustline(cardId, consumer);
     await action('/api/tx/buy-now', { listingId, buyer: consumer.publicKey() }, consumer, 'buy_now');
-    assert((await cardBalance(consumer.publicKey(), 'EMBER')) >= 1, 'consumer bought EMBER via buy-now');
+    assert(await ownsCopy(cardId, copyId, consumer.publicKey()), 'consumer bought EMBER via buy-now');
     // 30 USDC: 2% fee (0.6) + 3% royalty (0.9) -> seller nets 28.5, creator +0.9.
     const received = (await usdcBalance(merchant.publicKey())) - sellerUsdc0;
     assert(Math.abs(received - 28.5) < 0.001, `seller received 28.5 (30 - 2% fee - 3% royalty), got ${received}`);
@@ -206,14 +222,13 @@ async function main() {
 
   console.log('=== C. make-offer -> withdraw (consumer protection) ===');
   {
-    const cardId = await cardByCode('TIDE');
+    const { copyId } = await mintCard('TIDE', merchant.publicKey());
     const { refId: listingId } = await action(
       '/api/tx/list',
-      { cardId, seller: merchant.publicKey(), priceUsdc: '25' },
+      { cardCopyId: copyId, seller: merchant.publicKey(), priceUsdc: '25' },
       merchant,
       'list',
     );
-    await trustline(cardId, consumer);
     const before = await usdcBalance(consumer.publicKey());
     const { refId: offerId } = await action(
       '/api/tx/make-offer',
@@ -230,17 +245,16 @@ async function main() {
 
   console.log('=== D. primary sale (seller == creator -> no royalty, 2-way split) ===');
   {
-    const cardId = await cardByCode('VOID');
+    const { cardId, copyId } = await mintCard('VOID', creator.publicKey());
     const creatorUsdc0 = await usdcBalance(creator.publicKey());
     const { refId: listingId } = await action(
       '/api/tx/list',
-      { cardId, seller: creator.publicKey(), priceUsdc: '50' },
+      { cardCopyId: copyId, seller: creator.publicKey(), priceUsdc: '50' },
       creator,
       'list',
     );
-    await trustline(cardId, consumer);
     await action('/api/tx/buy-now', { listingId, buyer: consumer.publicKey() }, consumer, 'buy_now');
-    assert((await cardBalance(consumer.publicKey(), 'VOID')) >= 1, 'consumer bought VOID via buy-now');
+    assert(await ownsCopy(cardId, copyId, consumer.publicKey()), 'consumer bought VOID via buy-now');
     // VOID carries a 5% royalty, but the seller IS the creator -> only the 2%
     // platform fee applies: seller nets 49.0, no separate royalty payout.
     const received = (await usdcBalance(creator.publicKey())) - creatorUsdc0;
@@ -251,17 +265,16 @@ async function main() {
 
   console.log('=== E. pay-with-any-asset (XLM buyer -> path payment -> buy-now) ===');
   {
-    const cardId = await cardByCode('GROVE'); // no royalty -> clean two-way split
+    const { cardId, copyId } = await mintCard('GROVE', merchant.publicKey()); // no royalty -> clean two-way split
     const price = '20';
     const sellerUsdc0 = await usdcBalance(merchant.publicKey());
     const { refId: listingId } = await action(
       '/api/tx/list',
-      { cardId, seller: merchant.publicKey(), priceUsdc: price },
+      { cardCopyId: copyId, seller: merchant.publicKey(), priceUsdc: price },
       merchant,
       'list',
     );
-    await trustline(cardId, xlmBuyer); // card trustline so settlement can deliver
-    console.log('  listed GROVE @ 20; XLM buyer trustline -> GROVE');
+    console.log('  listed GROVE @ 20');
 
     // 1) Quote XLM -> USDC for the full price (the buyer holds no USDC).
     const quote = await post('/api/tx/quote-path', {
@@ -299,7 +312,7 @@ async function main() {
 
     // 3) Settle: buy-now, now that the buyer holds the converted USDC.
     await action('/api/tx/buy-now', { listingId, buyer: xlmBuyer.publicKey() }, xlmBuyer, 'buy_now');
-    assert((await cardBalance(xlmBuyer.publicKey(), 'GROVE')) >= 1, 'XLM buyer received GROVE via buy-now');
+    assert(await ownsCopy(cardId, copyId, xlmBuyer.publicKey()), 'XLM buyer received GROVE via buy-now');
     // GROVE has no royalty: 2% fee on 20 -> seller nets 19.6.
     const received = (await usdcBalance(merchant.publicKey())) - sellerUsdc0;
     assert(Math.abs(received - 19.6) < 0.001, `seller received 19.6 (20 - 2% fee), got ${received}`);

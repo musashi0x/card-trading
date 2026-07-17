@@ -20,6 +20,7 @@ import { db, schema } from '@cardmkt/db';
 vi.mock('../../env.js', () => ({
   env: {
     contractId: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+    collectionContractId: 'CDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBKN4',
     platformIssuer: 'GCNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVD4R',
     feeBps: 200,
     logLevel: 'silent',
@@ -64,7 +65,13 @@ vi.mock('../../stellar.js', () => ({
 const { buildRouter } = await import('./build.js');
 const { simulateContractView } = await import('../../stellar.js');
 
-const { cards, auctions, bids } = schema;
+const { cards, cardCopies, auctions, bids } = schema;
+// Globally unique token ids: `card_copies.token_id` is unique across the DB and
+// vitest runs test files in parallel against the same database.
+function nextTokenId(): number {
+  return Math.floor(Math.random() * 2_000_000_000);
+}
+
 const SELLER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0x5e));
 const BIDDER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0xb1));
 const ISSUER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0x15));
@@ -109,19 +116,21 @@ async function makeAuction(opts: {
   const [card] = await db
     .insert(cards)
     .values({
-      assetCode: `CARD${seq}`,
-      issuer: ISSUER,
-      sacAddress: StrKey.encodeContract(Buffer.alloc(32, seq)),
       name: `Card ${seq}`,
       set: 'Base',
       rarity: 'rare',
       imageUrl: 'http://img/x.png',
     })
     .returning({ id: cards.id });
+  const [copy] = await db
+    .insert(cardCopies)
+    .values({ cardId: card!.id, tokenId: nextTokenId(), serial: 1, owner: (opts.seller ?? SELLER) })
+    .returning({ id: cardCopies.id });
   const [auction] = await db
     .insert(auctions)
     .values({
       cardId: card!.id,
+      cardCopyId: copy!.id,
       seller: opts.seller ?? SELLER,
       startPriceUsdc: opts.startPriceUsdc ?? '100',
       reservePriceUsdc: '0',

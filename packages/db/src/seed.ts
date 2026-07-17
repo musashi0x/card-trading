@@ -1,66 +1,48 @@
 /**
- * Seed cards (task 4.3).
+ * Reset marketplace demo data.
  *
- * Combines off-chain metadata (shared fixtures) with on-chain facts written by
- * the setup/deploy scripts:
- *   - stellar-accounts.json -> issuer per card asset
- *   - deploy.json           -> SAC address per card asset
- * Falls back to env PLATFORM_ISSUER if the artifacts are absent, so the catalog
- * still renders before a full testnet bootstrap.
+ * Cards are NFTs in the global collection contract now, so card rows are no
+ * longer seeded here — a card only exists once it is minted on-chain through
+ * the API (`POST /api/cards/mint`; the scripts package's `demo.ts` does this).
+ * This script just clears the mirror tables in FK order so a fresh
+ * deploy + demo run starts from an honest, empty state.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { config } from 'dotenv';
-import { assetCodeForSlug, CARD_FIXTURES } from '@cardmkt/shared';
 import { db, queryClient } from './client.js';
-import { cards } from './schema.js';
-
-const ROOT = resolve(process.cwd(), '../..');
-config({ path: resolve(ROOT, '.env') });
-
-function readJson<T>(file: string): T | null {
-  const path = resolve(ROOT, file);
-  return existsSync(path) ? (JSON.parse(readFileSync(path, 'utf8')) as T) : null;
-}
+import {
+  auctions,
+  bids,
+  cardComments,
+  cardCopies,
+  cardReviews,
+  cards,
+  listings,
+  offers,
+  orders,
+  reviews,
+  trades,
+  tradeProposals,
+  watchlist,
+} from './schema.js';
 
 async function main() {
-  const accounts = readJson<{
-    cards: { slug: string; assetCode: string; issuer: string }[];
-    creator?: { publicKey: string };
-  }>('stellar-accounts.json');
-  const deploy = readJson<{ cardSacs: Record<string, string> }>('deploy.json');
-  const fallbackIssuer = process.env.PLATFORM_ISSUER ?? 'UNSET';
-
-  const issuerFor = (slug: string) =>
-    accounts?.cards.find((c) => c.slug === slug)?.issuer ?? fallbackIssuer;
-
-  // A single demo creator account receives every card's royalty.
-  const creatorAccount = accounts?.creator?.publicKey ?? process.env.CREATOR_ACCOUNT ?? null;
-
-  const rows = CARD_FIXTURES.map((f) => {
-    const assetCode = assetCodeForSlug(f.slug);
-    return {
-      assetCode,
-      issuer: issuerFor(f.slug),
-      sacAddress: deploy?.cardSacs?.[assetCode] ?? null,
-      name: f.name,
-      set: f.set,
-      rarity: f.rarity,
-      imageUrl: f.imageUrl,
-      supply: f.supply,
-      // A royalty rate is only meaningful with a creator account to pay.
-      creatorAccount: f.royaltyBps > 0 ? creatorAccount : null,
-      royaltyBps: f.royaltyBps,
-    };
-  });
-
-  console.log(`[seed] upserting ${rows.length} cards...`);
-  // Simple reset-and-insert; demo data, no FK dependents yet at seed time.
+  console.log('[seed] clearing demo data (cards are minted via the API now)...');
+  // Children before parents so no FK trips.
+  await db.delete(watchlist);
+  await db.delete(bids);
+  await db.delete(auctions);
+  await db.delete(reviews);
+  await db.delete(trades);
+  await db.delete(orders);
+  await db.delete(offers);
+  await db.delete(listings);
+  await db.delete(tradeProposals);
+  await db.delete(cardReviews);
+  await db.delete(cardComments);
+  await db.delete(cardCopies);
   await db.delete(cards);
-  await db.insert(cards).values(rows);
 
-  console.log('[seed] done.');
+  console.log('[seed] done — run the scripts package `demo` to mint + list cards.');
   await queryClient.end();
 }
 

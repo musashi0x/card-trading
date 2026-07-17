@@ -25,7 +25,7 @@ const decimalAmount = z
 export const fulfillmentSchema = z.enum(['digital', 'physical']);
 
 export const listInputSchema = z.object({
-  cardId: z.string().uuid(),
+  cardCopyId: z.string().uuid(),
   seller: stellarAddress,
   priceUsdc: decimalAmount,
   /** Defaults to `digital` so existing callers keep the atomic-swap behaviour. */
@@ -123,7 +123,7 @@ export const passkeySubmitSchema = z.object({
  * `/list` build endpoint.
  */
 export const passkeyListSchema = z.object({
-  cardId: z.string().uuid(),
+  cardCopyId: z.string().uuid(),
   /** Smart-wallet contract address (`C…`) acting as seller of record. */
   seller: stellarContractAddress,
   priceUsdc: decimalAmount,
@@ -158,7 +158,7 @@ const MAX_AUCTION_DURATION_SECS = 2_592_000;
 
 /** Seller escrows a card into a timed auction. */
 export const createAuctionSchema = z.object({
-  cardId: z.string().uuid(),
+  cardCopyId: z.string().uuid(),
   seller: stellarAddress,
   startPriceUsdc: decimalAmount,
   /** Optional reserve; defaults to no reserve (`0`). Must be >= start when set (checked in the route). */
@@ -196,8 +196,8 @@ export const proposeSwapSchema = z
   .object({
     proposer: stellarAccount,
     counterparty: stellarAccount,
-    giveCardIds: z.array(z.string().uuid()).min(1, 'Select at least one card to give'),
-    getCardIds: z.array(z.string().uuid()),
+    giveCardCopyIds: z.array(z.string().uuid()).min(1, 'Select at least one copy to give'),
+    getCardCopyIds: z.array(z.string().uuid()),
     cashUsdc: decimalAmount.optional(),
   })
   .refine((v) => v.proposer !== v.counterparty, {

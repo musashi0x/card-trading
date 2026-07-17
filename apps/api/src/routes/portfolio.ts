@@ -1,10 +1,11 @@
 /**
  * Portfolio valuation (add-portfolio-valuation change). Resolves a wallet's real
- * on-chain card holdings via `filterHeldCards`, values each with a market-price
- * waterfall, derives cost basis from the account's own purchase trades, and
- * aggregates totals, rarity allocation, best/worst performer, and a synthesized
- * 12-month value-history series — all computed on the fly from the existing
- * `cards`, `listings`, and `trades` tables (no snapshot store; see design.md).
+ * card holdings from the `card_copies.owner` mirror, values each with a
+ * market-price waterfall, derives cost basis from the account's own purchase
+ * trades, and aggregates totals, rarity allocation, best/worst performer, and a
+ * synthesized 12-month value-history series — all computed on the fly from the
+ * existing `cards`, `cardCopies`, `listings`, and `trades` tables (no snapshot
+ * store; see design.md).
  *
  * The pure computation helpers (`valuateCard`, `costBasisFor`, `buildHistory`,
  * `monthEndsEndingAt`, `monthKey`) are exported and unit-tested independently of
@@ -21,11 +22,10 @@ import type {
   PortfolioResponse,
   ValuedAt,
 } from '@cardmkt/shared';
-import { filterHeldCards } from '../stellar.js';
 
 export const portfolioRouter: Router = Router();
 
-const { cards, listings, trades } = schema;
+const { cards, cardCopies, listings, trades } = schema;
 
 const STELLAR_ADDRESS = /^[GC][A-Z2-7]{55}$/;
 
@@ -217,11 +217,15 @@ portfolioRouter.get('/', async (req, res, next) => {
       if (l.seller === account) openListedByAccount.add(l.cardId);
     }
 
-    // Holdings = cards held on-chain ∪ cards the account currently has open-listed
-    // (still owned until settlement). filterHeldCards tolerates an unknown/unfunded
-    // account (returns []), so the empty-portfolio path needs no special-casing.
-    const heldCards = await filterHeldCards(account, cardRows);
-    const holdingIds = new Set<string>(heldCards.map((c) => c.id));
+    // Holdings = cards with at least one copy owned by this wallet (per the
+    // `card_copies.owner` mirror) ∪ cards the account currently has open-listed
+    // (the mirror isn't updated until settlement, so a listed copy is already
+    // included here — the union is a harmless no-op kept for parity/safety).
+    const ownedCopies = await db
+      .select({ cardId: cardCopies.cardId })
+      .from(cardCopies)
+      .where(eq(cardCopies.owner, account));
+    const holdingIds = new Set<string>(ownedCopies.map((r) => r.cardId));
     for (const id of openListedByAccount) holdingIds.add(id);
 
     const cardById = new Map(cardRows.map((c) => [c.id, c]));
@@ -238,7 +242,6 @@ portfolioRouter.get('/', async (req, res, next) => {
         cardId: id,
         name: card.name,
         rarity: card.rarity,
-        assetCode: card.assetCode,
         imageUrl: card.imageUrl,
         value: usd(value),
         valuedAt,

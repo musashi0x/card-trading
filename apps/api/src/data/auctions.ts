@@ -2,18 +2,19 @@ import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 import { PreflightError } from '../stellar.js';
 
-const { auctions, bids, cards } = schema;
+const { auctions, bids, cards, cardCopies } = schema;
 
 function notFound(what: string): never {
   throw new PreflightError(`${what} not found`, 'NOT_FOUND');
 }
 
-/** An auction joined with its card metadata. */
+/** An auction joined with its card metadata and the specific copy it sells. */
 export async function auctionWithCard(auctionId: string) {
   const [row] = await db
-    .select({ auction: auctions, card: cards })
+    .select({ auction: auctions, card: cards, copy: cardCopies })
     .from(auctions)
     .innerJoin(cards, eq(auctions.cardId, cards.id))
+    .innerJoin(cardCopies, eq(auctions.cardCopyId, cardCopies.id))
     .where(eq(auctions.id, auctionId));
   if (!row) notFound('Auction');
   return row;
@@ -32,6 +33,7 @@ export async function bidLookup(bidId: string) {
 /** Insert the auction row at build time (mirrors `listings` on `list`). */
 export async function createAuctionRow(values: {
   cardId: string;
+  cardCopyId: string;
   seller: string;
   startPriceUsdc: string;
   reservePriceUsdc: string;

@@ -12,9 +12,9 @@ function addr(account: string): xdr.ScVal {
   return new Address(account).toScVal();
 }
 
-/** A Soroban `Vec<Address>` from a list of account/contract addresses. */
-function addressVec(accounts: string[]): xdr.ScVal {
-  return xdr.ScVal.scvVec(accounts.map(addr));
+/** A Soroban `Vec<u32>` from a list of collection token ids. */
+function u32Vec(tokenIds: number[]): xdr.ScVal {
+  return xdr.ScVal.scvVec(tokenIds.map(u32));
 }
 
 function i128(value: bigint): xdr.ScVal {
@@ -44,7 +44,7 @@ export class MarketplaceContract {
     this.contract = new Contract(contractId);
   }
 
-  /** init(admin, platform, arbiter, usdc_token, fee_bps, max_royalty_bps) — one-time setup. */
+  /** init(admin, platform, arbiter, usdc_token, fee_bps, max_royalty_bps, collection) — one-time setup. */
   init(
     admin: string,
     platform: string,
@@ -52,6 +52,7 @@ export class MarketplaceContract {
     usdcToken: string,
     feeBps: number,
     maxRoyaltyBps: number,
+    collection: string,
   ): xdr.Operation {
     return this.contract.call(
       'init',
@@ -61,6 +62,7 @@ export class MarketplaceContract {
       addr(usdcToken),
       u32(feeBps),
       u32(maxRoyaltyBps),
+      addr(collection),
     );
   }
 
@@ -74,27 +76,17 @@ export class MarketplaceContract {
     return this.contract.call('set_paused', bool(paused));
   }
 
-  /** set_royalty(card_token, creator, royalty_bps) — admin registers a card's creator royalty. */
-  setRoyalty(cardToken: string, creator: string, royaltyBps: number): xdr.Operation {
-    return this.contract.call('set_royalty', addr(cardToken), addr(creator), u32(royaltyBps));
-  }
-
-  /** get_royalty_view(card_token) -> RoyaltyConfig — read-only, for catalog/pre-flight. */
-  getRoyaltyView(cardToken: string): xdr.Operation {
-    return this.contract.call('get_royalty_view', addr(cardToken));
-  }
-
-  /** list(seller, card_token, price, fulfillment) -> listing_id. Locks the card. */
+  /** list(seller, token_id, price, fulfillment) -> listing_id. Locks the card copy. */
   list(
     seller: string,
-    cardToken: string,
+    tokenId: number,
     priceStroops: bigint,
     fulfillment: number = FULFILLMENT.digital,
   ): xdr.Operation {
     return this.contract.call(
       'list',
       addr(seller),
-      addr(cardToken),
+      u32(tokenId),
       i128(priceStroops),
       u32(fulfillment),
     );
@@ -165,12 +157,12 @@ export class MarketplaceContract {
   // --- timed auctions ---
 
   /**
-   * create_auction(seller, card_token, start_price, reserve_price, duration) -> auction_id.
-   * Escrows the card and opens a timed auction.
+   * create_auction(seller, token_id, start_price, reserve_price, duration) -> auction_id.
+   * Escrows the card copy and opens a timed auction.
    */
   createAuction(
     seller: string,
-    cardToken: string,
+    tokenId: number,
     startPriceStroops: bigint,
     reservePriceStroops: bigint,
     durationSecs: number,
@@ -178,7 +170,7 @@ export class MarketplaceContract {
     return this.contract.call(
       'create_auction',
       addr(seller),
-      addr(cardToken),
+      u32(tokenId),
       i128(startPriceStroops),
       i128(reservePriceStroops),
       u64(durationSecs),
@@ -213,22 +205,22 @@ export class MarketplaceContract {
   // --- barter swap ---
 
   /**
-   * propose_swap(proposer, counterparty, give_tokens[], get_tokens[], usdc_amount) -> proposal_id.
-   * Locks the proposer's give-side card tokens (and any USDC sweetener) into custody.
+   * propose_swap(proposer, counterparty, give_token_ids[], get_token_ids[], usdc_amount) -> proposal_id.
+   * Locks the proposer's give-side card copies (and any USDC sweetener) into custody.
    */
   proposeSwap(
     proposer: string,
     counterparty: string,
-    giveTokens: string[],
-    getTokens: string[],
+    giveTokenIds: number[],
+    getTokenIds: number[],
     usdcAmountStroops: bigint,
   ): xdr.Operation {
     return this.contract.call(
       'propose_swap',
       addr(proposer),
       addr(counterparty),
-      addressVec(giveTokens),
-      addressVec(getTokens),
+      u32Vec(giveTokenIds),
+      u32Vec(getTokenIds),
       i128(usdcAmountStroops),
     );
   }
@@ -261,5 +253,38 @@ export class MarketplaceContract {
   /** get_offer_view(offer_id) — read-only, for the indexer. */
   getOfferView(offerId: number): xdr.Operation {
     return this.contract.call('get_offer_view', u32(offerId));
+  }
+}
+
+/**
+ * Builders for the global card-collection (NFT) contract. Minting is
+ * restricted to the platform owner account and is signed server-side; the
+ * views back ownership preflights and the indexer.
+ */
+export class CardCollection {
+  private readonly contract: Contract;
+
+  constructor(contractId: string) {
+    this.contract = new Contract(contractId);
+  }
+
+  /** mint(to, creator, royalty_bps) -> token_id. Owner-only, server-signed. */
+  mint(to: string, creator: string, royaltyBps: number): xdr.Operation {
+    return this.contract.call('mint', addr(to), addr(creator), u32(royaltyBps));
+  }
+
+  /** owner_of(token_id) -> Address — read-only ownership preflight. */
+  ownerOf(tokenId: number): xdr.Operation {
+    return this.contract.call('owner_of', u32(tokenId));
+  }
+
+  /** balance(account) -> u32 — read-only copy count for a wallet. */
+  balance(account: string): xdr.Operation {
+    return this.contract.call('balance', addr(account));
+  }
+
+  /** token_royalty(token_id) -> (receiver, bps) — read-only; bps 0 means no royalty. */
+  tokenRoyalty(tokenId: number): xdr.Operation {
+    return this.contract.call('token_royalty', u32(tokenId));
   }
 }
