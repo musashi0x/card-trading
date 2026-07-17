@@ -11,5 +11,17 @@ services:
     volumes:
       - cardmkt-pg:/var/lib/postgresql/data
 
+  kubo:
+    image: ipfs/kubo:latest
+    container_name: cardmkt-kubo
+    ports:
+      # RPC API — the card API pins images here (IPFS_API_URL).
+      - '5001:5001'
+      # Gateway — serves pinned content for display (IPFS_GATEWAY_URL).
+      - '8080:8080'
+    volumes:
+      - cardmkt-ipfs:/data/ipfs
+
 volumes:
   cardmkt-pg:
+  cardmkt-ipfs:

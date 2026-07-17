@@ -2,23 +2,25 @@
  * Tests for the portfolio-valuation route + its pure helpers.
  *
  * The valuation/cost-basis/history helpers are exercised directly (no I/O). The
- * route is tested via supertest against a throwaway Express app, with the DB and
- * the `filterHeldCards` chain layer mocked so no Postgres/Horizon is touched.
+ * route is tested via supertest against a throwaway Express app, with the DB
+ * mocked so no Postgres is touched. Holdings are resolved from the
+ * `card_copies.owner` mirror, so ownership is faked by seeding the `cardCopies`
+ * dataset with `{ cardId }` rows for the account under test.
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-// --- mocks: drizzle helpers, the DB, and the chain layer ---
+// --- mocks: drizzle helpers + the DB ---
 
 // Shared state for the mocks. `vi.hoisted` runs before the hoisted `vi.mock`
 // factories, so they can safely reference these. Sentinel table objects let the
 // fake query builder key its dataset off whichever one `.from()` receives.
 const h = vi.hoisted(() => ({
   cards: { __table: 'cards' } as object,
+  cardCopies: { __table: 'cardCopies' } as object,
   listings: { __table: 'listings' } as object,
   trades: { __table: 'trades' } as object,
   datasets: new Map<unknown, unknown[]>(),
-  filterHeldCards: vi.fn(),
 }));
 
 // The route imports `eq` only; make it a no-op so column-less sentinel tables
@@ -43,12 +45,13 @@ vi.mock('@cardmkt/db', () => {
     };
     return builder;
   }
-  return { db: { select: () => fakeBuilder() }, schema: { cards: h.cards, listings: h.listings, trades: h.trades } };
+  return {
+    db: { select: () => fakeBuilder() },
+    schema: { cards: h.cards, cardCopies: h.cardCopies, listings: h.listings, trades: h.trades },
+  };
 });
 
-vi.mock('../stellar.js', () => ({ filterHeldCards: (...args: unknown[]) => h.filterHeldCards(...args) }));
-
-const { cards, listings, trades, datasets, filterHeldCards } = h;
+const { cards, cardCopies, listings, trades, datasets } = h;
 
 import express from 'express';
 import request from 'supertest';
@@ -76,7 +79,6 @@ function makeApp() {
 
 beforeEach(() => {
   datasets.clear();
-  filterHeldCards.mockReset();
 });
 
 // =====================================================================
@@ -184,14 +186,13 @@ describe('GET /api/portfolio', () => {
     const res = await request(makeApp()).get('/api/portfolio?account=not-a-real-address');
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_ACCOUNT');
-    expect(filterHeldCards).not.toHaveBeenCalled();
   });
 
   it('200 with an empty portfolio for an account that holds nothing', async () => {
     datasets.set(cards, []);
+    datasets.set(cardCopies, []);
     datasets.set(listings, []);
     datasets.set(trades, []);
-    filterHeldCards.mockResolvedValue([]);
 
     const res = await request(makeApp()).get(`/api/portfolio?account=${ACCOUNT}`);
     expect(res.status).toBe(200);
@@ -203,15 +204,15 @@ describe('GET /api/portfolio', () => {
   });
 
   it('200 with the correct shape for a seeded account with holdings', async () => {
-    const c1 = { id: 'c1', name: 'Solar Drake', rarity: 'legendary', assetCode: 'DRAKE', imageUrl: 'x' };
+    const c1 = { id: 'c1', name: 'Solar Drake', rarity: 'legendary', imageUrl: 'x' };
     datasets.set(cards, [c1]);
+    datasets.set(cardCopies, [{ cardId: 'c1' }]);
     datasets.set(listings, []);
     datasets.set(trades, [
       // account bought c1 at 100; a later third-party trade marks the market at 150.
       { cardId: 'c1', buyer: ACCOUNT, seller: 'GSELLER', priceUsdc: '100', settledAt: d('2024-03-01') },
       { cardId: 'c1', buyer: 'GOTHER', seller: 'GSOMEONE', priceUsdc: '150', settledAt: d('2024-05-01') },
     ]);
-    filterHeldCards.mockResolvedValue([c1]);
 
     const res = await request(makeApp()).get(`/api/portfolio?account=${ACCOUNT}`);
     expect(res.status).toBe(200);

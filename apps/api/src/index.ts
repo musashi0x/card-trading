@@ -12,6 +12,7 @@ import { ZodError } from 'zod';
 import { env } from './env.js';
 import { logger } from './logger.js';
 import { runWithContext } from './context.js';
+import { rewriteImageUrls } from './lib/ipfs.js';
 import { catalogRouter } from './routes/catalog.js';
 import { cardsRouter } from './routes/cards.js';
 import { txRouter } from './routes/tx.js';
@@ -90,6 +91,17 @@ app.use(
   }),
 );
 
+// Resolve stored `ipfs://` card art to gateway URLs at the response boundary,
+// so clients always receive directly fetchable image URLs (see lib/ipfs.ts).
+app.use((_req, res, next) => {
+  const json = res.json.bind(res);
+  res.json = (body: unknown) => {
+    rewriteImageUrls(body);
+    return json(body);
+  };
+  next();
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.use('/api', catalogRouter);
@@ -143,6 +155,9 @@ app.use(
 
 const server = app.listen(env.port, () => {
   logger.info({ port: env.port, network: env.stellar.network }, 'api listening');
+  if (!env.ipfs.apiUrl && !env.ipfs.pinataJwt) {
+    logger.warn('no IPFS provider configured (IPFS_API_URL / PINATA_JWT) — minted card images will be stored inline');
+  }
 });
 
 const stopIndexer = startIndexer();

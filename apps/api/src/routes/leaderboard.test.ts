@@ -21,7 +21,7 @@ import {
   leaderboardRouter,
 } from './leaderboard.js';
 
-const { cards, listings, trades, offers, reviews } = schema;
+const { cards, cardCopies, listings, trades, offers, reviews } = schema;
 
 // --- seeding helpers -------------------------------------------------------
 
@@ -31,8 +31,6 @@ async function makeCard(): Promise<string> {
   const [row] = await db
     .insert(cards)
     .values({
-      assetCode: `CARD${cardSeq}`,
-      issuer: 'GISSUER',
       name: `Card ${cardSeq}`,
       set: 'Base',
       rarity: 'rare',
@@ -42,10 +40,24 @@ async function makeCard(): Promise<string> {
   return row!.id;
 }
 
+let tokenSeq = 0;
+const serialByCard = new Map<string, number>();
+async function makeCardCopy(cardId: string, owner: string): Promise<string> {
+  tokenSeq += 1;
+  const serial = (serialByCard.get(cardId) ?? 0) + 1;
+  serialByCard.set(cardId, serial);
+  const [row] = await db
+    .insert(cardCopies)
+    .values({ cardId, tokenId: tokenSeq, serial, owner })
+    .returning({ id: cardCopies.id });
+  return row!.id;
+}
+
 async function makeListing(cardId: string, seller: string, price = '0'): Promise<string> {
+  const cardCopyId = await makeCardCopy(cardId, seller);
   const [row] = await db
     .insert(listings)
-    .values({ cardId, seller, priceUsdc: price })
+    .values({ cardId, cardCopyId, seller, priceUsdc: price })
     .returning({ id: listings.id });
   return row!.id;
 }
@@ -89,7 +101,7 @@ async function makeReview(reviewee: string, rating: number, reviewer = 'GREVIEWE
 async function truncateAll(): Promise<void> {
   // CASCADE clears the FK-dependent rows (trades, offers, reviews, …) too.
   await db.execute(
-    sql`TRUNCATE cards, listings, trades, offers, reviews, watchlist, orders RESTART IDENTITY CASCADE`,
+    sql`TRUNCATE cards, card_copies, listings, trades, offers, reviews, watchlist, orders RESTART IDENTITY CASCADE`,
   );
 }
 

@@ -21,7 +21,7 @@ import {
   scValToNative,
   type xdr,
 } from '@stellar/stellar-sdk';
-import { MarketplaceContract } from '@cardmkt/shared';
+import { CardCollection } from '@cardmkt/shared';
 import { env } from './env.js';
 import { getLog } from './context.js';
 
@@ -42,9 +42,9 @@ export class PreflightError extends Error {
 }
 
 /**
- * A just-minted card's `list` simulates a SAC `transfer` from the seller, which
- * reverts while the Soroban RPC's ledger view still lags Horizon — its
- * diagnostic reads "trustline entry is missing for account". We match that
+ * A contract call whose USDC (SEP-41) leg simulates a SAC `transfer` from an
+ * account can revert while the Soroban RPC's ledger view still lags Horizon —
+ * its diagnostic reads "trustline entry is missing for account". We match that
  * human-readable phrase rather than the accompanying `Error(Contract, #13)`
  * code, because that code is overloaded: the marketplace contract re-raises the
  * same `#13` as it escalates the trap, and any contract may define its own
@@ -58,15 +58,15 @@ function isTrustlineMissingError(err: unknown): boolean {
 /**
  * A contract call that depends on state written by a just-submitted classic tx
  * can transiently fail because the soroban RPC's ledger view briefly lags
- * Horizon. Three shapes show up right after minting + distributing a card,
- * before its `list`:
+ * Horizon. Shapes seen in practice:
  *  - `Account not found` from `getAccount` — the freshly funded seller isn't
  *    indexed by the RPC yet (Horizon already reports it).
- *  - `Storage, MissingValue` from simulation — the seller's just-minted card
- *    balance isn't visible yet when `list` simulates its transfer.
- *  - "trustline entry is missing" from the SAC `transfer` — the seller's
- *    just-distributed card trustline isn't ingested by the RPC yet, even though
- *    `requireBalance` already sees it on Horizon.
+ *  - `Storage, MissingValue` from simulation — state written by a preceding
+ *    classic tx (e.g. a just-minted card copy, or a fresh USDC trustline)
+ *    isn't visible yet to the following contract-call simulation.
+ *  - "trustline entry is missing" from a USDC SAC `transfer` — the buyer's
+ *    just-established USDC trustline isn't ingested by the RPC yet, even
+ *    though a Horizon balance check already sees it.
  * All clear within a ledger or two, so they're worth a short retry, not a 500.
  */
 function isLaggingLedgerError(err: unknown): boolean {
@@ -143,7 +143,7 @@ export async function buildContractTx(source: string, operation: xdr.Operation):
       // an actionable 400 rather than letting the raw HostError become a 500.
       if (isTrustlineMissingError(err)) {
         throw new PreflightError(
-          'Account must establish a trustline to the card asset before this action',
+          'Account must establish a trustline to the required asset before this action',
           'MISSING_TRUSTLINE',
           { account: source },
         );
@@ -379,9 +379,6 @@ export async function buildChangeTrustTx(account: string, asset: Asset): Promise
   return tx.toXDR();
 }
 
-/** Build an unsigned `changeTrust` tx so a user can trust a card asset. */
-export const buildTrustlineTx = buildChangeTrustTx;
-
 /**
  * The cheapest source-asset → USDC route Horizon can find for an exact USDC
  * receive amount. Returns the estimated source spend and the intermediate path,
@@ -573,42 +570,6 @@ export async function accountCreatedAt(account: string): Promise<string | null> 
 }
 
 
-/**
- * Filter `cards` down to those `account` actually holds on-chain. "Holding" a
- * card means a positive token balance, read differently per account kind:
- *  - classic (`G…`): a single Horizon lookup lists every trustline; we keep
- *    cards whose asset (code + issuer) shows a balance > 0.
- *  - smart wallet (`C…`): card tokens live inside the SAC, invisible to Horizon,
- *    so each deployed card's `balance(addr)` is simulated via the RPC.
- * An unfunded / unknown account holds nothing.
- */
-export async function filterHeldCards<
-  T extends { assetCode: string; issuer: string; sacAddress: string | null },
->(account: string, cards: T[]): Promise<T[]> {
-  if (isContractAddress(account)) {
-    const held = await Promise.all(
-      cards.map(async (c) => {
-        if (!c.sacAddress) return false;
-        const stroops = await smartWalletTokenStroops(c.sacAddress, account);
-        return stroops != null && stroops > 0n;
-      }),
-    );
-    return cards.filter((_, i) => held[i]);
-  }
-  let list: HorizonBalance[];
-  try {
-    list = await balances(account);
-  } catch {
-    return []; // unfunded / unknown account holds nothing
-  }
-  const held = new Set(
-    list
-      .filter((b) => b.asset_code && b.asset_issuer && Number(b.balance) > 0)
-      .map((b) => `${b.asset_code}:${b.asset_issuer}`),
-  );
-  return cards.filter((c) => held.has(`${c.assetCode}:${c.issuer}`));
-}
-
 /** Whether `account` already trusts `asset` (no throw). */
 export async function hasTrustline(account: string, asset: Asset): Promise<boolean> {
   return Boolean(findBalance(await balances(account), asset));
@@ -714,10 +675,7 @@ export async function signAndSubmitAs(
   return submitSignedTx(tx.toXDR());
 }
 
-// --- card minting (issue a new card asset at runtime) ---
-
-/** One card copy in stroops — assets carry 7 decimals, so 1 copy = 1.0 unit. */
-const ONE_CARD = 10_000_000n;
+// --- card minting (collection NFT mint at runtime) ---
 
 /** Whether an address is a Soroban contract account (`C…`) vs. a classic `G…`. */
 export function isContractAddress(address: string): boolean {
@@ -725,98 +683,36 @@ export function isContractAddress(address: string): boolean {
 }
 
 /**
- * Deploy the Stellar Asset Contract for a freshly issued card asset, signed by
- * the platform issuer. Returns the deterministic SAC address. Idempotent at the
- * address level: the SAC id derives from the asset, so a re-deploy of the same
- * asset would fail on-chain — callers mint with a fresh (random) asset code.
+ * Mint one card copy (a unique token) on the global collection contract,
+ * owner-only, signed by the platform issuer/admin key. `creator` is the
+ * royalty payee registered on this token (0 `royaltyBps` still requires a
+ * value; callers pass `owner` when there is no distinct creator). Returns the
+ * collection's freshly minted `token_id`.
  */
-export async function deployCardSac(asset: Asset, issuerSecret: string): Promise<string> {
-  return withIssuerLock(async () => {
-    const op = Operation.createStellarAssetContract({ asset });
-    const unsignedXdr = await buildContractTx(env.platformIssuer, op);
-    const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
-    tx.sign(Keypair.fromSecret(issuerSecret));
-    const result = await submitSignedTx(tx.toXDR());
-    if (!result.successful) {
-      throw new PreflightError('Card SAC deployment did not succeed on-chain', 'SAC_DEPLOY_FAILED', {
-        hash: result.hash,
-      });
-    }
-    return asset.contractId(env.stellar.networkPassphrase);
-  });
-}
-
-/**
- * Distribute `copies` of a card to `owner`, signed by the platform issuer.
- *  - Smart wallet (`C…`): SAC `mint(owner, amount)` — gasless, no trustline.
- *  - Classic (`G…`): a classic issuer `payment` — requires `owner` to already
- *    trust the asset (enforced by the caller before this runs).
- * Returns the settlement tx hash.
- */
-export async function mintCardCopies(
-  asset: Asset,
-  sacAddress: string,
+export async function mintCollectionCopy(
   owner: string,
-  copies: number,
-  issuerSecret: string,
-): Promise<string> {
-  return withIssuerLock(async () => {
-    if (isContractAddress(owner)) {
-      const sac = new Contract(sacAddress);
-      const op = sac.call(
-        'mint',
-        new Address(owner).toScVal(),
-        nativeToScVal(BigInt(copies) * ONE_CARD, { type: 'i128' }),
-      );
-      const unsignedXdr = await buildContractTx(env.platformIssuer, op);
-      const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
-      tx.sign(Keypair.fromSecret(issuerSecret));
-      const result = await submitSignedTx(tx.toXDR());
-      if (!result.successful) {
-        throw new PreflightError('Card mint did not succeed on-chain', 'MINT_FAILED', {
-          hash: result.hash,
-        });
-      }
-      return result.hash;
-    }
-    // Classic owner: standard issuer payment over Horizon.
-    const issuer = await horizon.loadAccount(env.platformIssuer);
-    const tx = new TransactionBuilder(issuer, {
-      fee: BASE_FEE,
-      networkPassphrase: env.stellar.networkPassphrase,
-    })
-      .addOperation(Operation.payment({ destination: owner, asset, amount: String(copies) }))
-      .setTimeout(180)
-      .build();
-    tx.sign(Keypair.fromSecret(issuerSecret));
-    const res = await horizon.submitTransaction(tx);
-    return res.hash;
-  });
-}
-
-/**
- * Register a creator royalty for a newly minted card on the settlement contract,
- * signed by the contract admin (the platform). Mirrors the deploy script's
- * `set_royalty`; rejected on-chain if `royaltyBps` exceeds the configured cap.
- */
-export async function setCardRoyalty(
-  sacAddress: string,
   creator: string,
   royaltyBps: number,
-  adminSecret: string,
-): Promise<string> {
+  issuerSecret: string,
+): Promise<number> {
   return withIssuerLock(async () => {
-    const op = new MarketplaceContract(env.contractId).setRoyalty(sacAddress, creator, royaltyBps);
+    const op = new CardCollection(env.collectionContractId).mint(owner, creator, royaltyBps);
     const unsignedXdr = await buildContractTx(env.platformIssuer, op);
     const tx = TransactionBuilder.fromXDR(unsignedXdr, env.stellar.networkPassphrase);
-    tx.sign(Keypair.fromSecret(adminSecret));
+    tx.sign(Keypair.fromSecret(issuerSecret));
     const result = await submitSignedTx(tx.toXDR());
     if (!result.successful) {
-      throw new PreflightError('Royalty registration did not succeed on-chain', 'ROYALTY_FAILED', {
+      throw new PreflightError('Card mint did not succeed on-chain', 'MINT_FAILED', {
         hash: result.hash,
       });
     }
-    return result.hash;
+    const tokenId = Number(result.returnValue);
+    if (!Number.isFinite(tokenId)) {
+      throw new PreflightError('Card mint succeeded but returned no token id', 'MINT_FAILED', {
+        hash: result.hash,
+      });
+    }
+    return tokenId;
   });
 }
 
@@ -936,30 +832,3 @@ export async function requireSmartWalletUsdc(
   }
 }
 
-/**
- * Ensure a smart-wallet seller (`C…`) holds at least one copy of a card token
- * before listing it. Mirrors {@link requireSmartWalletUsdc}: tolerant of an
- * unreadable balance (treated as unverifiable, not a hard fail) so an undeployed
- * wallet's deploy-on-first-use isn't blocked; the on-chain `list` still enforces
- * ownership atomically.
- */
-export async function requireSmartWalletCard(
-  walletContractId: string,
-  cardSacAddress: string,
-): Promise<void> {
-  const have = await smartWalletTokenStroops(cardSacAddress, walletContractId);
-  if (have === null) {
-    getLog().warn(
-      { walletContractId },
-      'preflight: could not read card balance for smart wallet; skipping ownership check',
-    );
-    return;
-  }
-  if (have <= 0n) {
-    throw new PreflightError(
-      'Smart wallet does not hold a copy of this card',
-      'INSUFFICIENT_BALANCE',
-      { have: have.toString(), need: '10000000' },
-    );
-  }
-}

@@ -2,17 +2,19 @@ import { eq } from 'drizzle-orm';
 import { db, schema } from '@cardmkt/db';
 import { PreflightError } from '../stellar.js';
 
-const { listings, cards } = schema;
+const { listings, cards, cardCopies } = schema;
 
 function notFound(what: string): never {
   throw new PreflightError(`${what} not found`, 'NOT_FOUND');
 }
 
+/** A listing joined with its card and the specific copy it sells. */
 export async function listingWithCard(listingId: string) {
   const [row] = await db
-    .select({ listing: listings, card: cards })
+    .select({ listing: listings, card: cards, copy: cardCopies })
     .from(listings)
     .innerJoin(cards, eq(listings.cardId, cards.id))
+    .innerJoin(cardCopies, eq(listings.cardCopyId, cardCopies.id))
     .where(eq(listings.id, listingId));
   if (!row) notFound('Listing');
   return row;

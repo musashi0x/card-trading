@@ -1,10 +1,11 @@
-import { MarketplaceContract, usdcAsset } from '@cardmkt/shared';
+import { CardCollection, MarketplaceContract, usdcAsset } from '@cardmkt/shared';
 import { env } from '../../env.js';
 import { PreflightError, requireTrustline, simulateContractView, type ViewRead } from '../../stellar.js';
 import * as listingsRepo from '../../data/listings.js';
 import * as offersRepo from '../../data/offers.js';
 
 export const contract = new MarketplaceContract(env.contractId);
+export const collection = new CardCollection(env.collectionContractId);
 export const usdc = usdcAsset(env.usdc.code, env.usdc.issuer);
 
 export function notFound(what: string): never {
@@ -109,6 +110,24 @@ export async function requireOnChainProposedSwap(sid: number): Promise<void> {
   // SWAP_PROPOSED = 10; anything else (accepted/cancelled/declined) or gone is terminal.
   if (view.kind === 'missing' || Number(view.value.status ?? 0) !== 10) {
     throw new PreflightError('This trade proposal is no longer active', 'SWAP_CLOSED');
+  }
+}
+
+/**
+ * Confirm `seller` actually owns the card copy (`owner_of(tokenId)` on the
+ * collection) before building a `list`/`create_auction` op that would
+ * otherwise revert on-chain. An unverifiable RPC read is tolerated (the
+ * contract stays the final, atomic guard).
+ */
+export async function requireCopyOwnership(seller: string, tokenId: number): Promise<void> {
+  const view = await simulateContractView(collection.ownerOf(tokenId));
+  if (view.kind === 'unknown') return;
+  // `owner_of` returns a bare Address, not a struct — `scValToNative` decodes it
+  // straight to its strkey string, so `view.value` (typed as a record for the
+  // struct-shaped views) is actually that string at runtime here.
+  const owner = view.kind === 'ok' ? String(view.value) : '';
+  if (view.kind === 'missing' || owner !== seller) {
+    throw new PreflightError('Seller does not own this card copy', 'NOT_OWNER', { tokenId });
   }
 }
 

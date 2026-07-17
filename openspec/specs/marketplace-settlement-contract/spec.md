@@ -3,17 +3,23 @@
 A single non-custodial Soroban escrow primitive that locks cards and USDC and settles trades atomically, distributing a platform fee and a contract-enforced creator royalty.
 ## Requirements
 ### Requirement: List a card into escrow
-The settlement contract SHALL allow a seller to list a card by locking the card asset in contract custody at a stated USDC price, producing a referenceable listing.
 
-#### Scenario: Seller lists a card
-- **WHEN** a seller calls `list` with a card asset and a USDC price
-- **THEN** the contract SHALL transfer the card into its own custody
-- **AND** SHALL record an open listing referencing the seller, card, and price
+The settlement contract SHALL accept a listing for a specific card copy
+(`token_id`) and take custody of that token via the collection's standard
+non-fungible transfer.
 
-#### Scenario: Listing requires the seller to own the card
-- **WHEN** a seller calls `list` for a card they do not hold
-- **THEN** the contract SHALL reject the transaction
-- **AND** no listing SHALL be created
+#### Scenario: Seller lists a card copy
+
+- **WHEN** a seller calls `list` with a `token_id` and a USDC price
+- **THEN** the contract SHALL transfer that token from the seller into its own
+  custody via the collection contract
+- **AND** SHALL record an open listing referencing the seller, token id, and
+  price
+
+#### Scenario: Listing requires the seller to own the copy
+
+- **WHEN** an account calls `list` for a token it does not own
+- **THEN** the collection transfer SHALL fail and no listing SHALL be created
 
 ### Requirement: Cancel a listing and reclaim the card
 The settlement contract SHALL allow the seller of an open listing to cancel it and reclaim the escrowed card.
@@ -94,56 +100,53 @@ The settlement contract SHALL apply a platform fee and bound creator royalties u
 - **THEN** it SHALL record a maximum royalty rate
 - **AND** that maximum plus the platform fee rate SHALL be less than the full sale amount in basis points
 
-### Requirement: Register a creator royalty per card
-The settlement contract SHALL maintain a per-card royalty registry that binds a card asset to a creator payout account and an immutable royalty rate in basis points, settable only by the contract admin and bounded by an initialization cap.
-
-#### Scenario: Admin registers a royalty for a card
-- **WHEN** the admin calls `set_royalty` with a card asset, a creator account, and a royalty rate at or below the configured cap
-- **THEN** the contract SHALL record the creator and royalty rate for that card
-- **AND** subsequent listings of that card SHALL bind that creator and rate
-
-#### Scenario: Royalty rate above the cap is rejected
-- **WHEN** the admin calls `set_royalty` with a royalty rate greater than the initialized maximum
-- **THEN** the contract SHALL reject the transaction
-- **AND** no royalty SHALL be recorded for that card
-
-#### Scenario: Only the admin can register a royalty
-- **WHEN** a non-admin account calls `set_royalty`
-- **THEN** the contract SHALL reject the transaction
-
-#### Scenario: Card without a registered royalty
-- **WHEN** a card with no registry entry is listed
-- **THEN** the contract SHALL treat its royalty rate as zero and its creator as the seller
-- **AND** the listing SHALL still be created and settle as a two-way split
-
-### Requirement: Listing binds the card's royalty at list time
-The settlement contract SHALL copy the registered creator and royalty rate onto a listing when it is created, so settlement reads an immutable snapshot that later registry changes cannot alter.
-
-#### Scenario: Listing snapshots the royalty
-- **WHEN** a seller lists a card that has a registered royalty
-- **THEN** the contract SHALL store the creator and royalty rate on the open listing
-- **AND** a later `set_royalty` change for that card SHALL NOT affect the already-open listing
-
 ### Requirement: Create an auction listing in the contract
-The settlement contract SHALL expose a `create_auction` entrypoint that escrows a card and records an `Auction` struct (seller, card_token, start_price, reserve_price, ends_at, high_bidder, high_bid, status). The auction id SHALL be assigned from a separate auto-incrementing counter distinct from the listing counter.
 
-#### Scenario: Auction created and card escrowed
-- **WHEN** a seller calls `create_auction` with a valid card, start price, reserve price, and duration
-- **THEN** the contract SHALL transfer the card into its own custody
-- **AND** SHALL record an open auction with `ends_at = ledger.timestamp() + duration`
-- **AND** SHALL emit `(Symbol::new("auction_created"), auction_id)` with payload `(seller, card_token, start_price, reserve_price, ends_at)`
+Auctions SHALL reference a specific card copy (`token_id`), escrowed via the
+collection's standard non-fungible transfer.
 
-#### Scenario: Seller does not hold the card
-- **WHEN** a seller calls `create_auction` for a card they do not hold
-- **THEN** the contract SHALL reject the transaction
+#### Scenario: Auction created and card copy escrowed
+
+- **WHEN** a seller calls `create_auction` with a valid `token_id`, start
+  price, reserve price, and duration
+- **THEN** the contract SHALL transfer that token into its own custody
+- **AND** SHALL record an open auction with
+  `ends_at = ledger.timestamp() + duration`
+- **AND** SHALL emit `(Symbol::new("auction_created"), auction_id)` with a
+  payload carrying `token_id` in place of the former `card_token`
 
 #### Scenario: Zero duration is rejected
+
 - **WHEN** a seller calls `create_auction` with duration of zero
 - **THEN** the contract SHALL reject the transaction
 
-#### Scenario: Auction and fixed-price listing coexist for different cards
-- **WHEN** a seller has an open fixed-price listing for card A and calls `create_auction` for card B
-- **THEN** the contract SHALL create both records independently using separate id counters
+#### Scenario: Auction and fixed-price listing coexist for different copies
+
+- **WHEN** a seller has an open fixed-price listing for one copy and calls
+  `create_auction` for another
+- **THEN** the contract SHALL create both records independently using separate
+  id counters
+
+### Requirement: Listing binds the card's royalty at list time
+
+The settlement contract SHALL read the token's creator and royalty rate from
+the collection contract when a listing or auction is created and store that
+snapshot on it, so settlement reads immutable economics that later royalty
+changes cannot alter.
+
+#### Scenario: Listing snapshots the royalty
+
+- **WHEN** a seller lists a card copy whose token has a registered royalty
+- **THEN** the contract SHALL store the creator and royalty rate on the open
+  listing
+- **AND** later royalty changes on the collection SHALL NOT affect the
+  already-open listing
+
+#### Scenario: Token without a royalty
+
+- **WHEN** a card copy with a zero royalty rate is listed
+- **THEN** the contract SHALL treat its creator as the seller and settle as a
+  two-way split
 
 ### Requirement: Place a bid with on-chain escrow
 The settlement contract SHALL expose a `place_bid` entrypoint that transfers the bid amount from the bidder to contract custody. The bid MUST exceed the current `high_bid` and MUST meet or exceed `start_price`. The previous high bidder's escrowed amount SHALL be refunded atomically. A `DataKey::Bid(auction_id, bidder)` SHALL record the remaining escrowed amount per bidder for `claim_refund` safety.

@@ -72,8 +72,8 @@ export interface WalletProps {
   runAction: (action: TradeAction, body: Record<string, unknown>) => Promise<string>;
   passkeyBuyNow: (listingId: string, contractListingId: number) => Promise<string>;
   passkeyList: (
-    cardId: string,
-    cardToken: string,
+    cardCopyId: string,
+    tokenId: number,
     priceUsdc: string,
     fulfillment?: FulfillmentMode,
   ) => Promise<string>;
@@ -198,7 +198,7 @@ function makeInitialState(seed: TopCard[]): TopDeckState {
     facets: { cats: [], rarities: [], graded: false, buyNow: false, ending: false, price: 'any' },
     bidOpen: false, bidAmount: '', bidBusy: false, toast: null, toastKind: 'win',
     status: {}, myMax: {},
-    sellStep: 1, sellMode: 'hold', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
+    sellStep: 1, sellMode: 'mint', mintedCard: null, myBidsTab: 'bidding', publishing: false, lastHash: null, dragOver: false,
     form: { ...EMPTY_FORM },
     cards: seed,
     refreshing: false,
@@ -983,7 +983,6 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
     setState({ publishing: true });
     try {
       let cardId = f.cardId;
-      let sacAddress = ref.current.mintedCard?.sacAddress ?? null;
 
       // Pre-flight: confirm the seller actually holds this card on-chain before
       // asking the contract to escrow it. Listing escrows ONE copy (create_auction
@@ -1016,28 +1015,30 @@ function TopDeckStore({ wallet, orders, seedCards, fetchFreshCards, catalog, chi
           royaltyBps: Math.round(Math.min(10, Math.max(0, Number(f.royaltyPct) || 0)) * 100),
         });
         cardId = minted.id;
-        sacAddress = minted.sacAddress;
         setState((s) => ({ mintedCard: minted, form: { ...s.form, cardId: minted.id } }));
+      }
+
+      // Fetch the specific copy of this card owned by the user
+      const copies = await api.cardCopies(cardId, address);
+      const copy = copies[0];
+      if (!copy) {
+        throw new Error("No owned copies found for this card.");
       }
 
       let hash: string;
       if (isAuction) {
         hash = await runAction('create_auction', {
-          cardId,
+          cardCopyId: copy.id,
           seller: address,
           startPriceUsdc: formatAmount(start),
           reservePriceUsdc: formatAmount(reserve),
           durationSecs: f.duration * 86400,
         });
       } else if (walletKind === 'passkey') {
-        if (!sacAddress) {
-          sacAddress = catalog.find((c) => c.id === cardId)?.sacAddress ?? null;
-        }
-        if (!sacAddress) throw new Error('Card asset contract not deployed');
-        hash = await passkeyList(cardId, sacAddress, formatAmount(start), f.fulfillment);
+        hash = await passkeyList(copy.id, copy.tokenId, formatAmount(start), f.fulfillment);
       } else {
         hash = await runAction('list', {
-          cardId,
+          cardCopyId: copy.id,
           seller: address,
           priceUsdc: formatAmount(start),
           fulfillment: f.fulfillment,

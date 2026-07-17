@@ -8,6 +8,7 @@ import type {
   BidListResponse,
   BuildTxResponse,
   Card,
+  CardCopy,
   CardCommentBody,
   CardComment,
   CardReview,
@@ -137,6 +138,12 @@ export const api = {
   /** The card registry, or — with `owner` — only the cards that wallet holds. */
   cards: (owner?: string) =>
     request<Card[]>(`/api/cards${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
+  cardCopies: (cardId: string, owner?: string) =>
+    request<CardCopy[]>(
+      `/api/cards/${encodeURIComponent(cardId)}/copies${
+        owner ? `?owner=${encodeURIComponent(owner)}` : ''
+      }`,
+    ),
   listings: (params?: { q?: string; set?: string; rarity?: string }) => {
     const qs = new URLSearchParams(params as Record<string, string>).toString();
     return request<Listing[]>(`/api/listings${qs ? `?${qs}` : ''}`);
@@ -316,17 +323,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  /** Mint (issue) a new card asset; distributes copies to `owner`. */
+  /** Mint a new card: `supply` unique NFT copies to `owner`, no trustline needed. */
   mintCard: (body: MintCardRequest) =>
     request<MintCardResponse>('/api/cards/mint', {
       method: 'POST',
       body: JSON.stringify(body),
-    }),
-  /** Deliver a minted card's copies once a classic owner has trusted the asset. */
-  distributeCard: (cardId: string, owner: string) =>
-    request<MintCardResponse>(`/api/cards/${cardId}/distribute`, {
-      method: 'POST',
-      body: JSON.stringify({ owner }),
     }),
 
   /** Dev-only: mint test USDC into a smart wallet so the first purchase has funds. */

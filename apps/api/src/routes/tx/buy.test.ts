@@ -19,6 +19,7 @@ import { db, schema } from '@cardmkt/db';
 vi.mock('../../env.js', () => ({
   env: {
     contractId: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
+    collectionContractId: 'CDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBKN4',
     platformIssuer: 'GCNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVGU2TKNJVD4R',
     feeBps: 200,
     logLevel: 'silent',
@@ -39,12 +40,14 @@ class PreflightError extends Error {
 }
 
 // The chain layer: balances/trustlines pass, the contract op builds to a stub XDR.
+// `simulateContractView` backs both the on-chain listing-status reads AND
+// `requireCopyOwnership`'s `owner_of` read (via the real, unmocked `tx/shared.js`);
+// tests that need to distinguish them override with `mockResolvedValueOnce` in order.
 vi.mock('../../stellar.js', () => ({
   PreflightError,
   buildContractTx: vi.fn(async () => 'UNSIGNED_XDR'),
   buildChangeTrustTx: vi.fn(async () => 'UNSIGNED_XDR'),
   buildPathPaymentTx: vi.fn(async () => 'UNSIGNED_XDR'),
-  buildTrustlineTx: vi.fn(async () => 'UNSIGNED_XDR'),
   findStrictReceivePath: vi.fn(),
   getAssetBalance: vi.fn(async () => '0'),
   hasTrustline: vi.fn(async () => true),
@@ -64,7 +67,13 @@ vi.mock('../../stellar.js', () => ({
 const { buildRouter } = await import('./build.js');
 const { hasTrustline, simulateContractView } = await import('../../stellar.js');
 
-const { cards, listings, orders } = schema;
+const { cards, cardCopies, listings, orders } = schema;
+// Globally unique token ids: `card_copies.token_id` is unique across the DB and
+// vitest runs test files in parallel against the same database.
+function nextTokenId(): number {
+  return Math.floor(Math.random() * 2_000_000_000);
+}
+
 const BUYER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0xb1));
 const SELLER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0x5e));
 const ISSUER = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0x15));
@@ -100,19 +109,21 @@ async function makeListing(status: 'open' | 'sold' | 'cancelled'): Promise<strin
   const [card] = await db
     .insert(cards)
     .values({
-      assetCode: `CARD${seq}`,
-      issuer: ISSUER,
-      sacAddress: StrKey.encodeContract(Buffer.alloc(32, seq)),
       name: `Card ${seq}`,
       set: 'Base',
       rarity: 'rare',
       imageUrl: 'http://img/x.png',
     })
     .returning({ id: cards.id });
+  const [copy] = await db
+    .insert(cardCopies)
+    .values({ cardId: card!.id, tokenId: nextTokenId(), serial: 1, owner: SELLER })
+    .returning({ id: cardCopies.id });
   const [listing] = await db
     .insert(listings)
     .values({
       cardId: card!.id,
+      cardCopyId: copy!.id,
       seller: SELLER,
       priceUsdc: '100',
       status,

@@ -114,43 +114,9 @@ export default function SellPage() {
           {/* STEP 1 — pick a real card */}
           {st.sellStep === 1 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-              {/* mode: list a held card vs. mint a brand-new one */}
-              <div style={{ display: 'inline-flex', alignSelf: 'flex-start', border: `3px solid ${INK}`, borderRadius: 11, overflow: 'hidden', boxShadow: `3px 3px 0 ${INK}` }}>
-                <div onClick={() => td.setSellMode('hold')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'hold' ? INK : '#fff', color: st.sellMode === 'hold' ? '#fff' : INK, borderRight: `3px solid ${INK}` }}>A card I hold</div>
-                <div onClick={() => td.setSellMode('mint')} style={{ fontSize: 13, fontWeight: 800, padding: '10px 18px', cursor: 'pointer', background: st.sellMode === 'mint' ? INK : '#fff', color: st.sellMode === 'mint' ? '#fff' : INK }}>✨ Mint a new card</div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.62)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>
+                You&apos;re issuing a brand-new card on-chain. Fill in its details below — it&apos;s minted to your wallet when you publish, then listed for sale.
               </div>
-              {st.sellMode === 'hold' ? (
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CHOOSE A CARD YOU HOLD</div>
-                  {td.catalog.length === 0 ? (
-                    <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.5)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>
-                      {!td.wallet.address
-                        ? 'Connect your wallet to see the cards you hold.'
-                        : 'You don’t hold any cards yet. Switch to “Mint a new card” to issue one.'}
-                    </div>
-                  ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 10 }}>
-                      {td.catalog.map((cat) => {
-                        const active = f.cardId === cat.id;
-                        return (
-                          <div key={cat.id} onClick={() => td.selectCatalogCard(cat)} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: 10, background: '#fff', border: `2.5px solid ${INK}`, borderRadius: 11, cursor: 'pointer', boxShadow: active ? `3px 3px 0 ${INK}` : 'none' }}>
-                            <div style={{ width: 44, height: 44, flex: 'none', borderRadius: 8, border: `2px solid ${INK}`, background: cat.imageUrl ? `center/cover no-repeat url("${cat.imageUrl}")` : rarityArt(mapRarity(cat.rarity)) }} />
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cat.name}</div>
-                              <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(26,19,5,.5)' }}>{cat.set} · {cat.rarity}</div>
-                            </div>
-                            {active && <span style={{ fontSize: 15, color: '#13c06a', fontWeight: 800 }}>✓</span>}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(26,19,5,.62)', background: '#fff', border: `2px dashed ${INK}`, borderRadius: 11, padding: '13px 15px' }}>
-                  You&apos;re issuing a brand-new card on-chain. Fill in its details below — it&apos;s minted to your wallet when you publish, then listed for sale.
-                </div>
-              )}
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '.02em', marginBottom: 8 }}>CARD NAME</div>
                 <input value={f.title} onChange={(e) => td.setForm('title', e.target.value)} placeholder="e.g. Solar Drake · 1st Edition" style={inputStyle} />

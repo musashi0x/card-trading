@@ -22,15 +22,17 @@
 //!   - `dispute`         buyer or seller freezes auto-release (DISPUTED)
 //!   - `resolve`         arbiter refunds the buyer or releases the seller
 //!
-//! Cards and USDC are both SAC tokens, moved through the standard token client.
+//! Cards are NFTs held in a companion collection contract (see the `card-collection`
+//! crate): every card a listing, auction, or swap proposal carries is a `token_id`
+//! in that single collection, moved via a minimal cross-contract client
+//! (`CollectionClient`) rather than a token balance. USDC is a SAC token, moved
+//! through the standard token client.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
-    Env, Symbol, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error, token,
+    Address, BytesN, Env, Symbol, Vec,
 };
 
-/// One card unit, in stroops (classic assets use 7 decimals).
-const ONE_CARD: i128 = 10_000_000;
 /// Basis-points denominator for the platform fee.
 const BPS_DENOM: i128 = 10_000;
 
@@ -83,6 +85,19 @@ const LEDGERS_PER_DAY: u32 = 17_280;
 const ENTRY_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 10;
 const ENTRY_TTL_EXTEND: u32 = LEDGERS_PER_DAY * 45;
 
+// --- collection contract interface ---
+
+/// Minimal client onto the card collection (NFT) contract: custody transfers
+/// and the royalty lookup used to snapshot a listing/auction's economics.
+/// Kept local (rather than importing the `card-collection` crate) so this
+/// contract only depends on the shape of the interface it actually calls.
+#[contractclient(name = "CollectionClient")]
+pub trait CollectionIface {
+    fn transfer(env: Env, from: Address, to: Address, token_id: u32);
+    fn owner_of(env: Env, token_id: u32) -> Address;
+    fn token_royalty(env: Env, token_id: u32) -> (Address, u32);
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -128,24 +143,17 @@ pub enum Error {
 #[derive(Clone)]
 pub struct Listing {
     pub seller: Address,
-    pub card_token: Address,
+    pub token_id: u32,
     pub price: i128,
     pub status: u32,
-    /// Creator paid a royalty on resale; equals `seller` when the card has no
-    /// registered royalty (then `royalty_bps` is 0 and no royalty is taken).
+    /// Creator paid a royalty on resale; equals `seller` when the token has no
+    /// royalty registered on the collection (then `royalty_bps` is 0 and no
+    /// royalty is taken).
     pub creator: Address,
     pub royalty_bps: u32,
     /// `FULFILL_DIGITAL` (instant atomic settlement) or `FULFILL_PHYSICAL`
     /// (held escrow with delivery confirmation).
     pub fulfillment: u32,
-}
-
-/// Per-card royalty registration: who gets paid and how much, in basis points.
-#[contracttype]
-#[derive(Clone)]
-pub struct RoyaltyConfig {
-    pub creator: Address,
-    pub bps: u32,
 }
 
 #[contracttype]
@@ -173,13 +181,13 @@ pub struct Order {
 
 /// A timed English auction. The card is escrowed in contract custody at
 /// `create_auction`; each bid escrows USDC and refunds the previous high bidder.
-/// `creator`/`royalty_bps` are snapshotted from the royalty registry at creation
-/// so settlement reuses the same fee/royalty split as fixed-price sales.
+/// `creator`/`royalty_bps` are snapshotted from the collection contract at
+/// creation so settlement reuses the same fee/royalty split as fixed-price sales.
 #[contracttype]
 #[derive(Clone)]
 pub struct Auction {
     pub seller: Address,
-    pub card_token: Address,
+    pub token_id: u32,
     pub start_price: i128,
     pub reserve_price: i128,
     /// Ledger timestamp after which the auction can be settled. Extended by
@@ -208,8 +216,8 @@ pub struct Auction {
 pub struct SwapProposal {
     pub proposer: Address,
     pub counterparty: Address,
-    pub give_tokens: Vec<Address>,
-    pub get_tokens: Vec<Address>,
+    pub give_tokens: Vec<u32>,
+    pub get_tokens: Vec<u32>,
     pub usdc_amount: i128,
     pub status: u32,
 }
@@ -220,6 +228,9 @@ enum DataKey {
     Admin,
     Platform,
     Usdc,
+    /// The card collection (NFT) contract; every `token_id` referenced by a
+    /// listing, auction, or swap proposal is a token in this collection.
+    Collection,
     FeeBps,
     MaxRoyaltyBps,
     /// Dispute arbiter; separate from `Admin` so refereeing is decoupled from
@@ -234,7 +245,6 @@ enum DataKey {
     Listing(u32),
     Offer(u32),
     Order(u32),
-    Royalty(Address),
     AuctionCount,
     Auction(u32),
     /// Per-bidder escrowed amount for an auction, kept so `claim_refund` can
@@ -252,7 +262,8 @@ impl Marketplace {
     // --- init ---
 
     /// One-time setup: platform fee collector, dispute arbiter, USDC token, fee
-    /// and the royalty ceiling, both in basis points. `fee_bps + max_royalty_bps`
+    /// and the royalty ceiling (both in basis points), and the card collection
+    /// contract every `token_id` resolves against. `fee_bps + max_royalty_bps`
     /// must stay below 100% so every settlement leaves the seller a non-negative
     /// share.
     pub fn init(
@@ -263,6 +274,7 @@ impl Marketplace {
         usdc_token: Address,
         fee_bps: u32,
         max_royalty_bps: u32,
+        collection: Address,
     ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with(&env, Error::AlreadyInitialized);
@@ -277,6 +289,7 @@ impl Marketplace {
         s.set(&DataKey::Arbiter, &arbiter);
         s.set(&DataKey::Paused, &false);
         s.set(&DataKey::Usdc, &usdc_token);
+        s.set(&DataKey::Collection, &collection);
         s.set(&DataKey::FeeBps, &fee_bps);
         s.set(&DataKey::MaxRoyaltyBps, &max_royalty_bps);
         s.set(&DataKey::ListingCount, &0u32);
@@ -306,7 +319,7 @@ impl Marketplace {
 
     /// Admin swaps the contract's code for a freshly uploaded WASM, keeping this
     /// contract id and all of its stored state (listings, offers, orders,
-    /// auctions, royalties). `new_wasm_hash` is the sha-256 hash returned by
+    /// auctions). `new_wasm_hash` is the sha-256 hash returned by
     /// `stellar contract upload`. This is how new entrypoints (e.g. a feature
     /// added after the original deploy) reach an already-live contract without a
     /// state-losing redeploy. The new code must keep `DataKey` layout compatible.
@@ -317,46 +330,11 @@ impl Marketplace {
         env.events().publish((Symbol::new(&env, "upgraded"),), ());
     }
 
-    // --- royalty registry ---
-
-    /// Admin registers (or updates) the creator royalty for a card. Rejected if
-    /// `royalty_bps` exceeds the ceiling fixed at `init`. Open listings keep the
-    /// royalty they snapshotted at `list` time, so this only affects future ones.
-    pub fn set_royalty(env: Env, card_token: Address, creator: Address, royalty_bps: u32) {
-        require_init(&env);
-        admin(&env).require_auth();
-        let max: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxRoyaltyBps)
-            .unwrap_or(0);
-        if royalty_bps > max {
-            panic_with(&env, Error::RoyaltyTooHigh);
-        }
-        let cfg = RoyaltyConfig {
-            creator: creator.clone(),
-            bps: royalty_bps,
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Royalty(card_token.clone()), &cfg);
-        env.events().publish(
-            (Symbol::new(&env, "royalty"), card_token),
-            (creator, royalty_bps),
-        );
-    }
-
     // --- list / cancel_listing ---
 
     /// Seller locks one card into escrow at `price` (USDC stroops) under the
     /// given `fulfillment` mode (0 = digital, 1 = physical). Returns the listing id.
-    pub fn list(
-        env: Env,
-        seller: Address,
-        card_token: Address,
-        price: i128,
-        fulfillment: u32,
-    ) -> u32 {
+    pub fn list(env: Env, seller: Address, token_id: u32, price: i128, fulfillment: u32) -> u32 {
         require_init(&env);
         require_not_paused(&env);
         seller.require_auth();
@@ -367,28 +345,21 @@ impl Marketplace {
             panic_with(&env, Error::BadAmount);
         }
         // Pull the card into contract custody.
-        token::TokenClient::new(&env, &card_token).transfer(
+        CollectionClient::new(&env, &collection(&env)).transfer(
             &seller,
             &env.current_contract_address(),
-            &ONE_CARD,
+            &token_id,
         );
 
-        // Snapshot the card's registered royalty onto the listing so later
-        // registry changes can't alter an already-open listing's economics. A
-        // card with no registration defaults to no royalty (creator = seller).
-        let (creator, royalty_bps) = match env
-            .storage()
-            .persistent()
-            .get::<_, RoyaltyConfig>(&DataKey::Royalty(card_token.clone()))
-        {
-            Some(cfg) => (cfg.creator, cfg.bps),
-            None => (seller.clone(), 0u32),
-        };
+        // Snapshot the token's royalty onto the listing so later minting/registry
+        // activity elsewhere can't alter an already-open listing's economics. A
+        // token with no royalty defaults to no royalty (creator = seller).
+        let (creator, royalty_bps) = snapshot_royalty(&env, token_id, &seller);
 
         let id = next_id(&env, &DataKey::ListingCount);
         let listing = Listing {
             seller: seller.clone(),
-            card_token,
+            token_id,
             price,
             status: STATUS_OPEN,
             creator,
@@ -415,10 +386,10 @@ impl Marketplace {
         if listing.seller != seller {
             panic_with(&env, Error::NotSeller);
         }
-        token::TokenClient::new(&env, &listing.card_token).transfer(
+        CollectionClient::new(&env, &collection(&env)).transfer(
             &env.current_contract_address(),
             &seller,
-            &ONE_CARD,
+            &listing.token_id,
         );
         listing.status = STATUS_CANCELLED;
         put_listing(&env, listing_id, &listing);
@@ -553,10 +524,10 @@ impl Marketplace {
         if royalty > 0 {
             u.transfer(&buyer, &listing.creator, &royalty);
         }
-        token::TokenClient::new(&env, &listing.card_token).transfer(
+        CollectionClient::new(&env, &collection(&env)).transfer(
             &env.current_contract_address(),
             &buyer,
-            &ONE_CARD,
+            &listing.token_id,
         );
 
         listing.status = STATUS_DONE;
@@ -717,7 +688,7 @@ impl Marketplace {
     pub fn create_auction(
         env: Env,
         seller: Address,
-        card_token: Address,
+        token_id: u32,
         start_price: i128,
         reserve_price: i128,
         duration: u64,
@@ -733,27 +704,20 @@ impl Marketplace {
         }
         // Pull the card into contract custody (the card can only be escrowed once,
         // which blocks a duplicate auction/listing on the same copy).
-        token::TokenClient::new(&env, &card_token).transfer(
+        CollectionClient::new(&env, &collection(&env)).transfer(
             &seller,
             &env.current_contract_address(),
-            &ONE_CARD,
+            &token_id,
         );
 
-        // Snapshot the card's registered royalty, exactly as `list` does.
-        let (creator, royalty_bps) = match env
-            .storage()
-            .persistent()
-            .get::<_, RoyaltyConfig>(&DataKey::Royalty(card_token.clone()))
-        {
-            Some(cfg) => (cfg.creator, cfg.bps),
-            None => (seller.clone(), 0u32),
-        };
+        // Snapshot the token's royalty, exactly as `list` does.
+        let (creator, royalty_bps) = snapshot_royalty(&env, token_id, &seller);
 
         let ends_at = env.ledger().timestamp() + duration;
         let id = next_id(&env, &DataKey::AuctionCount);
         let auction = Auction {
             seller: seller.clone(),
-            card_token: card_token.clone(),
+            token_id,
             start_price,
             reserve_price,
             ends_at,
@@ -767,7 +731,7 @@ impl Marketplace {
 
         env.events().publish(
             (Symbol::new(&env, "auction_created"), id),
-            (seller, card_token, start_price, reserve_price, ends_at),
+            (seller, token_id, start_price, reserve_price, ends_at),
         );
         id
     }
@@ -845,7 +809,7 @@ impl Marketplace {
                     &auction.seller,
                     &auction.creator,
                     auction.royalty_bps,
-                    &auction.card_token,
+                    auction.token_id,
                     &winner,
                     auction.high_bid,
                 );
@@ -871,10 +835,10 @@ impl Marketplace {
                     usdc(&env).transfer(&contract, &bidder, &auction.high_bid);
                     set_bid(&env, auction_id, &bidder, 0);
                 }
-                token::TokenClient::new(&env, &auction.card_token).transfer(
+                CollectionClient::new(&env, &collection(&env)).transfer(
                     &contract,
                     &auction.seller,
-                    &ONE_CARD,
+                    &auction.token_id,
                 );
                 auction.status = AUCTION_NO_WINNER;
                 put_auction(&env, auction_id, &auction);
@@ -901,10 +865,10 @@ impl Marketplace {
         if auction.high_bid != 0 {
             panic_with(&env, Error::AuctionHasBids);
         }
-        token::TokenClient::new(&env, &auction.card_token).transfer(
+        CollectionClient::new(&env, &collection(&env)).transfer(
             &env.current_contract_address(),
             &seller,
-            &ONE_CARD,
+            &auction.token_id,
         );
         auction.status = AUCTION_CANCELLED;
         put_auction(&env, auction_id, &auction);
@@ -941,8 +905,8 @@ impl Marketplace {
         env: Env,
         proposer: Address,
         counterparty: Address,
-        give_tokens: Vec<Address>,
-        get_tokens: Vec<Address>,
+        give_tokens: Vec<u32>,
+        get_tokens: Vec<u32>,
         usdc_amount: i128,
     ) -> u32 {
         require_init(&env);
@@ -959,9 +923,10 @@ impl Marketplace {
         }
 
         let contract = env.current_contract_address();
+        let collection_client = CollectionClient::new(&env, &collection(&env));
         // Pull each give-side card into custody.
-        for token_addr in give_tokens.iter() {
-            token::TokenClient::new(&env, &token_addr).transfer(&proposer, &contract, &ONE_CARD);
+        for token_id in give_tokens.iter() {
+            collection_client.transfer(&proposer, &contract, &token_id);
         }
         // Lock the USDC sweetener up front so it can move atomically when only the
         // counterparty signs `execute_swap`.
@@ -1004,21 +969,14 @@ impl Marketplace {
         }
 
         let contract = env.current_contract_address();
+        let collection_client = CollectionClient::new(&env, &collection(&env));
         // Counterparty's get-side cards go straight to the proposer.
-        for token_addr in proposal.get_tokens.iter() {
-            token::TokenClient::new(&env, &token_addr).transfer(
-                &counterparty,
-                &proposal.proposer,
-                &ONE_CARD,
-            );
+        for token_id in proposal.get_tokens.iter() {
+            collection_client.transfer(&counterparty, &proposal.proposer, &token_id);
         }
         // Proposer's escrowed give-side cards are released to the counterparty.
-        for token_addr in proposal.give_tokens.iter() {
-            token::TokenClient::new(&env, &token_addr).transfer(
-                &contract,
-                &counterparty,
-                &ONE_CARD,
-            );
+        for token_id in proposal.give_tokens.iter() {
+            collection_client.transfer(&contract, &counterparty, &token_id);
         }
         // USDC sweetener (if any): fee to platform, remainder to the counterparty.
         // Pure card-for-card swaps move no USDC and carry no fee.
@@ -1131,18 +1089,6 @@ impl Marketplace {
             .get(&DataKey::Paused)
             .unwrap_or(false)
     }
-
-    /// The registered royalty for a card. An unregistered card reports `bps = 0`
-    /// with `card_token` itself as a placeholder creator (no royalty is taken).
-    pub fn get_royalty_view(env: Env, card_token: Address) -> RoyaltyConfig {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Royalty(card_token.clone()))
-            .unwrap_or(RoyaltyConfig {
-                creator: card_token,
-                bps: 0,
-            })
-    }
 }
 
 // --- helpers ---
@@ -1209,7 +1155,7 @@ fn release_from_custody(
         &listing.seller,
         &listing.creator,
         listing.royalty_bps,
-        &listing.card_token,
+        listing.token_id,
         buyer,
         amount,
     )
@@ -1225,7 +1171,7 @@ fn settle_funds(
     seller: &Address,
     creator: &Address,
     royalty_bps: u32,
-    card_token: &Address,
+    token_id: u32,
     buyer: &Address,
     amount: i128,
 ) -> (i128, i128) {
@@ -1245,7 +1191,7 @@ fn settle_funds(
     if royalty > 0 {
         u.transfer(&contract, creator, &royalty);
     }
-    token::TokenClient::new(env, card_token).transfer(&contract, buyer, &ONE_CARD);
+    CollectionClient::new(env, &collection(env)).transfer(&contract, buyer, &token_id);
     (fee, royalty)
 }
 
@@ -1254,10 +1200,10 @@ fn settle_funds(
 fn refund_to_buyer(env: &Env, listing: &Listing, buyer: &Address, amount: i128) {
     let contract = env.current_contract_address();
     usdc(env).transfer(&contract, buyer, &amount);
-    token::TokenClient::new(env, &listing.card_token).transfer(
+    CollectionClient::new(env, &collection(env)).transfer(
         &contract,
         &listing.seller,
-        &ONE_CARD,
+        &listing.token_id,
     );
 }
 
@@ -1278,6 +1224,12 @@ fn arbiter(env: &Env) -> Address {
     env.storage().instance().get(&DataKey::Arbiter).unwrap()
 }
 
+/// The card collection (NFT) contract every `token_id` resolves against. Set
+/// once at `init` and never changed.
+fn collection(env: &Env) -> Address {
+    env.storage().instance().get(&DataKey::Collection).unwrap()
+}
+
 fn split_fee(env: &Env, amount: i128) -> i128 {
     let bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
     amount * (bps as i128) / BPS_DENOM
@@ -1294,6 +1246,29 @@ fn royalty_for(_env: &Env, listing: &Listing, amount: i128) -> i128 {
         0
     } else {
         split_royalty(amount, listing.royalty_bps)
+    }
+}
+
+/// Snapshot a token's royalty (as registered at mint time on the collection
+/// contract, immutable thereafter) onto a new listing or auction. A token
+/// minted with no royalty reports `(collection_address, 0)` from
+/// `token_royalty`; that placeholder is remapped here to `(seller, 0)` so a
+/// primary/no-royalty sale never pays out to the collection contract itself.
+/// A registered rate above `max_royalty_bps` (fixed at `init`) is clamped down
+/// to the ceiling — the ceiling can no longer reject registration outright
+/// since registration now happens at mint time, outside this contract.
+fn snapshot_royalty(env: &Env, token_id: u32, seller: &Address) -> (Address, u32) {
+    let (creator, royalty_bps) =
+        CollectionClient::new(env, &collection(env)).token_royalty(&token_id);
+    if royalty_bps == 0 {
+        (seller.clone(), 0)
+    } else {
+        let max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxRoyaltyBps)
+            .unwrap_or(0);
+        (creator, royalty_bps.min(max))
     }
 }
 
@@ -1349,12 +1324,9 @@ fn get_swap(env: &Env, id: u32) -> SwapProposal {
 /// card and the USDC sweetener. Shared by `cancel_swap` and `decline_swap`.
 fn return_swap_assets(env: &Env, proposal: &SwapProposal) {
     let contract = env.current_contract_address();
-    for token_addr in proposal.give_tokens.iter() {
-        token::TokenClient::new(env, &token_addr).transfer(
-            &contract,
-            &proposal.proposer,
-            &ONE_CARD,
-        );
+    let collection_client = CollectionClient::new(env, &collection(env));
+    for token_id in proposal.give_tokens.iter() {
+        collection_client.transfer(&contract, &proposal.proposer, &token_id);
     }
     if proposal.usdc_amount > 0 {
         usdc(env).transfer(&contract, &proposal.proposer, &proposal.usdc_amount);

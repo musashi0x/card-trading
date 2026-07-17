@@ -61,8 +61,8 @@ interface WalletContextValue {
    * on-chain `list` tx hash.
    */
   passkeyList: (
-    cardId: string,
-    cardToken: string,
+    cardCopyId: string,
+    tokenId: number,
     priceUsdc: string,
     fulfillment?: FulfillmentMode,
   ) => Promise<string>;
@@ -94,9 +94,10 @@ interface WalletContextValue {
    */
   swapAction: (id: string, action: SwapAction) => Promise<string>;
   /**
-   * Mint (issue) a brand-new card asset owned by the connected wallet, returning
-   * the created card. A passkey wallet receives its copies gaslessly; a classic
-   * wallet signs a one-time trustline so the issuer can deliver them.
+   * Mint a brand-new card owned by the connected wallet, returning the created
+   * card. Copies are unique tokens in the collection contract, minted
+   * server-side — no trustline or extra signature, for classic and passkey
+   * wallets alike.
    */
   mintCard: (meta: Omit<MintCardRequest, 'owner'>) => Promise<Card>;
   /**
@@ -244,8 +245,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const passkeyList = useCallback(
     async (
-      cardId: string,
-      cardToken: string,
+      cardCopyId: string,
+      tokenId: number,
       priceUsdc: string,
       fulfillment: FulfillmentMode = 'digital',
     ): Promise<string> => {
@@ -255,9 +256,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       // the wallet exists to authorize it.
       const deploy = takePendingDeploy();
       if (deploy) await api.passkeyDeploy(deploy);
-      const signedXdr = await signList(wallet, cardToken, priceUsdc, fulfillment);
+      const signedXdr = await signList(wallet, tokenId, priceUsdc, fulfillment);
       const { hash } = await api.passkeyList({
-        cardId,
+        cardCopyId,
         seller: wallet.contractId,
         priceUsdc,
         signedXdr,
@@ -398,16 +399,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     async (meta: Omit<MintCardRequest, 'owner'>): Promise<Card> => {
       if (!address) throw new Error('Connect a wallet first');
       const res = await api.mintCard({ ...meta, owner: address });
-      // A passkey/smart wallet was funded its copies server-side already.
-      if (res.minted) return res.card;
-      // Classic owner: sign the one-time trustline, then claim the copies.
-      if (!res.trustlineXdr || !res.networkPassphrase) {
-        throw new Error('Mint did not return a trustline to sign');
-      }
-      const signed = await signXdr(res.trustlineXdr, address, res.networkPassphrase);
-      await api.submitClassic(signed);
-      const claimed = await api.distributeCard(res.card.id, address);
-      return claimed.card;
+      return res.card;
     },
     [address],
   );

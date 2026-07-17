@@ -2,54 +2,58 @@
 
 Represent each tradable card and the test payment currency as on-chain Stellar assets the settlement contract can move uniformly, with off-chain metadata mirrored in Postgres.
 ## Requirements
-### Requirement: Cards represented as on-chain Stellar assets
-The system SHALL represent each tradable card as a Stellar Asset (identified by asset code and issuer) that is usable through the standard Stellar token interface, so the settlement contract can move cards and payment tokens uniformly.
+### Requirement: Cards represented as on-chain NFTs
 
-#### Scenario: Card maps to a Stellar asset
+Each card copy SHALL be a unique non-fungible token in the platform's global
+collection contract, identified by a `token_id` with a per-card serial.
+
+#### Scenario: Card copy maps to a token
+
 - **WHEN** a card is registered in the system
-- **THEN** it SHALL have a deterministic mapping to a Stellar asset (asset code + issuer)
-- **AND** that asset SHALL be transferable via the standard token interface used by the settlement contract
+- **THEN** each of its copies SHALL map to a unique token id in the collection
+- **AND** each copy SHALL carry a serial equal to its mint order within the
+  card
 
 #### Scenario: Card metadata stored off-chain
+
 - **WHEN** a card is registered
-- **THEN** its display metadata (name, set, rarity, image URL, supply) SHALL be stored in Postgres
-- **AND** the on-chain asset SHALL remain the source of truth for ownership
+- **THEN** its display metadata (name, set, rarity, image URL, supply) SHALL
+  be stored in Postgres
+- **AND** the collection contract SHALL remain the source of truth for
+  per-copy ownership
 
 ### Requirement: Card issuance on testnet
-The system SHALL be able to issue card assets and a test USDC-equivalent stablecoin on Stellar testnet for use in trading.
 
-#### Scenario: Issue a card asset
-- **WHEN** an operator issues a new card asset
-- **THEN** the asset SHALL exist on testnet with a defined supply
-- **AND** the corresponding card record SHALL be created in Postgres with its metadata
+Card copies SHALL be issued by minting on the collection contract,
+server-signed by the platform owner account.
+
+#### Scenario: Issue a card
+
+- **WHEN** an operator mints a new card with `supply` copies
+- **THEN** `supply` tokens SHALL exist in the collection owned by the target
+  wallet
+- **AND** the card record and its per-copy rows SHALL be created in Postgres
 
 #### Scenario: Issue test payment currency
-- **WHEN** the marketplace is initialized
-- **THEN** a test USDC-equivalent asset SHALL be available on testnet for pricing and payment
-- **AND** the UI SHALL clearly label it as test currency
 
-### Requirement: Holder can establish a trustline to a card asset
-The system SHALL allow a user's Stellar account to establish a trustline to a card asset so it can receive that card on settlement.
-
-#### Scenario: Buyer lacks a trustline before purchase
-- **WHEN** a buyer attempts to acquire a card to which their account has no trustline
-- **THEN** the system SHALL prompt the buyer to establish the trustline before settlement
-- **AND** settlement SHALL NOT proceed until the trustline exists
+- **WHEN** the platform provisions test USDC for a wallet
+- **THEN** the existing fungible USDC issuance flow SHALL be used unchanged
 
 ### Requirement: Cards carry a creator account and royalty rate
-The system SHALL record, for each card, an on-chain creator payout account and an immutable royalty rate (basis points) as part of issuance/registration, so the settlement contract can pay the creator on resale.
+
+A card's creator and royalty rate SHALL be registered on the collection at
+mint time and apply to all of its copies.
 
 #### Scenario: Card registered with a creator royalty
-- **WHEN** an operator issues or registers a card with a creator account and royalty rate
-- **THEN** the system SHALL store the creator account and royalty rate alongside the card's metadata in Postgres
-- **AND** SHALL register the same creator and rate in the settlement contract's royalty registry
+
+- **WHEN** a card is minted with a royalty rate above zero
+- **THEN** the collection SHALL record the creator and rate for each minted
+  token
+- **AND** secondary sales through the settlement contract SHALL pay the
+  royalty
 
 #### Scenario: Card registered without a royalty
-- **WHEN** a card is registered with no creator royalty specified
-- **THEN** the system SHALL default its royalty rate to zero
-- **AND** the card SHALL remain tradable, settling as a two-way split
 
-#### Scenario: Creator can receive the royalty asset
-- **WHEN** a card with a non-zero royalty is registered
-- **THEN** the creator account SHALL have a USDC trustline established before that card can settle a sale
-
+- **WHEN** a card is minted with a zero royalty rate
+- **THEN** settlement SHALL treat the sale as a two-way split with no royalty
+  leg

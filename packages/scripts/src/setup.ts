@@ -4,7 +4,7 @@
  * Idempotent-ish setup that:
  *   1. creates + friendbot-funds a platform issuer, a demo merchant, a demo consumer
  *   2. issues a test USDC-equivalent asset and distributes it to the consumer
- *   3. issues the sample card assets and distributes copies to the merchant
+ *   3. (cards are NFTs now — minted via the API after deploy, not issued here)
  *
  * Writes the resulting addresses/secrets to `stellar-accounts.json` at the repo
  * root and prints the env lines to paste into `.env`.
@@ -23,7 +23,7 @@ import {
   Operation,
   TransactionBuilder,
 } from '@stellar/stellar-sdk';
-import { TESTNET, assetCodeForSlug, CARD_FIXTURES } from '@cardmkt/shared';
+import { TESTNET } from '@cardmkt/shared';
 
 const HORIZON = process.env.STELLAR_HORIZON_URL ?? TESTNET.horizonUrl;
 const PASSPHRASE = TESTNET.networkPassphrase;
@@ -125,23 +125,8 @@ async function main() {
     ),
   );
 
-  console.log('[setup] issuing sample cards to the merchant...');
-  const cards: { slug: string; assetCode: string; issuer: string }[] = [];
-  for (const fixture of CARD_FIXTURES) {
-    const assetCode = assetCodeForSlug(fixture.slug);
-    const asset = new Asset(assetCode, platform.publicKey());
-    // Give the merchant a few copies to list.
-    const copies = Math.min(fixture.supply, 3).toString();
-    await trustAndReceive(merchant, platform, asset, copies);
-    cards.push({ slug: fixture.slug, assetCode, issuer: platform.publicKey() });
-    console.log(`  • ${assetCode} (${fixture.name}) x${copies} -> merchant`);
-  }
-
-  // Give the creator a couple of copies of a royalty-bearing card so the e2e can
-  // exercise a primary sale (seller == creator -> no royalty taken).
-  const primaryCard = new Asset(assetCodeForSlug('VOID'), platform.publicKey());
-  await trustAndReceive(creator, platform, primaryCard, '2');
-  console.log('  • VOID x2 -> creator (for primary-sale demo)');
+  // Cards are NFTs in the collection contract now — they are minted through
+  // the API (`demo.ts` / `POST /api/cards/mint`) after deploy, not issued here.
 
   const out = {
     network: 'testnet',
@@ -153,7 +138,6 @@ async function main() {
     marketMaker: { publicKey: marketMaker.publicKey(), secret: marketMaker.secret() },
     xlmBuyer: { publicKey: xlmBuyer.publicKey(), secret: xlmBuyer.secret() },
     usdc: { code: USDC_CODE, issuer: platform.publicKey() },
-    cards,
   };
   // Write to the repo root so deploy/seed (run from other packages) find it.
   const outPath = resolve(process.cwd(), '../..', 'stellar-accounts.json');

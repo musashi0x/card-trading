@@ -6,6 +6,7 @@ import * as offers from '../data/offers.js';
 import * as orders from '../data/orders.js';
 import * as trades from '../data/trades.js';
 import * as auctions from '../data/auctions.js';
+import * as cardCopies from '../data/card-copies.js';
 
 const contract = new MarketplaceContract(env.contractId);
 
@@ -46,6 +47,7 @@ const reconcilers: Record<TradeAction, (c: ReconcileCtx) => Promise<void>> = {
       await offers.markSettled(c.refId);
       await listings.markSold(offerRow.listingId);
       if (row) {
+        await cardCopies.setOwner(row.copy.id, offerRow.buyer);
         await trades.recordTrade(row, {
           buyer: offerRow.buyer,
           hash: c.hash,
@@ -58,6 +60,7 @@ const reconcilers: Record<TradeAction, (c: ReconcileCtx) => Promise<void>> = {
     const row = await listings.listingWithCard(c.refId);
     if (row) {
       await listings.markSold(c.refId);
+      await cardCopies.setOwner(row.copy.id, c.actor);
       await trades.recordTrade(row, {
         buyer: c.actor,
         hash: c.hash,
@@ -81,16 +84,18 @@ const reconcilers: Record<TradeAction, (c: ReconcileCtx) => Promise<void>> = {
     await orders.markDisputed(c.refId);
   },
   confirm_receipt: async (c) => {
-    const { order, card } = await orders.orderWithListingCard(c.refId);
+    const { order, card, copy } = await orders.orderWithListingCard(c.refId);
     if (order.status !== 'released') {
       await orders.markReleased(c.refId, c.hash);
+      await cardCopies.setOwner(copy.id, order.buyer);
       await trades.recordOrderTrade(order, card, c.hash);
     }
   },
   claim_timeout: async (c) => {
-    const { order, card } = await orders.orderWithListingCard(c.refId);
+    const { order, card, copy } = await orders.orderWithListingCard(c.refId);
     if (order.status !== 'released') {
       await orders.markReleased(c.refId, c.hash);
+      await cardCopies.setOwner(copy.id, order.buyer);
       await trades.recordOrderTrade(order, card, c.hash);
     }
   },
@@ -107,7 +112,7 @@ const reconcilers: Record<TradeAction, (c: ReconcileCtx) => Promise<void>> = {
     await auctions.applyBid(c.refId, c.hash);
   },
   settle_auction: async (c) => {
-    const { auction, card } = await auctions.auctionWithCard(c.refId);
+    const { auction, card, copy } = await auctions.auctionWithCard(c.refId);
     if (auction.status !== 'open') return;
     // The chain is authoritative for the final outcome — a bid placed outside this
     // app may have changed the winner/high bid since the mirror last synced. Read
@@ -131,6 +136,9 @@ const reconcilers: Record<TradeAction, (c: ReconcileCtx) => Promise<void>> = {
     }
     if (settled) {
       await auctions.markSettled(c.refId, c.hash);
+      if (highBidder) {
+        await cardCopies.setOwner(copy.id, highBidder);
+      }
       await trades.recordAuctionTrade({ seller: auction.seller, highBidder, highBidUsdc }, card, c.hash);
     } else {
       await auctions.markClosed(c.refId, 'no_winner', c.hash);
