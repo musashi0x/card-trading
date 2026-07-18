@@ -1,4 +1,4 @@
-# ✦ StellarCards — non-custodial trading card marketplace
+# ✦ TopDeck — non-custodial trading card marketplace
 
 A trading card marketplace where **the payment flow is the product**. Cards are
 on-chain Stellar assets; trades settle through a single Soroban escrow/settlement
