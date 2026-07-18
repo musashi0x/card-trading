@@ -7,6 +7,19 @@ CREATE TABLE IF NOT EXISTS "card_copies" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
+-- Legacy rows predate the NFT-copy model and have no card_copy to point at,
+-- so the NOT NULL columns below cannot be added while they exist. Purge them
+-- (and their dependents) — the fungible-asset marketplace data is unusable
+-- under the new model anyway.
+DELETE FROM "bids";--> statement-breakpoint
+DELETE FROM "auctions";--> statement-breakpoint
+DELETE FROM "watchlist";--> statement-breakpoint
+DELETE FROM "reviews" WHERE "trade_id" IS NOT NULL;--> statement-breakpoint
+DELETE FROM "trades";--> statement-breakpoint
+DELETE FROM "orders";--> statement-breakpoint
+DELETE FROM "offers";--> statement-breakpoint
+DELETE FROM "listings";--> statement-breakpoint
+DELETE FROM "trade_proposals";--> statement-breakpoint
 ALTER TABLE "auctions" ADD COLUMN "card_copy_id" uuid NOT NULL;--> statement-breakpoint
 ALTER TABLE "listings" ADD COLUMN "card_copy_id" uuid NOT NULL;--> statement-breakpoint
 ALTER TABLE "trade_proposals" ADD COLUMN "give_card_copy_ids" text[] NOT NULL;--> statement-breakpoint
